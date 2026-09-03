@@ -1,0 +1,83 @@
+{
+  "_comment": "Expected result of the LLM extraction for two_column_ru.pdf, shaped like app.schemas.llm.ProfileExtraction. MAINTAINED BY HAND — scripts/make_resume_fixtures.py generates the PDF but never touches this file. It is deliberately not exhaustive: the point is a machine-checkable assertion that the narrow sidebar (contacts, skills, languages) did not get interleaved with the wide work-experience column. Every company appears once, with its own dates and is_current flag, and the skills list is complete and in sidebar order — including the near-duplicate pairs Python/Python 3 and Postgres/PostgreSQL, which must survive extraction unmerged and are canonicalised later. Note the deliberate overlap: the freelance role at Студия «Пиксель-Мираж» (2021-06..2023-12) runs across both ТОО «Вымпел-Софт» and ООО «Орбита-Технологии», so summing durations overstates the total; the union is 2018-04..today. Tests must strip this _comment before validating, because ProfileExtraction forbids extra fields.",
+
+  "full_name": "Дмитрий Вымыслов",
+  "headline": "Senior Python Developer",
+  "city": "Астана",
+  "country": "KZ",
+  "relocation": false,
+  "remote_pref": "hybrid",
+  "salary_expectation": 1800000.0,
+  "salary_currency": "KZT",
+
+  "work_periods": [
+    {
+      "company": "ООО «Орбита-Технологии»",
+      "title": "Senior Python Developer",
+      "start": "2022-03",
+      "end": null,
+      "is_current": true,
+      "stack": ["Python 3", "FastAPI", "PostgreSQL", "Redis", "Kafka", "Docker"],
+      "domains": []
+    },
+    {
+      "company": "Студия «Пиксель-Мираж»",
+      "title": "Backend-разработчик",
+      "start": "2021-06",
+      "end": "2023-12",
+      "is_current": false,
+      "stack": ["Django", "Postgres", "Docker"],
+      "domains": []
+    },
+    {
+      "company": "ТОО «Вымпел-Софт»",
+      "title": "Python-разработчик",
+      "start": "2019-09",
+      "end": "2022-02",
+      "is_current": false,
+      "stack": ["Python", "Django", "PostgreSQL", "Redis"],
+      "domains": []
+    },
+    {
+      "company": "ООО «Кибер-Пасека»",
+      "title": "Junior Python Developer",
+      "start": "2018-04",
+      "end": "2019-08",
+      "is_current": false,
+      "stack": [],
+      "domains": []
+    }
+  ],
+
+  "skills": [
+    { "name": "Python", "mentioned_in": "skills_block" },
+    { "name": "Python 3", "mentioned_in": "skills_block" },
+    { "name": "FastAPI", "mentioned_in": "skills_block" },
+    { "name": "Django", "mentioned_in": "skills_block" },
+    { "name": "Postgres", "mentioned_in": "skills_block" },
+    { "name": "PostgreSQL", "mentioned_in": "skills_block" },
+    { "name": "SQLAlchemy", "mentioned_in": "skills_block" },
+    { "name": "Redis", "mentioned_in": "skills_block" },
+    { "name": "Kafka", "mentioned_in": "skills_block" },
+    { "name": "Docker", "mentioned_in": "skills_block" },
+    { "name": "Kubernetes", "mentioned_in": "skills_block" },
+    { "name": "Pytest", "mentioned_in": "skills_block" },
+    { "name": "Git", "mentioned_in": "skills_block" },
+    { "name": "CI/CD", "mentioned_in": "skills_block" }
+  ],
+
+  "languages": [
+    { "code": "ru", "level": "native" },
+    { "code": "en", "level": "B2" },
+    { "code": "kk", "level": "B1" }
+  ],
+
+  "education": [
+    {
+      "institution": "Северный политехнический институт",
+      "degree": "бакалавр",
+      "field": "Информационные системы",
+      "end_year": 2018
+    }
+  ]
+}
