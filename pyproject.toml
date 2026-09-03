@@ -20,6 +20,7 @@ dependencies = [
     "pgvector>=0.3.6",
     "python-multipart>=0.0.20",
     "anthropic>=0.42",
+    "uuid-utils>=0.17.0",
 ]
 
 [project.optional-dependencies]
@@ -55,7 +56,7 @@ extend-exclude = ["backend/alembic/versions"]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["app"]
+known-first-party = ["app", "factories", "helpers"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
@@ -89,6 +90,10 @@ addopts = [
     "--cov=app",
     "--cov-report=term-missing",
 ]
+# An xfail that starts passing is a failure: the bug it documented is gone
+# and the marker is now lying. Combined with the CI skip guard in
+# conftest.py this makes xfail unusable as a place to park a known bug.
+xfail_strict = true
 markers = [
     "db: test requires a live PostgreSQL database with the pgvector extension",
 ]

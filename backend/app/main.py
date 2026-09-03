@@ -12,7 +12,8 @@ from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 from app.core.middleware import RequestIDMiddleware
-from app.db.session import dispose_engine
+from app.db.checks import verify_embedding_dimension
+from app.db.session import dispose_engine, session_factory
 from app.services.health import service_version
 
 logger = get_logger(__name__)
@@ -27,6 +28,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         environment=settings.environment,
         version=service_version(),
     )
+    # Cheap, and the alternative is discovering the mismatch on the first
+    # embedding write, in a different phase of the project.
+    async with session_factory() as session:
+        await verify_embedding_dimension(session)
     try:
         yield
     finally:

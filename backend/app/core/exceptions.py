@@ -91,6 +91,18 @@ class ParsingError(AppError):
     problem_type = "parsing-error"
 
 
+class SchemaMismatchError(AppError):
+    """The live database schema disagrees with what the code assumes.
+
+    Raised at startup, not per request: the process refuses to serve rather
+    than failing later on a write nobody is watching.
+    """
+
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    title = "Database schema mismatch"
+    problem_type = "schema-mismatch"
+
+
 class LLMError(AppError):
     """The LLM call failed, or returned something the schema rejects twice in a row."""
 

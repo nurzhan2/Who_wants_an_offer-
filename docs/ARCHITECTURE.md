@@ -103,6 +103,7 @@ vacancy
   description_raw, description_md, seniority, min_years,
   city, country, remote enum(no|hybrid|full),
   salary_min, salary_max, currency, is_gross, period,
+  salary_min_normalized, salary_max_normalized, salary_normalized_at,
   employment_type, language, published_at, expires_at,
   embedding vector(1024), first_seen_at, last_seen_at, is_active
 
@@ -129,8 +130,54 @@ pipeline_run
   found, new, updated, errors jsonb
 ```
 
-Индексы: `vacancy.embedding` — HNSW cosine; `vacancy(published_at desc)`;
-`match(profile_id, score desc)`; GIN на `vacancy.description_raw` для FTS.
+### Решения по типам
+
+- **Деньги — `Numeric(12,2)`, никогда не float.** Ошибка двоичного float
+  накапливается при конвертации валют.
+- **Все скоры — одна шкала 0–100, `Numeric(5,2)`**, включая компонентные
+  (в `docs/MATCHING.md` они описаны как доли 0..1 — нормализуются при записи).
+- **`currency`, `country`, `language` — строки фиксированной длины**, не native
+  enum: списки пополняются, а `ALTER TYPE` в PostgreSQL — источник проблем при
+  миграции. Валидация ISO 4217 / 3166 / 639 на уровне Pydantic.
+- **Сортировка и фильтр по зарплате идут по `salary_*_normalized`** (месячный
+  эквивалент в USD), никогда по объявленной сумме: `500000 ₸` иначе окажется
+  «выше» `4000 $`. Колонки заполняются на этапе нормализации; вакансии без
+  известного курса просто уезжают в конец выдачи, а не сортируются неверно.
+- **Все enum'ы — native-типы PostgreSQL.** Alembic autogenerate их не создаёт и
+  не удаляет, поэтому `CREATE TYPE` / `DROP TYPE` в миграциях пишутся явно, а
+  в моделях стоит `create_type=False`.
+- **`vacancy.search_vector` — generated column** с конфигурацией `'simple'`.
+  Вакансии смешанные ru/en, а `to_tsvector(regconfig, text)` не IMMUTABLE,
+  поэтому выбрать конфигурацию по языку строки в generated-колонке нельзя.
+  Стемминг по языку, если понадобится, — отдельный expression-индекс.
+
+### Индексы
+
+Индексы, которые нельзя выразить в метаданных ORM, пишутся сырым SQL и носят
+префикс `ix_pg_`; `env.py` исключает этот префикс из autogenerate, иначе он
+предлагал бы удалять их при каждой генерации.
+
+| Индекс | Тип |
+| --- | --- |
+| `ix_pg_vacancy_embedding_hnsw` | HNSW, `vector_cosine_ops`, m=16, ef_construction=64 |
+| `ix_pg_candidate_profile_embedding_hnsw` | HNSW, те же параметры |
+| `ix_pg_vacancy_search_vector_gin` | GIN по generated-колонке |
+| `ix_pg_vacancy_published_at_active` | btree `(published_at DESC NULLS LAST, id DESC) WHERE is_active` |
+| `ix_pg_vacancy_salary_normalized_active` | btree `(salary_min_normalized DESC NULLS LAST, id DESC) WHERE is_active` |
+| `ix_pg_match_profile_score` | btree `(profile_id, score DESC, vacancy_id DESC)` |
+
+### Пагинация
+
+Список вакансий — **keyset, без `OFFSET`**. Курсор кодирует пару
+`(значение сортировки, id)` в base64. Два обязательных условия, без которых
+баг не воспроизводится на аккуратных данных:
+
+1. **Tiebreaker по `id`.** Сотни вакансий имеют одинаковый скор; без
+   составного сравнения `(score, id)` записи пропадают между страницами.
+2. **Отдельная ветка для NULL.** `score`, `published_at` и
+   `salary_min_normalized` nullable, а `value < NULL` — это NULL, то есть
+   false. Порядок — `NULLS LAST`, и курсор несёт явный флаг «мы уже в
+   NULL-хвосте».
 
 ## API (v1)
 
