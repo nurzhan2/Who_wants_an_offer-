@@ -42,7 +42,7 @@ skills, the experience delta and the LLM's verdict. See
 | Layer | Choice |
 | --- | --- |
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2.0 (async), Alembic, Pydantic v2 |
-| DB | PostgreSQL 16 + `pgvector` |
+| DB | PostgreSQL 17 + `pgvector` |
 | Queue / schedule | APScheduler (v1) → Celery + Redis (v2) |
 | Embeddings | `BAAI/bge-m3` via sentence-transformers (multilingual RU/EN/KZ) |
 | LLM | Anthropic Claude (resume extraction, re-rank, cover letters) |
@@ -53,7 +53,7 @@ skills, the experience delta and the LLM's verdict. See
 
 ```bash
 cp .env.example .env             # fill ANTHROPIC_API_KEY at minimum
-docker compose up -d db          # PostgreSQL 16 + pgvector
+docker compose up -d db          # PostgreSQL 17 + pgvector, host port 5436
 uv sync                          # create .venv from uv.lock
 uv run pre-commit install
 uv run alembic upgrade head      # from phase 1 on

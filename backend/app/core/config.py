@@ -14,7 +14,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 Environment = Literal["development", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
-DEV_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/offers"
+#: Port 5436 is the docker-compose stack. A local PostgreSQL on 5432 would
+#: answer too, but without pgvector — a confusing failure much later.
+DEV_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5436/offers"
 
 
 class Settings(BaseSettings):

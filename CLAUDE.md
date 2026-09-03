@@ -11,7 +11,7 @@
 ## Стек — не менять без явного указания
 
 - Python 3.12, FastAPI, SQLAlchemy 2.0 **async**, Alembic, Pydantic v2
-- PostgreSQL 16 + pgvector. SQLite не поддерживается (нужен vector index)
+- PostgreSQL 17 + pgvector (Docker, host-порт 5436). SQLite не поддерживается
 - `httpx.AsyncClient` для HTTP. `requests` запрещён
 - `structlog` для логов. `print()` запрещён вне скриптов
 - Менеджер зависимостей: `uv`. Конфиг проекта — `pyproject.toml`

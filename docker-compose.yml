@@ -2,13 +2,17 @@ name: who-wants-an-offer
 
 services:
   db:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg17
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-offers}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      # Host port is deliberately out of the way. 5432-5435 are commonly taken
+      # by a local PostgreSQL install or another project's container, and a
+      # collision there means silently talking to a server without pgvector.
+      # Override with POSTGRES_PORT if 5436 is taken too.
+      - "${POSTGRES_PORT:-5436}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
