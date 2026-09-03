@@ -33,6 +33,7 @@ from app.db.enums import (
     ApplicationStatus,
     EmploymentType,
     MatchBucket,
+    ParseStatus,
     PipelineRunStatus,
     RemoteType,
     SalaryPeriod,
@@ -164,6 +165,7 @@ ENUM_LOCATIONS: dict[str, tuple[str, str]] = {
     "match_bucket": ("match", "bucket"),
     "application_status": ("application", "status"),
     "pipeline_run_status": ("pipeline_run", "status"),
+    "parse_status": ("candidate_profile", "parse_status"),
 }
 
 ENUM_CASES = [
@@ -180,6 +182,8 @@ async def insert_row_carrying(session: AsyncSession, member: StrEnum) -> UUID:
         row: Any = ProfileSkill(profile_id=profile.id, canonical_name="python", level=member)
     elif isinstance(member, Seniority):
         row = CandidateProfile(seniority=member)
+    elif isinstance(member, ParseStatus):
+        row = CandidateProfile(parse_status=member)
     elif isinstance(member, RemoteType):
         row = make_vacancy_row(remote=member)
     elif isinstance(member, EmploymentType):

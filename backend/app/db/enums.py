@@ -86,6 +86,20 @@ class ApplicationStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class ParseStatus(StrEnum):
+    """Where a resume is in the extraction pipeline.
+
+    Parsing runs in the background, so the API answers before it finishes and
+    the client polls this. A ``pending`` row older than the configured timeout
+    is reported as ``failed``: background tasks do not survive a restart, and a
+    profile stuck in ``pending`` forever is worse than an honest failure.
+    """
+
+    PENDING = "pending"
+    READY = "ready"
+    FAILED = "failed"
+
+
 class PipelineRunStatus(StrEnum):
     """Outcome of one source run inside a pipeline execution."""
 
@@ -104,6 +118,7 @@ ENUM_TYPE_NAMES: dict[str, type[StrEnum]] = {
     "salary_period": SalaryPeriod,
     "match_bucket": MatchBucket,
     "application_status": ApplicationStatus,
+    "parse_status": ParseStatus,
     "pipeline_run_status": PipelineRunStatus,
 }
 

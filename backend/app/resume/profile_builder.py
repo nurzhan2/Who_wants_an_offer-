@@ -1,0 +1,237 @@
+"""Orchestration: an uploaded file becomes a stored, embedded profile.
+
+The whole pipeline in one place, so the order and the failure handling are
+readable together:
+
+    extract → LLM (the PDF itself, or text) → enrich → persist → embed
+
+Two things this module is careful about.
+
+**PDFs are handed to the model as documents.** The text pdfplumber produces is
+stored for full-text search and never sent to the model, because resumes are
+usually two-column and line-oriented extraction reads straight across them.
+
+**Nothing here logs resume content.** Every log line carries the profile id, the
+format, sizes and durations. The same goes for ``parse_error``, which reaches
+both the API and the logs.
+"""
+
+import time
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.exceptions import AppError
+from app.core.logging import get_logger
+from app.db.enums import ParseStatus
+from app.db.repositories.profile import ProfileRepository
+from app.llm.client import Document, Effort, LLMClient, LLMTier
+from app.llm.pricing import TokenUsage
+from app.matching import embeddings
+from app.resume import enricher
+from app.resume.extractor import ExtractedDocument
+from app.schemas.llm import ProfileExtraction
+from app.schemas.profile import CandidateProfileCreate, SkillCreate
+
+logger = get_logger(__name__)
+
+#: Resume extraction runs once per upload and its quality decides everything
+#: downstream, so it uses the strong model at high effort. The hot path — post
+#: parsing, re-rank — chooses its own, much cheaper, settings.
+EXTRACTION_EFFORT: Effort = "high"
+
+
+@dataclass(frozen=True, slots=True)
+class BuildResult:
+    """What building a profile produced, for logs and for the report."""
+
+    profile_id: UUID
+    status: ParseStatus
+    skill_count: int
+    total_years: float
+    usage: TokenUsage
+    cost_usd: float | None
+    duration_seconds: float
+    warnings: tuple[str, ...]
+
+
+def _documents_for(document: ExtractedDocument) -> tuple[Document, ...]:
+    """The file itself, when the model can read it better than we can.
+
+    PDF only. DOCX and plain text have no column problem worth solving, and
+    sending them as text keeps the request small.
+    """
+    if document.source_format == "pdf":
+        return (Document(content=document.file_bytes, media_type="application/pdf"),)
+    return ()
+
+
+def _text_for(document: ExtractedDocument) -> str:
+    """The prompt variable carrying the resume, for non-PDF formats."""
+    if document.source_format == "pdf":
+        return "(the resume is attached as a PDF document above)"
+    return document.raw_text
+
+
+async def extract_profile(
+    document: ExtractedDocument,
+    *,
+    client: LLMClient,
+    today: date,
+) -> tuple[ProfileExtraction, TokenUsage, float | None]:
+    """Ask the model to read the resume."""
+    result = await client.complete_json(
+        "extract_profile",
+        ProfileExtraction,
+        tier=LLMTier.HEAVY,
+        effort=EXTRACTION_EFFORT,
+        variables={"today": today.isoformat(), "resume_text": _text_for(document)},
+        documents=_documents_for(document),
+    )
+    return result.value, result.usage, result.cost_usd
+
+
+def to_profile_create(
+    extraction: ProfileExtraction,
+    enriched: enricher.EnrichedProfile,
+    document: ExtractedDocument,
+) -> CandidateProfileCreate:
+    """Assemble what gets written, taking experience from the computation.
+
+    ``total_years`` comes from ``enriched``, never from
+    ``extraction.stated_total_years``. That field records the resume's own
+    claim so the two can be compared; using it would reintroduce the very bug
+    the dates module exists to prevent.
+    """
+    return CandidateProfileCreate(
+        name=extraction.full_name,
+        headline=extraction.headline,
+        seniority=enriched.seniority,
+        total_years=enriched.total_years,
+        summary=extraction.summary,
+        locations=[extraction.city] if extraction.city else [],
+        relocation=bool(extraction.relocation),
+        remote_pref=extraction.remote_pref,
+        salary_min=(
+            None
+            if extraction.salary_expectation is None
+            else round(extraction.salary_expectation, 2)
+        ),
+        salary_currency=extraction.salary_currency,
+        languages=[language.model_dump() for language in extraction.languages],
+        raw_text=document.raw_text,
+        skills=[
+            SkillCreate(
+                canonical_name=skill.canonical_name,
+                raw_names=list(skill.raw_names),
+                years=skill.years,
+                level=skill.level,
+                last_used_year=skill.last_used_year,
+            )
+            for skill in enriched.skills
+        ],
+    )
+
+
+async def build_profile(
+    document: ExtractedDocument,
+    *,
+    session: AsyncSession,
+    profile_id: UUID,
+    client: LLMClient,
+    today: date | None = None,
+) -> BuildResult:
+    """Fill in a profile row that already exists in ``pending``.
+
+    The row is created by the upload endpoint so the client has an id to poll
+    immediately. Everything here happens in the caller's transaction: a partial
+    profile is worse than none, so either the whole thing lands or the row is
+    marked failed with a reason.
+    """
+    started = time.perf_counter()
+    today = today or datetime.now(UTC).date()
+    profiles = ProfileRepository(session)
+    usage = TokenUsage()
+    cost: float | None = None
+
+    try:
+        extraction, usage, cost = await extract_profile(document, client=client, today=today)
+        enriched = enricher.enrich(extraction, today=today)
+        payload = to_profile_create(extraction, enriched, document)
+
+        await profiles.update_from_extraction(profile_id, payload)
+        await profiles.replace_skills(profile_id, payload.skills)
+
+        vector = await embeddings.encode_profile(
+            headline=payload.headline,
+            skills=[skill.canonical_name for skill in enriched.skills],
+            titles=list(enriched.titles),
+            domains=list(enriched.domains),
+        )
+        await profiles.set_embedding(profile_id, vector)
+        # Order matters: activate this one, then retire the rest. The row was
+        # created inactive so a half-parsed profile could never be scored
+        # against, and this is the only place that undoes that.
+        await profiles.activate(profile_id)
+        await profiles.deactivate_others(profile_id)
+        await profiles.set_parse_status(profile_id, ParseStatus.READY)
+
+    except AppError as exc:
+        # Every expected failure in this pipeline is an AppError, and the
+        # handler catches the base class rather than a list of subclasses on
+        # purpose. Listing ParsingError and LLMError individually silently
+        # excluded EmbeddingError — a sibling, not a subclass — so a missing
+        # [embeddings] extra left the profile pending for ever with no reason
+        # recorded. A new failure mode must not be able to reintroduce that.
+        # Anything that is not an AppError is a bug and is re-raised for the
+        # caller to log with its traceback.
+        await profiles.set_parse_status(profile_id, ParseStatus.FAILED, error=str(exc))
+        duration = time.perf_counter() - started
+        logger.warning(
+            "resume.parse_failed",
+            profile_id=str(profile_id),
+            reason=type(exc).__name__,
+            source_format=document.source_format,
+            duration_seconds=round(duration, 2),
+            cost_usd=cost,
+        )
+        return BuildResult(
+            profile_id=profile_id,
+            status=ParseStatus.FAILED,
+            skill_count=0,
+            total_years=0.0,
+            usage=usage,
+            cost_usd=cost,
+            duration_seconds=duration,
+            warnings=(str(exc),),
+        )
+
+    duration = time.perf_counter() - started
+    logger.info(
+        "resume.parsed",
+        profile_id=str(profile_id),
+        source_format=document.source_format,
+        page_count=document.page_count,
+        size_bytes=document.size_bytes,
+        skills=len(enriched.skills),
+        total_years=float(enriched.total_years),
+        stated_years_delta=(
+            None if enriched.stated_years_delta is None else float(enriched.stated_years_delta)
+        ),
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cost_usd=cost,
+        duration_seconds=round(duration, 2),
+    )
+    return BuildResult(
+        profile_id=profile_id,
+        status=ParseStatus.READY,
+        skill_count=len(enriched.skills),
+        total_years=float(enriched.total_years),
+        usage=usage,
+        cost_usd=cost,
+        duration_seconds=duration,
+        warnings=enriched.warnings,
+    )

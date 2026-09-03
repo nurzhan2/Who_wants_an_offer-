@@ -1,0 +1,354 @@
+# Minimal skill dictionary: canonical name -> group + the spellings that mean it.
+#
+# Loaded by app.resume.skills. Deliberately small and flat — the full
+# dictionary with a relatedness graph lands in phase 4 and replaces this file,
+# not its callers.
+#
+# Rules for editing:
+#   * the key is the canonical name, always lower case;
+#   * `aliases` holds spellings that are NOT reachable by normalisation
+#     (casefold, then drop whitespace, ".", "-", "_"). "Node.JS" already folds
+#     onto `nodejs`, so listing it buys nothing - but "React.js" folds onto
+#     `reactjs`, which the `react` entry has to spell out;
+#   * no spelling may be claimed by two different skills — the loader refuses
+#     the file, because such a dictionary would canonicalise by file order;
+#   * a canonical name must appear once - YAML keeps only the last of two
+#     identical keys and the earlier entry's aliases vanish without a word;
+#   * Cyrillic aliases are the ones that actually turn up on hh.ru, not
+#     transliterations invented at the desk.
+
+# ── Languages ─────────────────────────────────────────────────────────
+python:
+  group: language
+  aliases: [python3, py, питон, пайтон]
+go:
+  group: language
+  aliases: [golang, голанг]
+java:
+  group: language
+  aliases: [джава, ява]
+javascript:
+  group: language
+  aliases: [js, ecmascript, джаваскрипт, яваскрипт]
+typescript:
+  group: language
+  aliases: [ts, тайпскрипт]
+"c++":
+  group: language
+  aliases: [cpp, "c plus plus", "си плюс плюс", плюсы]
+"c#":
+  group: language
+  aliases: [csharp, "c sharp", шарп]
+c:
+  group: language
+  aliases: ["си"]
+php:
+  group: language
+  aliases: [пхп]
+ruby:
+  group: language
+  aliases: [руби, рубин]
+kotlin:
+  group: language
+  aliases: [котлин]
+swift:
+  group: language
+  aliases: [свифт]
+scala:
+  group: language
+  aliases: [скала]
+rust:
+  group: language
+  aliases: [раст]
+sql:
+  group: language
+  aliases: [скуль, эскюэль]
+bash:
+  group: language
+  aliases: [sh, shell, "shell scripting", баш]
+
+# ── Backend frameworks and libraries ──────────────────────────────────
+django:
+  group: backend
+  aliases: [джанго, drf, "django rest framework"]
+fastapi:
+  group: backend
+  aliases: [фастапи]
+flask:
+  group: backend
+  aliases: [фласк]
+spring:
+  group: backend
+  aliases: ["spring boot", "spring framework", спринг]
+nodejs:
+  group: backend
+  aliases: [node, нода, ноджс]
+express:
+  group: backend
+  aliases: [expressjs, экспресс]
+nestjs:
+  group: backend
+  aliases: [nest]
+aiohttp:
+  group: backend
+  aliases: []
+asyncio:
+  group: backend
+  aliases: ["асинхронное программирование"]
+celery:
+  group: backend
+  aliases: [селери]
+sqlalchemy:
+  group: backend
+  aliases: [алхимия]
+graphql:
+  group: backend
+  aliases: [графкуэль]
+grpc:
+  group: backend
+  aliases: []
+rest:
+  group: backend
+  aliases: ["rest api", restful, "рест апи"]
+
+# ── Frontend ──────────────────────────────────────────────────────────
+react:
+  group: frontend
+  aliases: [reactjs, реакт]
+vue:
+  group: frontend
+  aliases: [vuejs, "vue 3", вью]
+angular:
+  group: frontend
+  aliases: [angularjs, ангуляр]
+svelte:
+  group: frontend
+  aliases: [sveltejs]
+nextjs:
+  group: frontend
+  aliases: [next]
+html:
+  group: frontend
+  aliases: [html5, вёрстка, верстка]
+css:
+  group: frontend
+  aliases: [css3]
+sass:
+  group: frontend
+  aliases: [scss]
+tailwind:
+  group: frontend
+  aliases: ["tailwind css", тейлвинд]
+redux:
+  group: frontend
+  aliases: [редакс]
+webpack:
+  group: frontend
+  aliases: [вебпак]
+vite:
+  group: frontend
+  aliases: []
+
+# ── Databases and stores ──────────────────────────────────────────────
+postgresql:
+  group: database
+  aliases: [postgres, pg, psql, постгрес, "postgre sql"]
+mysql:
+  group: database
+  aliases: ["my sql", майэскуэль]
+sqlite:
+  group: database
+  aliases: []
+mssql:
+  group: database
+  aliases: ["ms sql", "sql server", "microsoft sql server"]
+oracle:
+  group: database
+  aliases: ["oracle db", "oracle database"]
+mongodb:
+  group: database
+  aliases: [mongo, монго]
+redis:
+  group: database
+  aliases: [редис]
+clickhouse:
+  group: database
+  aliases: [кликхаус]
+elasticsearch:
+  group: database
+  aliases: [elastic, эластик]
+cassandra:
+  group: database
+  aliases: [кассандра]
+
+# ── Messaging ─────────────────────────────────────────────────────────
+kafka:
+  group: queue
+  aliases: ["apache kafka", кафка]
+rabbitmq:
+  group: queue
+  aliases: [rabbit, "rabbit mq", раббит]
+
+# ── Infrastructure ────────────────────────────────────────────────────
+docker:
+  group: devops
+  aliases: [докер]
+"docker compose":
+  group: devops
+  aliases: []
+kubernetes:
+  group: devops
+  aliases: [k8s, k8, кубернетес, кубер]
+helm:
+  group: devops
+  aliases: []
+terraform:
+  group: devops
+  aliases: [терраформ]
+ansible:
+  group: devops
+  aliases: [ансибл]
+nginx:
+  group: devops
+  aliases: [энджинкс]
+prometheus:
+  group: devops
+  aliases: [прометей]
+grafana:
+  group: devops
+  aliases: [графана]
+cicd:
+  group: devops
+  aliases: ["ci/cd", "continuous integration", "непрерывная интеграция"]
+linux:
+  group: os
+  aliases: [линукс, "gnu/linux"]
+
+# ── Version control and CI systems ────────────────────────────────────
+git:
+  group: tool
+  aliases: [гит]
+github:
+  group: tool
+  aliases: [гитхаб]
+gitlab:
+  group: tool
+  aliases: [гитлаб]
+"github actions":
+  group: ci
+  aliases: ["gh actions"]
+"gitlab ci":
+  group: ci
+  aliases: ["gitlab ci/cd"]
+jenkins:
+  group: ci
+  aliases: [дженкинс]
+teamcity:
+  group: ci
+  aliases: []
+
+# ── Cloud ─────────────────────────────────────────────────────────────
+aws:
+  group: cloud
+  aliases: ["amazon web services", амазон]
+gcp:
+  group: cloud
+  aliases: ["google cloud", "google cloud platform"]
+azure:
+  group: cloud
+  aliases: ["microsoft azure", "ms azure"]
+"yandex cloud":
+  group: cloud
+  aliases: ["яндекс облако"]
+s3:
+  group: cloud
+  aliases: []
+
+# ── Data ──────────────────────────────────────────────────────────────
+pandas:
+  group: data
+  aliases: [пандас]
+numpy:
+  group: data
+  aliases: [нампай]
+airflow:
+  group: data
+  aliases: ["apache airflow", эйрфлоу]
+spark:
+  group: data
+  aliases: ["apache spark", pyspark, спарк]
+dbt:
+  group: data
+  aliases: []
+etl:
+  group: data
+  aliases: ["etl процессы"]
+tableau:
+  group: data
+  aliases: [табло]
+"power bi":
+  group: data
+  aliases: []
+
+# ── Machine learning ──────────────────────────────────────────────────
+"machine learning":
+  group: ml
+  aliases: [ml, "машинное обучение", мл]
+pytorch:
+  group: ml
+  aliases: [torch]
+tensorflow:
+  group: ml
+  aliases: []
+"scikit-learn":
+  group: ml
+  aliases: [sklearn]
+opencv:
+  group: ml
+  aliases: []
+nlp:
+  group: ml
+  aliases: ["natural language processing", "обработка естественного языка"]
+llm:
+  group: ml
+  aliases: ["large language models", "большие языковые модели"]
+
+# ── Testing ───────────────────────────────────────────────────────────
+pytest:
+  group: testing
+  aliases: [пайтест]
+unittest:
+  group: testing
+  aliases: []
+selenium:
+  group: testing
+  aliases: [селениум]
+playwright:
+  group: testing
+  aliases: []
+postman:
+  group: testing
+  aliases: [постман]
+
+# ── Ways of working ───────────────────────────────────────────────────
+agile:
+  group: practice
+  aliases: [эджайл, "гибкие методологии"]
+scrum:
+  group: practice
+  aliases: [скрам]
+microservices:
+  group: practice
+  aliases: [микросервисы, "микросервисная архитектура", "microservice architecture"]
+oop:
+  group: practice
+  aliases: [ооп, "object oriented programming", "объектно-ориентированное программирование"]
+jira:
+  group: tool
+  aliases: [джира]
+confluence:
+  group: tool
+  aliases: [конфлюенс]
+figma:
+  group: tool
+  aliases: [фигма]

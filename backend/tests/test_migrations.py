@@ -32,6 +32,7 @@ EXPECTED_ENUM_TYPES = {
     "application_status",
     "employment_type",
     "match_bucket",
+    "parse_status",
     "pipeline_run_status",
     "remote_type",
     "salary_period",

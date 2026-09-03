@@ -15,6 +15,7 @@ from app.core.middleware import RequestIDMiddleware
 from app.db.checks import verify_embedding_dimension
 from app.db.session import dispose_engine, session_factory
 from app.services.health import service_version
+from app.services.resume import sweep_orphaned_uploads
 
 logger = get_logger(__name__)
 
@@ -32,6 +33,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # embedding write, in a different phase of the project.
     async with session_factory() as session:
         await verify_embedding_dimension(session)
+    # A killed process leaves its staged uploads behind; nothing else deletes
+    # them, and uploads/ would grow one resume at a time.
+    await sweep_orphaned_uploads()
     try:
         yield
     finally:

@@ -1,0 +1,156 @@
+"""Resume upload and profile reading.
+
+The upload path is split deliberately:
+
+* the **request** validates the file and reserves a profile row, so a bad
+  upload is a 4xx the user sees immediately rather than a profile that turns up
+  "failed" thirty seconds later;
+* the **background task** does the slow work — one LLM call and one embedding —
+  and takes nothing but a profile id and a path. That is the same signature a
+  real job queue needs in phase 9, and it keeps memory bounded when several
+  resumes are uploaded at once.
+
+The file on disk is what connects the two. It is removed in a ``finally``, and
+whatever a crash leaves behind is swept at startup.
+"""
+
+import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
+from app.core.logging import get_logger
+from app.db.enums import ParseStatus
+from app.db.models import CandidateProfile
+from app.db.repositories.profile import ProfileRepository
+from app.db.session import session_factory
+from app.llm.client import LLMClient
+from app.resume import extractor, profile_builder
+
+logger = get_logger(__name__)
+
+STALE_PARSE_REASON = "parsing did not finish; the server may have restarted"
+
+
+@dataclass(frozen=True, slots=True)
+class UploadAccepted:
+    """What the upload endpoint answers with."""
+
+    profile_id: UUID
+    parse_status: ParseStatus
+
+
+def upload_path(profile_id: UUID, source_format: str) -> Path:
+    """Where an uploaded file waits while the background task runs."""
+    return settings.upload_dir / f"{profile_id}.{source_format}"
+
+
+async def accept_upload(
+    session: AsyncSession, *, content: bytes, filename: str
+) -> tuple[UploadAccepted, Path]:
+    """Validate an upload, reserve a profile, and stage the file.
+
+    Extraction runs here as well as in the task. It is cheap next to the LLM
+    call, and doing it now is what turns an .exe renamed to .pdf into an
+    immediate 422 instead of a background failure nobody is watching.
+    """
+    document = extractor.extract(content, filename)
+
+    profiles = ProfileRepository(session)
+    profile = await profiles.create_pending(
+        filename=filename,
+        size_bytes=document.size_bytes,
+        source_format=document.source_format,
+        started_at=datetime.now(UTC),
+    )
+
+    settings.upload_dir.mkdir(parents=True, exist_ok=True)
+    path = upload_path(profile.id, document.source_format)
+    await asyncio.to_thread(path.write_bytes, content)
+
+    logger.info(
+        "resume.accepted",
+        profile_id=str(profile.id),
+        source_format=document.source_format,
+        size_bytes=document.size_bytes,
+        page_count=document.page_count,
+        needs_ocr=document.needs_ocr,
+    )
+    return UploadAccepted(profile_id=profile.id, parse_status=ParseStatus.PENDING), path
+
+
+async def parse_in_background(
+    profile_id: UUID, path: Path, *, client: LLMClient | None = None
+) -> None:
+    """Do the slow half of the upload.
+
+    Opens its own session on purpose: the request's session is closed the
+    moment the response is sent, and reusing it here would either fail or write
+    into a transaction nobody will commit.
+    """
+    llm = client or LLMClient()
+    try:
+        content = await asyncio.to_thread(path.read_bytes)
+        document = extractor.extract(content, path.name)
+        async with session_factory() as session:
+            await profile_builder.build_profile(
+                document, session=session, profile_id=profile_id, client=llm
+            )
+            await session.commit()
+    except Exception as exc:  # a background task must never die silently
+        logger.exception(
+            "resume.background_failed", profile_id=str(profile_id), error=type(exc).__name__
+        )
+        async with session_factory() as session:
+            await ProfileRepository(session).set_parse_status(
+                profile_id, ParseStatus.FAILED, error="parsing failed unexpectedly"
+            )
+            await session.commit()
+    finally:
+        # Always: a staged file whose task has ended is dead weight, and
+        # uploads/ would otherwise grow one resume at a time.
+        await asyncio.to_thread(path.unlink, True)
+
+
+async def get_profile(session: AsyncSession, profile_id: UUID) -> CandidateProfile | None:
+    """Read a profile, resolving a parse that will never finish.
+
+    ``BackgroundTasks`` does not survive a process restart, so a profile can be
+    left pending for ever. Rather than a scheduled job, the staleness is settled
+    whenever someone looks: the client polling the status is exactly who needs
+    the answer.
+    """
+    profiles = ProfileRepository(session)
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.resume_parse_timeout_seconds)
+    failed = await profiles.fail_stale_pending(cutoff, STALE_PARSE_REASON)
+    if failed:
+        logger.warning("resume.stale_pending_failed", count=failed)
+    return await profiles.get(profile_id)
+
+
+async def sweep_orphaned_uploads() -> int:
+    """Delete staged files no task will ever come back for.
+
+    Called from the application lifespan. A file older than the parse timeout
+    belongs to a process that is gone.
+    """
+    directory = settings.upload_dir
+    if not directory.is_dir():
+        return 0
+
+    cutoff = datetime.now(UTC) - timedelta(seconds=settings.resume_parse_timeout_seconds)
+    removed = 0
+    for path in directory.iterdir():
+        if not path.is_file():
+            continue
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+        if modified < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    if removed:
+        logger.info("resume.orphaned_uploads_swept", count=removed)
+    return removed

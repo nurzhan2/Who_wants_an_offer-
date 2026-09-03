@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The embeddings job is opt-in: it downloads ~1.5 GB of dependencies and
+  # 2.3 GB of model weights, which is not something every pull request should
+  # pay for. Run it by hand after touching app/matching/embeddings.py.
+  workflow_dispatch:
+    inputs:
+      verify_embeddings:
+        description: "Load the real bge-m3 model and verify it end to end"
+        type: boolean
+        default: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -98,6 +107,26 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+
+  embeddings:
+    name: verify embeddings (manual)
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_embeddings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Cache the model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ hashFiles('uv.lock') }}
+      - run: uv sync --frozen --extra embeddings
+      - run: uv run python scripts/verify_embeddings.py
 
   docker:
     name: docker build

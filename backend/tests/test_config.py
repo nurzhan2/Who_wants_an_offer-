@@ -106,3 +106,18 @@ def test_out_of_range_values_are_rejected() -> None:
     """Bounds live in the schema, so a typo in .env fails fast."""
     with pytest.raises(ValidationError):
         _settings(MATCH_SCORE_ALERT_THRESHOLD="500")
+
+
+def test_the_shipped_env_example_produces_valid_settings() -> None:
+    """The README says to copy .env.example to .env. Doing that has to work.
+
+    It once did not: the file shipped ``LLM_PRICING=`` and a blank value for a
+    field with a default is a validation error, so a fresh checkout followed
+    exactly as documented refused to start. Nothing else checks this file.
+    """
+    example = Path(__file__).resolve().parents[2] / ".env.example"
+
+    settings = Settings(_env_file=example)  # type: ignore[call-arg]
+
+    assert settings.llm_pricing
+    assert settings.environment == "development"

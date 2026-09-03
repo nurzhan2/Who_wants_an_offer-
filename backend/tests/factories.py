@@ -110,7 +110,7 @@ def make_profile(
         skills=[
             SkillCreate(
                 canonical_name=skill,
-                raw_name=skill.title(),
+                raw_names=[skill.title()],
                 years=Decimal("3.0"),
                 level=SkillLevel.STRONG,
                 last_used_year=2026,

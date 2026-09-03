@@ -1,13 +1,17 @@
 """Candidate profile persistence."""
 
 from collections.abc import Sequence
+from datetime import datetime
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy import update as sa_update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.db.enums import ParseStatus
 from app.db.models import CandidateProfile, ProfileSkill
 from app.schemas.profile import CandidateProfileCreate, CandidateProfileUpdate, SkillCreate
 
@@ -59,9 +63,18 @@ class ProfileRepository:
         instance = await self.get(profile_id)
         if instance is None:
             return None
-        for field, value in changes.model_dump(exclude_unset=True).items():
+
+        fields = changes.model_dump(exclude_unset=True)
+        # Skills are a relationship, not a column: assigning the dumped dicts
+        # would replace ORM objects with plain mappings. They go through
+        # replace_skills, which handles the delete-before-insert ordering.
+        skills = fields.pop("skills", None)
+        for field, value in fields.items():
             setattr(instance, field, value)
         await self.session.flush()
+
+        if skills is not None and changes.skills is not None:
+            await self.replace_skills(profile_id, changes.skills)
         return instance
 
     async def replace_skills(
@@ -97,6 +110,114 @@ class ProfileRepository:
             .values(embedding=list(embedding), updated_at=func.now())
         )
         await self.session.execute(stmt)
+
+    async def create_pending(
+        self, *, filename: str, size_bytes: int, source_format: str, started_at: datetime
+    ) -> CandidateProfile:
+        """Reserve a profile row before parsing starts.
+
+        The upload endpoint answers with this id immediately, so the client has
+        something to poll while the background task works. The row stays
+        inactive until parsing succeeds — an empty profile must never become
+        the one the dashboard scores against.
+        """
+        instance = CandidateProfile(
+            parse_status=ParseStatus.PENDING,
+            parse_started_at=started_at,
+            resume_filename=filename,
+            resume_size_bytes=size_bytes,
+            resume_format=source_format,
+            is_active=False,
+        )
+        self.session.add(instance)
+        await self.session.flush()
+        return instance
+
+    async def update_from_extraction(
+        self, profile_id: UUID, payload: CandidateProfileCreate
+    ) -> None:
+        """Write an extraction onto the reserved row.
+
+        Skills are handled separately by ``replace_skills``; everything else is
+        a plain column update.
+        """
+        values = payload.model_dump(exclude={"skills"})
+        values["updated_at"] = func.now()
+        await self.session.execute(
+            sa_update(CandidateProfile).where(CandidateProfile.id == profile_id).values(**values)
+        )
+
+    async def activate(self, profile_id: UUID) -> None:
+        """Make this profile the one the dashboard scores against.
+
+        Separate from ``deactivate_others`` and called before it: the row is
+        created inactive so a half-parsed profile can never be the live one, and
+        something has to switch it on once parsing has actually succeeded.
+        Forgetting this leaves the old profile retired and the new one inactive,
+        so ``get_active`` returns nothing at all.
+        """
+        await self.session.execute(
+            sa_update(CandidateProfile)
+            .where(CandidateProfile.id == profile_id)
+            .values(is_active=True, updated_at=func.now())
+        )
+
+    async def deactivate_others(self, keep_id: UUID) -> int:
+        """Retire every other profile so exactly one is live.
+
+        Uploading a new resume supersedes the old profile rather than editing
+        it: the matches, applications and scores attached to the old one stay
+        readable instead of being silently rewritten.
+        """
+        stmt = (
+            sa_update(CandidateProfile)
+            .where(CandidateProfile.id != keep_id, CandidateProfile.is_active.is_(True))
+            .values(is_active=False, updated_at=func.now())
+        )
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
+        return int(result.rowcount or 0)
+
+    async def set_parse_status(
+        self,
+        profile_id: UUID,
+        status: ParseStatus,
+        *,
+        error: str | None = None,
+        started_at: datetime | None = None,
+    ) -> None:
+        """Record where extraction got to.
+
+        ``error`` reaches the API and the logs, so callers must pass a reason,
+        never a fragment of the resume.
+        """
+        values: dict[str, Any] = {
+            "parse_status": status,
+            "parse_error": error,
+            "updated_at": func.now(),
+        }
+        if started_at is not None:
+            values["parse_started_at"] = started_at
+        await self.session.execute(
+            sa_update(CandidateProfile).where(CandidateProfile.id == profile_id).values(**values)
+        )
+
+    async def fail_stale_pending(self, cutoff: datetime, reason: str) -> int:
+        """Fail profiles whose parse has been pending since before ``cutoff``.
+
+        Extraction runs in a FastAPI background task, which does not survive a
+        restart. Without this a killed process leaves a profile pending for
+        ever, and the dashboard spins on it.
+        """
+        stmt = (
+            sa_update(CandidateProfile)
+            .where(
+                CandidateProfile.parse_status == ParseStatus.PENDING,
+                CandidateProfile.parse_started_at < cutoff,
+            )
+            .values(parse_status=ParseStatus.FAILED, parse_error=reason, updated_at=func.now())
+        )
+        result = cast("CursorResult[Any]", await self.session.execute(stmt))
+        return int(result.rowcount or 0)
 
     async def delete(self, profile_id: UUID) -> bool:
         """Remove a profile; skills and matches go with it via ON DELETE CASCADE."""

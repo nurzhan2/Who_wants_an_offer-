@@ -43,6 +43,7 @@ from app.db.enums import (
     ApplicationStatus,
     EmploymentType,
     MatchBucket,
+    ParseStatus,
     PipelineRunStatus,
     RemoteType,
     SalaryPeriod,
@@ -83,6 +84,22 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Extraction runs in the background; the client polls these.
+    parse_status: Mapped[ParseStatus] = mapped_column(
+        pg_enum(ParseStatus, "parse_status"),
+        default=ParseStatus.PENDING,
+        nullable=False,
+    )
+    #: Why extraction failed, in a form a human can act on. Never contains
+    #: resume text: this reaches the API and the logs.
+    parse_error: Mapped[str | None] = mapped_column(Text)
+    parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # What the user uploaded, so the dashboard can say which resume is live.
+    resume_filename: Mapped[str | None] = mapped_column(String(255))
+    resume_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    resume_format: Mapped[str | None] = mapped_column(String(10))
+
     skills: Mapped[list["ProfileSkill"]] = relationship(
         back_populates="profile",
         cascade="all, delete-orphan",
@@ -107,8 +124,11 @@ class ProfileSkill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     canonical_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    #: As written in the resume, kept for debugging the skill dictionary.
-    raw_name: Mapped[str | None] = mapped_column(String(200))
+    #: Every spelling the resume used for this skill. A list rather than one
+    #: string because canonicalisation collapses variants — "Python" and
+    #: "Python 3" both become ``python`` — and losing the originals would make
+    #: the skill dictionary impossible to debug.
+    raw_names: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     years: Mapped[Decimal | None] = mapped_column(Years)
     level: Mapped[SkillLevel] = mapped_column(
         pg_enum(SkillLevel, "skill_level"),

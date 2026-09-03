@@ -1,9 +1,12 @@
 """Aggregate router for /api/v1.
 
-Feature routers (resume, vacancies, matches, sources, pipeline, analytics,
-applications) are included here as the phases that own them land.
+Feature routers are included here as the phases that own them land.
 """
 
 from fastapi import APIRouter
 
+from app.api.v1 import profile, resume
+
 router = APIRouter()
+router.include_router(resume.router)
+router.include_router(profile.router)

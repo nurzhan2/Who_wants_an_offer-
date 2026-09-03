@@ -21,11 +21,22 @@ dependencies = [
     "python-multipart>=0.0.20",
     "anthropic>=0.42",
     "uuid-utils>=0.17.0",
+    "pdfplumber>=0.11.10",
+    "python-docx>=1.2.0",
+    "filetype>=1.2.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
-# Kept empty on purpose: runtime extras (embeddings, telegram) arrive with the
-# phases that need them, so the base image stays small.
+# Local embedding inference. Kept out of the default install on purpose: it
+# pulls torch, transformers, scipy and scikit-learn — roughly 1.5 GB on disk,
+# before the 2.3 GB of bge-m3 weights downloaded on first use. CI does not
+# install it; `make verify-embeddings` exercises it deliberately.
+#
+# fastembed was evaluated as a lighter runtime (onnxruntime, no torch, ~128 MB)
+# and rejected: it ships no bge-m3 in any of its embedding classes, so adopting
+# it would mean changing the embedding model, not just the runtime.
+embeddings = ["sentence-transformers>=6.0"]
 
 [dependency-groups]
 dev = [
@@ -37,6 +48,9 @@ dev = [
     "ruff>=0.8.4",
     "mypy>=1.14",
     "pre-commit>=4.0",
+    # Generates the resume fixtures, including the two-column PDF that is the
+    # whole point of the extractor tests.
+    "reportlab>=4.2",
 ]
 
 [build-system]
@@ -96,6 +110,8 @@ addopts = [
 xfail_strict = true
 markers = [
     "db: test requires a live PostgreSQL database with the pgvector extension",
+    "slow: test loads a real model or otherwise takes seconds, not milliseconds",
+    "unit: pure test, no database, no model, no network",
 ]
 filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
 

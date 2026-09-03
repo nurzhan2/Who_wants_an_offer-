@@ -3,7 +3,7 @@ UV ?= uv
 COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help install dev test lint fmt typecheck check migrate revision up down logs seed
+.PHONY: help install install-embeddings dev test test-fast verify-embeddings lint fmt typecheck check migrate revision up down logs seed fixtures
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -13,11 +13,23 @@ install: ## Sync the virtualenv and install git hooks
 	$(UV) sync
 	$(UV) run pre-commit install
 
+install-embeddings: ## Add the local embedding model (~1.5 GB of dependencies)
+	$(UV) sync --extra embeddings
+
 dev: ## Run the API with autoreload
 	$(UV) run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 test: ## Run the test suite with coverage
 	$(UV) run pytest
+
+test-fast: ## Tests that need neither PostgreSQL nor a model
+	$(UV) run pytest -m "not db and not slow"
+
+verify-embeddings: ## Load the real bge-m3 model and prove it works
+	$(UV) run --extra embeddings python scripts/verify_embeddings.py
+
+fixtures: ## Regenerate the resume test fixtures
+	$(UV) run python scripts/make_resume_fixtures.py
 
 lint: ## Lint and check formatting
 	$(UV) run ruff check .

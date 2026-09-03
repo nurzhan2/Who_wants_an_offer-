@@ -2,22 +2,46 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.db.enums import RemoteType, Seniority, SkillLevel
+from app.db.enums import ParseStatus, RemoteType, Seniority, SkillLevel
 from app.schemas.common import CurrencyCode, ReadModel
 
 Years = Annotated[Decimal, Field(ge=0, le=60, decimal_places=1)]
+
+
+def reject_duplicate_skills(skills: list["SkillCreate"] | None) -> None:
+    """Refuse a skill set that would violate the database's unique constraint.
+
+    ``profile_skill`` is unique on ``(profile_id, canonical_name)``, so a
+    repeated canonical name reaches PostgreSQL as an IntegrityError and, with
+    nothing catching it, becomes an opaque 500 that does not say which skill was
+    duplicated. A hand-typed correction list is exactly where a duplicate comes
+    from, so it is caught here and reported as a validation error naming it.
+    """
+    if not skills:
+        return
+    seen: set[str] = set()
+    duplicates: list[str] = []
+    for skill in skills:
+        name = skill.canonical_name
+        if name in seen and name not in duplicates:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(f"canonical_name must be unique; repeated: {sorted(duplicates)}")
 
 
 class SkillCreate(BaseModel):
     """One skill as extracted from a resume."""
 
     canonical_name: str = Field(min_length=1, max_length=100)
-    raw_name: str | None = Field(default=None, max_length=200)
+    #: Every spelling the resume used. Canonicalisation collapses variants, so
+    #: this is a list rather than one string.
+    raw_names: list[str] = Field(default_factory=list)
     years: Years | None = None
     level: SkillLevel = SkillLevel.WORKING
     last_used_year: int | None = Field(default=None, ge=1970, le=2100)
@@ -28,7 +52,7 @@ class SkillRead(ReadModel):
 
     id: UUID
     canonical_name: str
-    raw_name: str | None
+    raw_names: list[str]
     years: Decimal | None
     level: SkillLevel
     last_used_year: int | None
@@ -51,6 +75,12 @@ class CandidateProfileCreate(BaseModel):
     raw_text: str | None = None
     skills: list[SkillCreate] = Field(default_factory=list)
 
+    @model_validator(mode="after")
+    def _skills_are_unique(self) -> Self:
+        """Defence in depth: the enricher already merges, this catches a regression."""
+        reject_duplicate_skills(self.skills)
+        return self
+
 
 class CandidateProfileUpdate(BaseModel):
     """Manual corrections from the UI. Every field optional; unset means unchanged."""
@@ -67,6 +97,23 @@ class CandidateProfileUpdate(BaseModel):
     salary_currency: CurrencyCode | None = None
     languages: list[dict[str, Any]] | None = None
     is_active: bool | None = None
+    #: Replaces the whole skill set when present. The extractor is wrong often
+    #: enough that hand-correcting skills is a first-class operation, not an
+    #: afterthought.
+    skills: list[SkillCreate] | None = None
+
+    @model_validator(mode="after")
+    def _skills_are_unique(self) -> Self:
+        """A repeated canonical name is a 422 with a name in it, not a 500."""
+        reject_duplicate_skills(self.skills)
+        return self
+
+
+class ResumeUploadResponse(BaseModel):
+    """Answer to an upload: an id to poll, and where parsing has got to."""
+
+    profile_id: UUID
+    parse_status: ParseStatus
 
 
 class CandidateProfileRead(ReadModel):
@@ -85,6 +132,15 @@ class CandidateProfileRead(ReadModel):
     salary_currency: str | None
     languages: list[dict[str, Any]]
     is_active: bool
+
+    parse_status: ParseStatus
+    #: Why parsing failed, safe to show a user. Never contains resume text.
+    parse_error: str | None
+    parse_started_at: datetime | None
+    resume_filename: str | None
+    resume_size_bytes: int | None
+    resume_format: str | None
+
     created_at: datetime
     updated_at: datetime
     skills: list[SkillRead] = Field(default_factory=list)

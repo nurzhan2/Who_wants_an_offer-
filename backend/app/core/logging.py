@@ -15,6 +15,22 @@ from structlog.types import EventDict, Processor
 
 from app.core.config import settings
 
+#: Libraries whose DEBUG output would leak document contents or drown the log.
+#: Pinned explicitly so they never inherit a lowered root level.
+#:
+#: pdfminer is the one that matters. It logs every token it reads, so setting
+#: LOG_LEVEL=DEBUG to investigate an incident would write candidates' names,
+#: emails and phone numbers into the log stream verbatim, one line at a time —
+#: measured at 678 KB of it for a single one-page resume.
+THIRD_PARTY_LOG_LEVELS: dict[str, int] = {
+    "pdfminer": logging.WARNING,
+    "pdfplumber": logging.WARNING,
+    "PIL": logging.WARNING,
+    "httpcore": logging.WARNING,
+    "httpx": logging.WARNING,
+    "asyncio": logging.INFO,
+}
+
 #: Correlation id for the request currently being handled, set by the middleware.
 request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 
@@ -56,7 +72,11 @@ def configure_logging() -> None:
     renderer: Processor
     final: list[Processor]
     if settings.is_production:
-        renderer = structlog.processors.JSONRenderer()
+        # ensure_ascii=False on purpose. The default escapes every Cyrillic
+        # character into a numeric sequence, which is valid JSON but invisible
+        # to any grep-based redaction rule or PII scan written against literal
+        # text — and in this service the personal data is mostly Cyrillic.
+        renderer = structlog.processors.JSONRenderer(ensure_ascii=False)
         final = [structlog.processors.format_exc_info, renderer]
     else:
         renderer = structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
@@ -93,6 +113,10 @@ def configure_logging() -> None:
         noisy_logger = logging.getLogger(noisy)
         noisy_logger.handlers.clear()
         noisy_logger.propagate = True
+
+    # Libraries verbose enough to be a privacy problem rather than just noise.
+    for chatty, level in THIRD_PARTY_LOG_LEVELS.items():
+        logging.getLogger(chatty).setLevel(level)
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
