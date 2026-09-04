@@ -58,6 +58,23 @@ class Seniority(StrEnum):
     LEAD = "lead"
 
 
+class VacancyCompleteness(StrEnum):
+    """How much of the posting we actually hold.
+
+    Not every source gives a description. A subscription-email connector may
+    yield a title, a company and a link and nothing else, and scoring such a
+    row against a full one would compare a paragraph with an advertisement.
+    Matching reads this to decide what it is allowed to conclude.
+    """
+
+    #: Description present and complete enough to score semantically.
+    FULL = "full"
+    #: A teaser: the first lines, or a truncated body.
+    SNIPPET = "snippet"
+    #: Title, company and link. No body at all.
+    STUB = "stub"
+
+
 class RemoteType(StrEnum):
     """Work format offered by a vacancy or preferred by the candidate."""
 

@@ -23,6 +23,7 @@ EXPECTED_TABLES = {
     "match",
     "pipeline_run",
     "profile_skill",
+    "source_quota",
     "vacancy",
     "vacancy_skill",
     "vacancy_source",
@@ -39,12 +40,14 @@ EXPECTED_ENUM_TYPES = {
     "seniority",
     "skill_evidence",
     "skill_level",
+    "vacancy_completeness",
 }
 
 EXPECTED_PG_INDEXES = {
     "ix_pg_candidate_profile_embedding_hnsw",
     "ix_pg_match_profile_score",
     "ix_pg_vacancy_embedding_hnsw",
+    "ix_pg_vacancy_needs_embedding",
     "ix_pg_vacancy_published_at_active",
     "ix_pg_vacancy_salary_normalized_active",
     "ix_pg_vacancy_search_vector_gin",

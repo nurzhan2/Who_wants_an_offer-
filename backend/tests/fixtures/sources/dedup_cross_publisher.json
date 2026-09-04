@@ -1,0 +1,41 @@
+{
+  "_comment": "RECONSTRUCTED, NOT CAPTURED — see jsearch_unstable_job_id.json. The same posting reached the feed from two publishers with different job_id AND different job_uid but identical employer, title and description. Two vacancy_source rows must collapse onto ONE vacancy, because the fingerprint is computed from company and title.",
+  "status": "OK",
+  "data": {
+    "jobs": [
+      {
+        "job_id": "aW5kZWVkX2NwaV8xCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+        "job_uid": "Wt7L6sJVi5nHIBUMAAAAAA==",
+        "job_title": "Senior Software Engineer",
+        "employer_name": "CPI Card Group",
+        "job_publisher": "Indeed",
+        "job_apply_link": "https://example.com/apply/Wt7L6sJVi5nH",
+        "job_description": "We are looking for a Senior Software Engineer to join our platform team. You will design and operate services in Python and Go.",
+        "job_location": "Almaty, Kazakhstan • via Indeed",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      },
+      {
+        "job_id": "bW9uc3Rlcl9jcGlfMgDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+        "job_uid": "Xy9M7tKWj6oIJCVNBBBBBB==",
+        "job_title": "Senior Software Engineer",
+        "employer_name": "CPI Card Group",
+        "job_publisher": "Monster",
+        "job_apply_link": "https://example.com/apply/Xy9M7tKWj6oI",
+        "job_description": "We are looking for a Senior Software Engineer to join our platform team. You will design and operate services in Python and Go.",
+        "job_location": "Almaty, Kazakhstan • via Monster",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      }
+    ],
+    "cursor": null
+  }
+}

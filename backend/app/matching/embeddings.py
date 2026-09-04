@@ -258,6 +258,11 @@ async def encode_texts(texts: Sequence[str]) -> list[list[float]]:
     return [vectors[index] for index in range(len(texts))]
 
 
+#: How much of a posting's body is embedded. Changing it changes every vector,
+#: so it is a constant with a reason rather than configuration.
+MAX_DESCRIPTION_CHARS = 4000
+
+
 async def encode_profile(
     *,
     headline: str | None,
@@ -281,6 +286,37 @@ async def encode_profile(
     if not text:
         raise EmbeddingError("profile has no headline, skills, titles or domains to embed")
     return (await encode_texts([text]))[0]
+
+
+def vacancy_text(
+    *,
+    title: str,
+    company: str | None,
+    city: str | None,
+    description: str | None,
+) -> str:
+    """Assemble the posting summary that gets embedded.
+
+    Same labelled shape as :func:`_profile_text`, so a vacancy and a profile
+    land in comparable regions of the space rather than being compared across
+    two different writing styles.
+
+    The description is truncated. A long posting is mostly boilerplate — legal
+    notices, benefits, "we are an equal opportunity employer" — and past the
+    first few thousand characters it dilutes the part that says what the job
+    actually is. The cut is a constant rather than a setting because moving it
+    invalidates every stored vector, which is a migration, not a knob.
+    """
+    body = (description or "").strip()
+    if len(body) > MAX_DESCRIPTION_CHARS:
+        body = body[:MAX_DESCRIPTION_CHARS]
+    sections = [
+        _section("Role", [title]),
+        _section("Company", [company] if company else []),
+        _section("Location", [city] if city else []),
+        f"Description: {body}" if body else None,
+    ]
+    return "\n".join(section for section in sections if section)
 
 
 def _profile_text(

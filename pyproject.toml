@@ -78,6 +78,7 @@ known-first-party = ["app", "factories", "helpers"]
 # every other letter trips it and the signal is zero. Scoped to the files that
 # genuinely carry Russian sample text rather than disabled globally.
 "scripts/bench_ollama.py" = ["RUF001"]
+"scripts/run_pipeline.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
@@ -85,6 +86,28 @@ known-first-party = ["app", "factories", "helpers"]
 # Its assertions are about Russian resume text and the Russian findings raised
 # on it, so the same reasoning applies as for the module under test.
 "backend/tests/test_ats_audit.py" = ["RUF001", "RUF002"]
+# The source tests assert on Russian fixture data and Russian API messages.
+"backend/tests/test_source_quota.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_api.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_connectors.py" = ["RUF001", "RUF002"]
+"backend/tests/test_query_planner.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_base.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_http.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_registry.py" = ["RUF001", "RUF002"]
+"backend/tests/test_pipeline_runner.py" = ["RUF001", "RUF002"]
+"backend/tests/test_pipeline_end_to_end.py" = ["RUF001", "RUF002"]
+# Its docstring argues about company forms and city names in the two languages
+# this market writes them in, so the examples are necessarily Cyrillic.
+"backend/app/normalize/fingerprint.py" = ["RUF001", "RUF002"]
+# Source failures reach the dashboard, so their messages are Russian.
+"backend/app/sources/base.py" = ["RUF001", "RUF002"]
+"backend/app/sources/http.py" = ["RUF001", "RUF002"]
+"backend/app/sources/registry.py" = ["RUF001", "RUF002"]
+"backend/app/sources/jsearch.py" = ["RUF001", "RUF002"]
+"backend/app/sources/query_planner.py" = ["RUF001", "RUF002"]
+"backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
+"backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]
+"backend/app/pipeline/runner.py" = ["RUF001", "RUF002"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"

@@ -19,6 +19,7 @@ from app.llm.base import LLMTask
 from app.llm.router import get_router
 from app.services.health import service_version
 from app.services.resume import sweep_orphaned_uploads
+from app.sources.http import close_client as close_source_client
 
 logger = get_logger(__name__)
 
@@ -77,6 +78,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # The source layer owns a connection pool of its own, kept for the life
+        # of the process so a crawl reuses connections instead of building one
+        # per request.
+        await close_source_client()
         await dispose_engine()
         logger.info("application_stop")
 

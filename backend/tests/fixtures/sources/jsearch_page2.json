@@ -1,0 +1,57 @@
+{
+  "_comment": "RECONSTRUCTED. Second page: two of three uids already seen on page 1.",
+  "status": "OK",
+  "data": {
+    "jobs": [
+      {
+        "job_id": "id1b",
+        "job_uid": "aaa1",
+        "job_title": "Backend Engineer (Remote)",
+        "employer_name": "Wishpond",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/aaa1",
+        "job_description": "Same posting again.",
+        "job_location": "Anywhere • via Indeed",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      },
+      {
+        "job_id": "id2b",
+        "job_uid": "bbb2",
+        "job_title": "Python Developer",
+        "employer_name": "Северный Компас",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/bbb2",
+        "job_description": "Same posting again.",
+        "job_location": "Алматы, Казахстан • via Indeed",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      },
+      {
+        "job_id": "id4",
+        "job_uid": "ddd4",
+        "job_title": "Golang Engineer",
+        "employer_name": "Ясный Ветер",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/ddd4",
+        "job_description": "Go, Kafka, Kubernetes.",
+        "job_location": "Караганда, Казахстан • via HeadHunter",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      }
+    ],
+    "cursor": null
+  }
+}

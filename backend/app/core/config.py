@@ -4,6 +4,7 @@ Secrets never carry a default value: an unset key stays ``None`` and the
 feature that needs it fails loudly instead of silently using a placeholder.
 """
 
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -226,6 +227,35 @@ class Settings(BaseSettings):
     #: deleted. Gitignored; swept at startup for files a crash left behind.
     upload_dir: Path = Path("uploads")
 
+    # ── Sources: framework ────────────────────────────────────────────
+    # Source-agnostic on purpose. A per-source flag (HH_ENABLED, JSEARCH_ENABLED)
+    # would mean editing this file for every new connector, and CLAUDE.md rule 5
+    # says adding a source must not require changes outside sources/.
+    #: Slugs switched off for this deployment. Comma-separated.
+    sources_disabled: Annotated[frozenset[str], NoDecode] = frozenset()
+    #: When non-empty, ONLY these slugs run. For a debugging session.
+    sources_enabled: Annotated[frozenset[str], NoDecode] = frozenset()
+    #: Per-source credentials, keyed "<slug>.<name>" — a connector declares the
+    #: keys it needs and the default is_configured() answers without any
+    #: framework code. Never logged, in any form: see app/sources/http.py.
+    #: NoDecode for the same reason cors_origins needs it, and this is the third
+    #: time this bug has been fixed here: pydantic-settings JSON-decodes a
+    #: complex field coming from a .env file BEFORE any validator runs, so a
+    #: blank ``SOURCE_CREDENTIALS=`` — which is what .env.example ships and the
+    #: README tells you to copy — raised a JSONDecodeError at import and the app
+    #: would not start. NoDecode hands the raw string to the validator below.
+    source_credentials: Annotated[dict[str, SecretStr], NoDecode] = Field(default_factory=dict)
+    #: How long a cached source response stays fresh when the connector does
+    #: not override it. Only consulted when http_cache_dir is set.
+    http_cache_ttl_seconds: Annotated[int, Field(ge=0)] = 3600
+    #: Ceiling on the queries one pipeline run may issue per source. Enforced by
+    #: truncation in the planner, not by a warning: a plan that is merely
+    #: advised to be small is a plan that grows.
+    max_queries_per_run: Annotated[int, Field(ge=1, le=200)] = 8
+    #: Largest batch of external ids sent in one "which of these do we know?"
+    #: lookup. Without a cap a long run builds a multi-thousand IN clause.
+    external_id_lookup_batch: Annotated[int, Field(ge=1, le=5000)] = 500
+
     # ── Sources: optional API keys ────────────────────────────────────
     adzuna_app_id: str | None = None
     adzuna_app_key: SecretStr | None = None
@@ -256,6 +286,43 @@ class Settings(BaseSettings):
         """Treat ``KEY=`` in a .env file as "not configured", not as an empty value."""
         if isinstance(value, str) and not value.strip():
             return None
+        return value
+
+    @field_validator("sources_disabled", "sources_enabled", mode="before")
+    @classmethod
+    def _split_source_slugs(cls, value: Any) -> Any:
+        """Accept a comma-separated list, which is what an env var holds.
+
+        Also accepts None, because ``_empty_string_is_unset`` turns a blank
+        ``SOURCES_DISABLED=`` into it, and an empty deny-list is the sane
+        reading of an empty value rather than a boot failure.
+        """
+        if value is None:
+            return frozenset()
+        if isinstance(value, str):
+            return frozenset(slug.strip() for slug in value.split(",") if slug.strip())
+        return value
+
+    @field_validator("source_credentials", mode="before")
+    @classmethod
+    def _parse_credentials(cls, value: Any) -> Any:
+        """Decode the JSON ourselves, and read a blank value as "none set".
+
+        Both halves matter. NoDecode above means the JSON arrives as a string
+        and nobody else will parse it; and an absent value has to mean an empty
+        mapping rather than None, because None is not a dict and pydantic would
+        refuse to build the settings at all.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return {}
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    "SOURCE_CREDENTIALS must be a JSON object keyed "
+                    f'"<slug>.<name>", e.g. {{"jsearch.rapidapi_key": "..."}}: {exc}'
+                ) from exc
         return value
 
     @field_validator("llm_pricing", mode="before")

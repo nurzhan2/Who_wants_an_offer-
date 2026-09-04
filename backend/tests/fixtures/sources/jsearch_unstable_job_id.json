@@ -1,0 +1,51 @@
+{
+  "_comment": "RECONSTRUCTED, NOT CAPTURED. There is no RapidAPI key in this checkout, so these two objects are built from the behaviour recorded in the phase-3 brief rather than taken from a live response: the same posting returned under two different job_id values across two runs while job_uid stayed identical, because the request context is encoded into job_id. Replace with a real capture once a key is available.",
+  "run_1": {
+    "status": "OK",
+    "data": {
+      "jobs": [
+        {
+          "job_id": "NUNtYmF0eXBNNF9pMnJvUGs1cVl3UWsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "job_uid": "Wt7L6sJVi5nHIBUMAAAAAA==",
+          "job_title": "Senior Software Engineer",
+          "employer_name": "CPI Card Group",
+          "job_publisher": "LinkedIn",
+          "job_apply_link": "https://example.com/apply/Wt7L6sJVi5nH",
+          "job_description": "We are looking for a Senior Software Engineer to join our platform team. You will design and operate services in Python and Go.",
+          "job_location": "Almaty, Kazakhstan • via LinkedIn",
+          "job_city": null,
+          "job_country": null,
+          "job_is_remote": false,
+          "job_posted_at": null,
+          "job_salary": null,
+          "job_highlights": {}
+        }
+      ],
+      "cursor": null
+    }
+  },
+  "run_2": {
+    "status": "OK",
+    "data": {
+      "jobs": [
+        {
+          "job_id": "VVNxYmF1cWVDWi1Tc2VNUG9xM2t5UW8BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+          "job_uid": "Wt7L6sJVi5nHIBUMAAAAAA==",
+          "job_title": "Senior Software Engineer",
+          "employer_name": "CPI Card Group",
+          "job_publisher": "LinkedIn",
+          "job_apply_link": "https://example.com/apply/Wt7L6sJVi5nH",
+          "job_description": "We are looking for a Senior Software Engineer to join our platform team. You will design and operate services in Python and Go.",
+          "job_location": "Almaty, Kazakhstan • via Monster",
+          "job_city": null,
+          "job_country": null,
+          "job_is_remote": false,
+          "job_posted_at": null,
+          "job_salary": null,
+          "job_highlights": {}
+        }
+      ],
+      "cursor": null
+    }
+  }
+}

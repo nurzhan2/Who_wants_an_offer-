@@ -14,7 +14,9 @@ from sqlalchemy import (
     ColumnElement,
     Select,
     String,
+    Table,
     and_,
+    bindparam,
     exists,
     false,
     func,
@@ -31,6 +33,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.base import uuid7
 from app.db.enums import MatchBucket
 from app.db.models import Application, Match, Vacancy, VacancySource
@@ -60,6 +63,10 @@ REFRESHABLE_COLUMNS: tuple[str, ...] = (
     "language",
     "published_at",
     "expires_at",
+    # Travels with the fingerprint. A conflict means the incoming posting hashed
+    # to the same key, so the row is valid under the incoming algorithm too and
+    # recording that is what lets phase 4 tell recomputed rows from stale ones.
+    "fingerprint_version",
 )
 
 #: Which column each sort option actually orders by, and the label the selected
@@ -85,6 +92,28 @@ type UpsertItem = tuple[VacancyCreate, str, str, str, dict[str, Any]]
 
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddingCandidate:
+    """A row that may need a vector, with everything needed to build its text."""
+
+    id: UUID
+    title: str
+    company: str | None
+    city: str | None
+    description: str | None
+    #: Hash of the text the current vector was computed from, if any.
+    stored_hash: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EmbeddedVacancy:
+    """A computed vector, ready to be written back."""
+
+    id: UUID
+    vector: Sequence[float]
+    text_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +210,16 @@ class VacancyRepository:
             index_elements=[Vacancy.fingerprint],
             set_={
                 **{column: insert_vacancy.excluded[column] for column in REFRESHABLE_COLUMNS},
+                # Completeness only ever improves. PostgreSQL orders an enum by
+                # declaration, and vacancy_completeness is declared best-first
+                # ('full', 'snippet', 'stub'), so LEAST is "the more complete of
+                # the two". A plain overwrite would let a source that carries
+                # only headlines downgrade a posting we already hold in full,
+                # and the description would be gone with nothing recording that
+                # it had ever been there.
+                "completeness": func.least(
+                    Vacancy.completeness, insert_vacancy.excluded.completeness
+                ),
                 "last_seen_at": func.now(),
                 "updated_at": func.now(),
                 "is_active": True,
@@ -226,6 +265,119 @@ class VacancyRepository:
             updated=len(vacancy_rows) - created,
             vacancy_ids=tuple(row.id for row in vacancy_rows),
         )
+
+    async def needs_embedding(self, *, limit: int = 500) -> list[EmbeddingCandidate]:
+        """Rows whose vector may be missing or out of date.
+
+        Two stages on purpose. This one is the cheap SQL narrowing: a vector is
+        suspect when there is none, or when the row has been written since the
+        vector was computed. The exact answer needs the text itself, so the
+        caller hashes it and drops the rows whose stored hash still matches —
+        which is the common case, because every re-crawl bumps ``updated_at``
+        whether or not the description actually moved.
+
+        Ordered by ``last_seen_at`` so that when the limit bites, it is the
+        postings still being advertised that get vectors first.
+        """
+        stmt = (
+            select(
+                Vacancy.id,
+                Vacancy.title,
+                Vacancy.company,
+                Vacancy.city,
+                Vacancy.description_raw,
+                Vacancy.embedding_text_hash,
+            )
+            .where(
+                or_(
+                    Vacancy.embedding.is_(None),
+                    Vacancy.embedded_at.is_(None),
+                    Vacancy.updated_at > Vacancy.embedded_at,
+                )
+            )
+            .order_by(Vacancy.last_seen_at.desc())
+            .limit(limit)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            EmbeddingCandidate(
+                id=row.id,
+                title=row.title,
+                company=row.company,
+                city=row.city,
+                description=row.description_raw,
+                stored_hash=row.embedding_text_hash,
+            )
+            for row in rows
+        ]
+
+    async def set_embeddings(self, items: Sequence[EmbeddedVacancy]) -> int:
+        """Write a batch of vectors with the hash of the text they came from.
+
+        One executemany rather than one UPDATE per row: a run embeds hundreds,
+        and the round trips would dominate the work the model just did.
+        """
+        if not items:
+            return 0
+        # Against the Table, not the mapped class. Handed the entity, SQLAlchemy
+        # routes an executemany UPDATE through its "bulk update by primary key"
+        # path, which demands the primary key under its own column name and
+        # tries to synchronise the identity map — neither of which this needs.
+        # The Core statement writes the rows and leaves the session alone.
+        table = cast("Table", Vacancy.__table__)
+        stmt = (
+            sa_update(table)
+            .where(table.c.id == bindparam("row_id"))
+            .values(
+                embedding=bindparam("vector"),
+                embedding_text_hash=bindparam("text_hash"),
+                embedded_at=func.now(),
+            )
+        )
+        await self.session.execute(
+            stmt,
+            [
+                {
+                    "row_id": item.id,
+                    "vector": list(item.vector),
+                    "text_hash": item.text_hash,
+                }
+                for item in items
+            ],
+        )
+        await self.session.flush()
+        return len(items)
+
+    async def known_external_ids(self, source_slug: str, external_ids: Sequence[str]) -> set[str]:
+        """Which of these postings this source has already given us.
+
+        Feeds the early exit from pagination: a source with no usable date
+        filter returns old postings mixed with new ones, so the only way to stop
+        paying for pages of things we already hold is to recognise them. The
+        answer has to come before the upsert, which is why it cannot be read off
+        ``BulkUpsertResult``.
+
+        Chunked because the caller passes a whole page-set at once and an
+        unbounded ``IN`` clause on a long run becomes a query with several
+        thousand bind parameters. One index-only scan per chunk on the existing
+        unique index over ``(source_slug, external_id)``.
+        """
+        if not external_ids:
+            return set()
+
+        # Deduplicated first: an overlapping page repeats ids, and there is no
+        # point sending the same one twice within a single lookup.
+        unique = list(dict.fromkeys(external_ids))
+        size = settings.external_id_lookup_batch
+        known: set[str] = set()
+        for start in range(0, len(unique), size):
+            chunk = unique[start : start + size]
+            stmt = select(VacancySource.external_id).where(
+                VacancySource.source_slug == source_slug,
+                VacancySource.external_id.in_(chunk),
+            )
+            known.update((await self.session.execute(stmt)).scalars().all())
+        return known
 
     async def mark_inactive(self, vacancy_ids: Sequence[UUID]) -> int:
         """Retire postings a source stopped returning. Returns rows touched."""

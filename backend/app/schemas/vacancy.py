@@ -13,7 +13,9 @@ from app.db.enums import (
     RemoteType,
     SalaryPeriod,
     Seniority,
+    VacancyCompleteness,
 )
+from app.normalize.fingerprint import VERSION as FINGERPRINT_VERSION
 from app.schemas.common import (
     CountryCode,
     CurrencyCode,
@@ -66,6 +68,10 @@ class VacancyCreate(BaseModel):
     """Normalised posting, ready to be upserted."""
 
     fingerprint: str = Field(min_length=1, max_length=40)
+    #: Which algorithm produced the fingerprint. Always set by
+    #: app.normalize.fingerprint, never by a connector, so a row can only carry
+    #: the version that actually computed its key.
+    fingerprint_version: int = Field(default=FINGERPRINT_VERSION, ge=1)
     title: str = Field(min_length=1, max_length=300)
     company: str | None = Field(default=None, max_length=200)
     company_url: str | None = Field(default=None, max_length=500)
@@ -85,6 +91,10 @@ class VacancyCreate(BaseModel):
     language: LanguageCode | None = None
     published_at: datetime | None = None
     expires_at: datetime | None = None
+    #: How much of the posting this record holds. A source that returns only a
+    #: title and a link must say so rather than presenting a stub as a full
+    #: posting that merely scored badly.
+    completeness: VacancyCompleteness = VacancyCompleteness.FULL
 
     @model_validator(mode="after")
     def _salary_range_is_ordered(self) -> Self:

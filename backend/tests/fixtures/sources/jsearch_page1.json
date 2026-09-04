@@ -1,0 +1,57 @@
+{
+  "_comment": "RECONSTRUCTED, NOT CAPTURED — see jsearch_unstable_job_id.json. Carries the measured defects: job_city/job_country null while job_location is populated, job_is_remote false on a posting whose title says (Remote), job_salary and job_posted_at null, job_highlights empty.",
+  "status": "OK",
+  "data": {
+    "jobs": [
+      {
+        "job_id": "id1",
+        "job_uid": "aaa1",
+        "job_title": "Backend Engineer (Remote)",
+        "employer_name": "Wishpond",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/aaa1",
+        "job_description": "Work from anywhere in the world. Python, Django, PostgreSQL.",
+        "job_location": "Anywhere • via LinkedIn",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      },
+      {
+        "job_id": "id2",
+        "job_uid": "bbb2",
+        "job_title": "Python Developer",
+        "employer_name": "Северный Компас",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/bbb2",
+        "job_description": "Пайплайны данных, Airflow, PostgreSQL.",
+        "job_location": "Алматы, Казахстан • via HeadHunter",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": false,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      },
+      {
+        "job_id": "id3",
+        "job_uid": "ccc3",
+        "job_title": "Data Engineer",
+        "employer_name": "SynergisticIT",
+        "job_publisher": "LinkedIn",
+        "job_apply_link": "https://example.com/apply/ccc3",
+        "job_description": "Join our placement program. Reputed company. Training provided.",
+        "job_location": "Remote • via ZipRecruiter",
+        "job_city": null,
+        "job_country": null,
+        "job_is_remote": true,
+        "job_posted_at": null,
+        "job_salary": null,
+        "job_highlights": {}
+      }
+    ],
+    "cursor": "PAGE2CURSOR"
+  }
+}

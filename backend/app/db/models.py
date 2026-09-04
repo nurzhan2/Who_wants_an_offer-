@@ -15,7 +15,7 @@ Conventions applied throughout:
   error beats an N+1 discovered in production.
 """
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -25,10 +25,12 @@ from sqlalchemy import (
     CHAR,
     Boolean,
     Computed,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -50,6 +52,7 @@ from app.db.enums import (
     Seniority,
     SkillEvidence,
     SkillLevel,
+    VacancyCompleteness,
     pg_enum,
 )
 
@@ -212,7 +215,43 @@ class Vacancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    #: Which fingerprint algorithm produced :attr:`fingerprint`. Travels with
+    #: it, always written by app.normalize.fingerprint, so a re-crawl can only
+    #: ever write the version it actually used. Phase 4 will improve company and
+    #: city normalisation, which changes the fingerprint and collapses rows that
+    #: are distinct today — its recompute script bumps this and merges them.
+    fingerprint_version: Mapped[int] = mapped_column(
+        SmallInteger, default=1, server_default="1", nullable=False
+    )
+    #: How much of the posting we hold. Matching reads it to decide what it is
+    #: allowed to conclude from a row with no description.
+    completeness: Mapped[VacancyCompleteness] = mapped_column(
+        pg_enum(VacancyCompleteness, "vacancy_completeness"),
+        default=VacancyCompleteness.FULL,
+        nullable=False,
+    )
+    #: Who may actually take this job: {mode, allowed_countries, sponsorship,
+    #: evidence}. Populated in phase 4. For a candidate outside the US or the
+    #: EU this is the most valuable filter in the system — half of a global
+    #: search is remote-in-name-only and closed by right-to-work.
+    work_authorization: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: Resume farms, placement-programme sellers and scraped filler. Roughly a
+    #: third of a global aggregator feed.
+    is_spam: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    #: What made it look like spam, so the verdict can be argued with.
+    spam_signals: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: When phase 4 last enriched this row. NULL means never.
+    enriched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
+    #: sha256 of the exact text :attr:`embedding` was computed from. Kept out of
+    #: REFRESHABLE_COLUMNS on purpose: a re-crawl that rewrites description_raw
+    #: must leave this stale, because staleness is precisely the signal that the
+    #: vector needs recomputing.
+    embedding_text_hash: Mapped[str | None] = mapped_column(CHAR(64))
+    embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     # Full-text search column. The configuration is hardcoded to 'simple' on
     # purpose: postings mix Russian and English, and to_tsvector(regconfig, text)
@@ -376,3 +415,35 @@ class PipelineRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     updated: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     #: One entry per failure; a broken source must not abort the whole run.
     errors: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+
+
+class SourceQuota(Base):
+    """How many metered requests a source has spent today.
+
+    Its own table because nothing else can answer the question. ``PipelineRun``
+    counts runs, and a metered API charges per *page*: a run that died halfway
+    through pagination spent real credits and left no record of them, so
+    deriving the number from run history undercounts exactly when it matters.
+
+    Keyed on the day rather than on a rolling window because that is how the
+    vendors bill — JSearch's Basic tier is 100 requests a day, reset at
+    midnight UTC — and because ``ON CONFLICT (source_slug, day) DO UPDATE SET
+    used = used + 1`` is then a single atomic statement with no read-modify-
+    write race between concurrent connectors.
+
+    No surrogate id: the natural key is the whole row's identity, and a UUID
+    would only invite a second row for the same source and day.
+    """
+
+    __tablename__ = "source_quota"
+
+    source_slug: Mapped[str] = mapped_column(String(50), primary_key=True)
+    #: UTC calendar day, matching the vendor's own reset boundary.
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    #: Incremented when a request is SENT, never when one succeeds. A 500 has
+    #: already cost a credit; counting successes walks straight past the limit
+    #: and into a 429 that looks unexplainable.
+    used: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
