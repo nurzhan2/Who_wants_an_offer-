@@ -29,6 +29,26 @@ class SkillLevel(StrEnum):
     EXPERT = "expert"
 
 
+class SkillEvidence(StrEnum):
+    """How the claim about a skill is supported.
+
+    Kept apart from ``SkillLevel`` because they answer different questions and
+    conflating them punished the wrong thing. A skill named only in a sidebar
+    used to be scored ``basic``, cutting its contribution by 30% — but plenty of
+    strong candidates never write a per-job technology list, so that was a
+    measurement artefact of resume formatting, not a fact about the person.
+
+    ``level`` now says how well; this says how sure. Whether ``stated`` should
+    be discounted at all is a scoring decision for phase 5, taken on labelled
+    data rather than assumed here.
+    """
+
+    #: Tied to dated jobs, so its years are computed rather than assumed.
+    CORROBORATED = "corroborated"
+    #: Listed, with nothing dating it.
+    STATED = "stated"
+
+
 class Seniority(StrEnum):
     """Grade, as advertised by the vacancy or inferred from the resume."""
 
@@ -112,6 +132,7 @@ class PipelineRunStatus(StrEnum):
 #: Type name in PostgreSQL for every enum above, in creation order.
 ENUM_TYPE_NAMES: dict[str, type[StrEnum]] = {
     "skill_level": SkillLevel,
+    "skill_evidence": SkillEvidence,
     "seniority": Seniority,
     "remote_type": RemoteType,
     "employment_type": EmploymentType,

@@ -2,8 +2,10 @@
 
     uv run python scripts/parse_resume.py backend/tests/fixtures/resumes/two_column_ru.pdf
 
-No database: this runs the extraction pipeline only, so it can be pointed at any
-file without touching the profile store. It needs ANTHROPIC_API_KEY.
+No database: this runs the extraction pipeline only, so it can be pointed at
+any file without touching the profile store. It goes through the router, so it
+uses whatever provider LLM_ROUTING sends resume extraction to — by default the
+Claude Code CLI, which needs no API key.
 
 ``--show-columns`` needs no key at all. It prints what pdfplumber makes of the
 file, which is the fastest way to see why PDFs are handed to the model natively:
@@ -24,9 +26,9 @@ from pathlib import Path
 
 import pdfplumber
 
-from app.core.config import settings
 from app.core.logging import configure_logging
-from app.llm.client import LLMClient
+from app.llm.base import LLMTask
+from app.llm.router import get_router
 from app.resume import enricher, extractor, profile_builder
 
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
@@ -79,19 +81,21 @@ async def parse(path: Path, *, show_pii: bool, today: date) -> int:
     for warning in document.warnings:
         print(f"warning           {warning}")
 
-    if settings.anthropic_api_key is None:
-        print(
-            "\nANTHROPIC_API_KEY is not set, so the model was not called.\n"
-            "Copy .env.example to .env, fill the key in, and run this again to see\n"
-            "the extracted profile and what the call cost."
-        )
+    router = get_router()
+    try:
+        provider, displaced = router.resolve(LLMTask.RESUME_EXTRACTION)
+    except Exception as exc:  # any provider failure is the same story here
+        print(f"\nno provider can serve resume extraction: {exc}")
         return 2
+    print(
+        f"provider          {provider.name}"
+        + (f"  (instead of {displaced}, which is unavailable)" if displaced else "")
+    )
 
     started = datetime.now(UTC)
-    extraction, usage, cost = await profile_builder.extract_profile(
-        document, client=LLMClient(), today=today
-    )
+    extraction, usage = await profile_builder.extract_profile(document, router=router, today=today)
     seconds = (datetime.now(UTC) - started).total_seconds()
+    cost = usage.cost_usd
     enriched = enricher.enrich(extraction, today=today)
 
     print("\n--- profile ---------------------------------------------------")
@@ -116,24 +120,36 @@ async def parse(path: Path, *, show_pii: bool, today: date) -> int:
         print(f"difference        {enriched.stated_years_delta:+}")
 
     print(f"\n--- skills ({len(enriched.skills)}) -------------------------------------------")
+    print(f"  {'canonical':<16} {'years':>6}  {'level':<8} {'evidence':<13} spellings")
     for skill in sorted(enriched.skills, key=lambda s: s.years or 0, reverse=True):
         variants = " / ".join(skill.raw_names)
         years = f"{skill.years}y" if skill.years else "—"
         flag = " [not in dictionary]" if skill.is_unknown else ""
-        print(f"  {skill.canonical_name:<22} {years:>5}  {skill.level.value:<8} {variants}{flag}")
+        print(
+            f"  {skill.canonical_name:<16} {years:>6}  {skill.level.value:<8} "
+            f"{skill.evidence.value:<13} {variants}{flag}"
+        )
 
     for warning in enriched.warnings:
         print(f"\nnote              {warning}")
 
     print("\n--- cost ------------------------------------------------------")
-    print(f"model             {settings.anthropic_model_heavy}")
+    print(f"provider          {usage.provider}")
+    print(f"model             {usage.model or '(not reported)'}")
+    print(f"accounting        {usage.accounting}")
     print(f"input tokens      {usage.input_tokens:,}")
     print(f"output tokens     {usage.output_tokens:,}")
     print(f"cache read        {usage.cache_read_tokens:,}")
+    print(f"cache write       {usage.cache_write_tokens:,}")
+    print(f"tokens total      {usage.total_tokens:,}")
     print(f"cost              {'unpriced' if cost is None else f'${cost:.4f}'}")
     print(f"wall time         {seconds:.1f}s")
+    for model, model_cost in sorted(usage.model_costs.items(), key=lambda kv: -kv[1]):
+        print(f"  {model:<32} ${model_cost:.4f}")
     if cost is not None:
-        print(f"1000 resumes      ${cost * 1000:.2f}")
+        # Never merged with API spend: one is quota, the other is an invoice.
+        currency = "of subscription quota" if usage.accounting == "subscription" else "invoiced"
+        print(f"1000 resumes      ${cost * 1000:.2f} {currency}")
     return 0
 
 

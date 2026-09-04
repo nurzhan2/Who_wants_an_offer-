@@ -6,8 +6,8 @@ aggregators, are read by whoever is on call, and outlive the resume itself — s
 one well-meant ``logger.info("parsed", text=document.raw_text)`` turns a debug
 line into a privacy incident that nothing downstream will ever notice.
 
-Every test here runs a real fixture through the real code — extraction, the LLM
-wrapper, the profile builder, the upload endpoint — with the model and the
+Every test here runs a real fixture through the real code — extraction, the API
+provider, the profile builder, the upload endpoint — with the model and the
 embedding provider faked, captures everything that reaches the log stream, and
 asserts the identities carried by those fixtures are nowhere in it. Several
 distinct strings are checked each time (a name, an email, a phone number, a
@@ -32,7 +32,7 @@ from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -47,8 +47,10 @@ from app.core.exceptions import ParsingError
 from app.core.logging import configure_logging, get_logger
 from app.db.enums import ParseStatus
 from app.db.repositories.profile import ProfileRepository
-from app.llm.client import Document, LLMClient, LLMResult, LLMTier
-from app.llm.pricing import TokenUsage
+from app.llm import usage as usage_ledger
+from app.llm.base import Document, LLMResult, LLMTask, LLMUsage
+from app.llm.providers.anthropic_api import AnthropicAPIProvider
+from app.llm.router import LLMRouter
 from app.matching import embeddings
 from app.resume import extractor, profile_builder
 from app.schemas.llm import (
@@ -403,6 +405,29 @@ class StubAnthropic:
         self.messages = StubMessages(replies)
 
 
+class KeylessAPIProvider(AnthropicAPIProvider):
+    """The real API provider over a stub transport, minus the key check.
+
+    ``is_available`` reports whether ``ANTHROPIC_API_KEY`` is set, and there is
+    no key in this environment — so a router asked to serve a task would skip
+    the real provider and these tests would exercise the availability gate
+    instead of the wrapper whose logging they are about.
+    """
+
+    def is_available(self) -> bool:
+        """Yes: the transport underneath is a stub and needs no credentials."""
+        return True
+
+
+def router_over(provider: AnthropicAPIProvider) -> LLMRouter:
+    """A real router that resolves every task to one provider.
+
+    Binding all three names keeps the test indifferent to which provider
+    ``LLM_ROUTING`` sends resume extraction to today.
+    """
+    return LLMRouter({name: provider for name in ("api", "cli", "ollama")})
+
+
 def extraction_for(identity: Identity) -> ProfileExtraction:
     """What the model would return for a fixture, identity and all.
 
@@ -458,12 +483,12 @@ async def test_the_llm_call_log_carries_cost_not_the_prompt(logs: LogSink) -> No
     attachment = read_fixture("english.pdf")
     extraction = extraction_for(identity)
     transport = StubAnthropic([extraction.model_dump_json()])
-    client = LLMClient(client=transport)  # type: ignore[arg-type]  # stub transport
+    provider = AnthropicAPIProvider(client=transport)  # type: ignore[arg-type]  # stub transport
 
-    result = await client.complete_json(
+    result = await provider.complete_json(
         "extract_profile",
         ProfileExtraction,
-        tier=LLMTier.HEAVY,
+        task=LLMTask.RESUME_EXTRACTION,
         effort="high",
         variables={"today": "2026-09-01", "resume_text": document.raw_text},
         documents=(Document(content=attachment),),
@@ -485,11 +510,13 @@ async def test_the_llm_call_log_carries_cost_not_the_prompt(logs: LogSink) -> No
 # ── the profile-building pipeline ─────────────────────────────────────
 
 
-class FakeLLMClient:
-    """A client that answers instantly with a fixed extraction.
+class FakeRouter:
+    """A router that answers instantly with a fixed extraction.
 
-    There is no API key in this environment and there never will be, so the
-    pipeline tests below stub the client outright rather than the transport.
+    There is no API key in this environment and there never will be, and the
+    provider resume extraction is routed to by default is a CLI subprocess that
+    costs real money and forty seconds per call — so the pipeline tests below
+    stand in for the router itself rather than for a transport under it.
     """
 
     def __init__(self, extraction: ProfileExtraction) -> None:
@@ -499,14 +526,33 @@ class FakeLLMClient:
     async def complete_json(self, *_: Any, **__: Any) -> LLMResult[ProfileExtraction]:
         """Return the canned extraction with plausible usage."""
         self.calls += 1
-        usage = TokenUsage(input_tokens=4321, output_tokens=87)
         return LLMResult(
             value=self._extraction,
-            model=settings.anthropic_model_heavy,
-            usage=usage,
-            cost_usd=0.03,
+            usage=LLMUsage(
+                provider="fake",
+                model=settings.anthropic_model_heavy,
+                task=LLMTask.RESUME_EXTRACTION,
+                input_tokens=4321,
+                output_tokens=87,
+                cost_usd=0.03,
+            ),
             attempts=1,
         )
+
+
+@pytest.fixture(autouse=True)
+def clean_ledger() -> Iterator[None]:
+    """Leave the process-wide usage ledger as this file found it.
+
+    The pipeline records every call it makes into a module-level singleton, so
+    the two tests below would otherwise add a stub provider and its dollars to
+    the totals ``/metrics`` reports for the rest of the run.
+    """
+    usage_ledger.ledger.reset()
+    try:
+        yield
+    finally:
+        usage_ledger.ledger.reset()
 
 
 @pytest.fixture
@@ -543,17 +589,17 @@ async def test_a_successful_parse_stores_the_identity_and_logs_none_of_it(
         source_format=document.source_format,
         started_at=datetime.now(UTC),
     )
-    client = FakeLLMClient(extraction_for(identity))
+    router = FakeRouter(extraction_for(identity))
 
     result = await profile_builder.build_profile(
         document,
         session=db_session,
         profile_id=profile.id,
-        client=client,  # type: ignore[arg-type]  # fake client, no API key here
+        router=cast(LLMRouter, router),  # fake router, no API key here
         today=date(2026, 9, 1),
     )
 
-    assert client.calls == 1  # the model step really did run
+    assert router.calls == 1  # the model step really did run
     assert result.status is ParseStatus.READY
     # The writes went through Core statements, so the ORM instance is stale.
     await db_session.refresh(profile)
@@ -585,13 +631,14 @@ async def test_a_failed_parse_records_a_reason_free_of_resume_text(
     )
     # A model that answers with something unparseable twice: a real failure
     # built by the real code, not an exception a test invented.
-    client = LLMClient(client=StubAnthropic(["not json at all"]))  # type: ignore[arg-type]
+    transport = StubAnthropic(["not json at all"])
+    router = router_over(KeylessAPIProvider(client=transport))  # type: ignore[arg-type]
 
     result = await profile_builder.build_profile(
         document,
         session=db_session,
         profile_id=profile.id,
-        client=client,
+        router=router,
         today=date(2026, 9, 1),
     )
 

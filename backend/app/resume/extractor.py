@@ -6,7 +6,7 @@ and a body sharing every line: the output interleaves them, so a skills chip
 lands in the middle of a job description. That text is good enough for
 full-text search and for eyeballing what was uploaded, and it is actively
 misleading as LLM input. PDFs are therefore handed to the model as a document
-block (:class:`app.llm.client.Document`), which is why this module keeps
+block (:class:`app.llm.base.Document`), which is why this module keeps
 ``file_bytes`` around and why a text-poor PDF is a warning rather than a
 failure.
 

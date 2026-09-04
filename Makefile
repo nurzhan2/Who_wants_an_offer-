@@ -3,7 +3,7 @@ UV ?= uv
 COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-embeddings dev test test-fast verify-embeddings lint fmt typecheck check migrate revision up down logs seed fixtures
+.PHONY: help install install-embeddings dev test test-fast verify-embeddings parse-resume bench-ollama lint fmt typecheck check migrate revision up down logs seed fixtures
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -27,6 +27,12 @@ test-fast: ## Tests that need neither PostgreSQL nor a model
 
 verify-embeddings: ## Load the real bge-m3 model and prove it works
 	$(UV) run --extra embeddings python scripts/verify_embeddings.py
+
+parse-resume: ## Parse a resume end to end: make parse-resume f=path/to/cv.pdf
+	$(UV) run python scripts/parse_resume.py "$(f)"
+
+bench-ollama: ## Measure local inference before phase 3b relies on it
+	$(UV) run python scripts/bench_ollama.py
 
 fixtures: ## Regenerate the resume test fixtures
 	$(UV) run python scripts/make_resume_fixtures.py

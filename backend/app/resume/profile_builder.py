@@ -27,8 +27,9 @@ from app.core.exceptions import AppError
 from app.core.logging import get_logger
 from app.db.enums import ParseStatus
 from app.db.repositories.profile import ProfileRepository
-from app.llm.client import Document, Effort, LLMClient, LLMTier
-from app.llm.pricing import TokenUsage
+from app.llm import usage as usage_ledger
+from app.llm.base import Document, LLMTask, LLMUsage
+from app.llm.router import LLMRouter, get_router
 from app.matching import embeddings
 from app.resume import enricher
 from app.resume.extractor import ExtractedDocument
@@ -37,10 +38,10 @@ from app.schemas.profile import CandidateProfileCreate, SkillCreate
 
 logger = get_logger(__name__)
 
-#: Resume extraction runs once per upload and its quality decides everything
-#: downstream, so it uses the strong model at high effort. The hot path — post
-#: parsing, re-rank — chooses its own, much cheaper, settings.
-EXTRACTION_EFFORT: Effort = "high"
+#: Which task this is. Everything else — provider, model, effort, tool policy —
+#: follows from it through configuration, so moving resume extraction between
+#: providers never touches this module.
+TASK = LLMTask.RESUME_EXTRACTION
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,7 +52,7 @@ class BuildResult:
     status: ParseStatus
     skill_count: int
     total_years: float
-    usage: TokenUsage
+    usage: LLMUsage | None
     cost_usd: float | None
     duration_seconds: float
     warnings: tuple[str, ...]
@@ -61,36 +62,44 @@ def _documents_for(document: ExtractedDocument) -> tuple[Document, ...]:
     """The file itself, when the model can read it better than we can.
 
     PDF only. DOCX and plain text have no column problem worth solving, and
-    sending them as text keeps the request small.
+    sending them as text keeps the request small. How the file reaches the
+    model is the provider's business: the API inlines it as base64, the CLI
+    writes it into a directory of its own and reads it.
     """
     if document.source_format == "pdf":
-        return (Document(content=document.file_bytes, media_type="application/pdf"),)
+        return (
+            Document(content=document.file_bytes, media_type="application/pdf", path="resume.pdf"),
+        )
     return ()
 
 
 def _text_for(document: ExtractedDocument) -> str:
-    """The prompt variable carrying the resume, for non-PDF formats."""
+    """The prompt variable carrying the resume, for non-PDF formats.
+
+    For a PDF the text is deliberately absent: pdfplumber reads two-column
+    layouts straight across, so its output would be worse than no text at all.
+    The file goes to the model instead.
+    """
     if document.source_format == "pdf":
-        return "(the resume is attached as a PDF document above)"
+        return "(the resume is attached as a file — read it rather than looking for it here)"
     return document.raw_text
 
 
 async def extract_profile(
     document: ExtractedDocument,
     *,
-    client: LLMClient,
+    router: LLMRouter,
     today: date,
-) -> tuple[ProfileExtraction, TokenUsage, float | None]:
-    """Ask the model to read the resume."""
-    result = await client.complete_json(
+) -> tuple[ProfileExtraction, LLMUsage]:
+    """Ask whichever provider serves this task to read the resume."""
+    result = await router.complete_json(
         "extract_profile",
         ProfileExtraction,
-        tier=LLMTier.HEAVY,
-        effort=EXTRACTION_EFFORT,
+        task=TASK,
         variables={"today": today.isoformat(), "resume_text": _text_for(document)},
         documents=_documents_for(document),
     )
-    return result.value, result.usage, result.cost_usd
+    return result.value, usage_ledger.record(result.usage)
 
 
 def to_profile_create(
@@ -128,6 +137,7 @@ def to_profile_create(
                 raw_names=list(skill.raw_names),
                 years=skill.years,
                 level=skill.level,
+                evidence=skill.evidence,
                 last_used_year=skill.last_used_year,
             )
             for skill in enriched.skills
@@ -140,7 +150,7 @@ async def build_profile(
     *,
     session: AsyncSession,
     profile_id: UUID,
-    client: LLMClient,
+    router: LLMRouter | None = None,
     today: date | None = None,
 ) -> BuildResult:
     """Fill in a profile row that already exists in ``pending``.
@@ -153,11 +163,14 @@ async def build_profile(
     started = time.perf_counter()
     today = today or datetime.now(UTC).date()
     profiles = ProfileRepository(session)
-    usage = TokenUsage()
+    usage: LLMUsage | None = None
     cost: float | None = None
 
     try:
-        extraction, usage, cost = await extract_profile(document, client=client, today=today)
+        extraction, usage = await extract_profile(
+            document, router=router or get_router(), today=today
+        )
+        cost = usage.cost_usd
         enriched = enricher.enrich(extraction, today=today)
         payload = to_profile_create(extraction, enriched, document)
 
@@ -220,8 +233,11 @@ async def build_profile(
         stated_years_delta=(
             None if enriched.stated_years_delta is None else float(enriched.stated_years_delta)
         ),
-        input_tokens=usage.input_tokens,
-        output_tokens=usage.output_tokens,
+        provider=usage.provider if usage else None,
+        model=usage.model if usage else None,
+        accounting=usage.accounting if usage else None,
+        input_tokens=usage.input_tokens if usage else 0,
+        output_tokens=usage.output_tokens if usage else 0,
         cost_usd=cost,
         duration_seconds=round(duration, 2),
     )

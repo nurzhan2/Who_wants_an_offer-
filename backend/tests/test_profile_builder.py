@@ -11,10 +11,20 @@ wiring between them, which is where the failures nobody sees live:
   that is entirely ordinary;
 * every expected failure must leave the row ``failed`` with a reason. A profile
   stuck in ``pending`` is invisible to the user and to the logs alike, and the
-  embedding step is the one that used to end up there.
+  embedding step is the one that used to end up there;
+* what the call consumed must reach the usage ledger, because the pipeline is
+  the only thing that knows the call happened and ``/metrics`` reads nothing
+  else.
 
-No network and no model: the LLM is a stand-in returning a prepared extraction,
-and the embedding provider is the deterministic fake.
+No network and no model: the providers behind the router are stand-ins
+returning a prepared extraction, and the embedding provider is the
+deterministic fake.
+
+The router itself is real. Every provider name is bound to the same stand-in,
+so whichever chain ``LLM_ROUTING`` currently describes resolves to it — the
+tests stay indifferent to which provider resume extraction is configured for,
+while still going through the routing and effort-defaulting code that runs in
+production.
 """
 
 from collections.abc import Iterator, Sequence
@@ -25,16 +35,19 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from structlog.testing import capture_logs
 
 from app.core.config import settings
 from app.core.exceptions import LLMError
-from app.db.enums import ParseStatus, RemoteType, Seniority
+from app.db.enums import ParseStatus, RemoteType, Seniority, SkillEvidence, SkillLevel
 from app.db.models import CandidateProfile
 from app.db.repositories.profile import ProfileRepository
-from app.llm.client import LLMClient, LLMRefusalError, LLMResult
-from app.llm.pricing import TokenUsage
+from app.llm import usage as usage_ledger
+from app.llm.base import Document, Effort, LLMResult, LLMTask, LLMUsage
+from app.llm.providers.anthropic_api import LLMRefusalError
+from app.llm.router import LLMRouter
 from app.matching import embeddings
 from app.resume import profile_builder
 from app.resume.extractor import ExtractedDocument
@@ -52,35 +65,76 @@ RESUME_MARKER = "ZZ-SECRET-RESUME-CONTENT-ZZ"
 # ── stand-ins ─────────────────────────────────────────────────────────
 
 
-class StubLLM:
-    """An :class:`LLMClient` that answers from memory instead of the network.
+#: What the stand-in reports having consumed. ``subscription`` because resume
+#: extraction is routed to the Claude Code CLI, whose tokens come out of a plan
+#: that is already paid for — the ledger must keep that apart from an invoice.
+STUB_USAGE = LLMUsage(
+    provider="stub",
+    model="stub-model",
+    task=LLMTask.RESUME_EXTRACTION,
+    input_tokens=1200,
+    output_tokens=300,
+    cost_usd=0.02,
+    accounting="subscription",
+)
+
+
+class StubProvider:
+    """An :class:`LLMProvider` that answers from memory instead of the network.
 
     Holds either the extraction to return or the exception to raise, so a test
     picks a failure mode by construction rather than by patching internals.
     """
+
+    name = "stub"
 
     def __init__(self, answer: ProfileExtraction | Exception) -> None:
         self._answer = answer
         #: Every call, so a test can assert the resume really was sent.
         self.calls: list[dict[str, Any]] = []
 
-    async def complete_json(
+    def is_available(self) -> bool:
+        """Always. A stand-in that reported itself absent would route nowhere."""
+        return True
+
+    async def complete_json[ResultT: BaseModel](
         self,
         prompt_name: str,
-        response_model: type[ProfileExtraction],
-        **kwargs: Any,
-    ) -> LLMResult[ProfileExtraction]:
+        response_model: type[ResultT],
+        *,
+        task: LLMTask,
+        variables: dict[str, Any] | None = None,
+        documents: Sequence[Document] = (),
+        effort: Effort | None = None,
+        cached_prefix: str | None = None,
+    ) -> LLMResult[ResultT]:
         """Record the call, then return the prepared answer or raise."""
-        self.calls.append({"prompt_name": prompt_name, "response_model": response_model, **kwargs})
+        self.calls.append(
+            {
+                "prompt_name": prompt_name,
+                "response_model": response_model,
+                "task": task,
+                "variables": variables,
+                "documents": documents,
+                "effort": effort,
+                "cached_prefix": cached_prefix,
+            }
+        )
         if isinstance(self._answer, Exception):
             raise self._answer
-        return LLMResult(
-            value=self._answer,
-            model="stub-model",
-            usage=TokenUsage(input_tokens=1200, output_tokens=300),
-            cost_usd=0.02,
-            attempts=1,
-        )
+        return LLMResult(value=cast(ResultT, self._answer), usage=STUB_USAGE, attempts=1)
+
+
+def stub_router(answer: ProfileExtraction | Exception) -> tuple[LLMRouter, StubProvider]:
+    """A real router whose every provider is the same stand-in.
+
+    Binding all three names rather than only the configured one keeps these
+    tests true whatever ``LLM_ROUTING`` says today: moving resume extraction
+    from the CLI to the API is configuration, and it must not break the tests
+    that own the orchestration around it.
+    """
+    provider = StubProvider(answer)
+    return LLMRouter({name: cast(Any, provider) for name in ("api", "cli", "ollama")}), provider
 
 
 def unavailable_provider() -> embeddings.EmbeddingProvider:
@@ -105,9 +159,17 @@ def job(
     *,
     title: str = "Backend Engineer",
     domains: Sequence[str] = ("fintech",),
+    stack: Sequence[str] = (),
 ) -> WorkPeriod:
     """One work period with the fields the enrichment actually reads."""
-    return WorkPeriod(company=company, title=title, start=start, end=end, domains=list(domains))
+    return WorkPeriod(
+        company=company,
+        title=title,
+        start=start,
+        end=end,
+        domains=list(domains),
+        stack=list(stack),
+    )
 
 
 #: Two jobs held at the same time. Summed they are three years; merged, which
@@ -189,6 +251,26 @@ def fake_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> Iterator[
         real_get_provider.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def ledger() -> Iterator[usage_ledger.UsageLedger]:
+    """The process-wide usage ledger, empty before the test and after it.
+
+    A module-level singleton: without the reset a test would be reading totals
+    left behind by whatever ran before it, and would leave its own behind for
+    whatever runs next.
+
+    Autouse because every run in this file records a call, not just the two
+    tests that read the ledger back: without it the file would finish having
+    quietly added seven stub calls and $0.14 to the totals ``/metrics`` reports
+    for the process, and the next file to read them would be reading ours.
+    """
+    usage_ledger.ledger.reset()
+    try:
+        yield usage_ledger.ledger
+    finally:
+        usage_ledger.ledger.reset()
+
+
 @pytest_asyncio.fixture
 async def pending_id(profiles: ProfileRepository) -> UUID:
     """The reserved row the upload endpoint hands the background task."""
@@ -209,11 +291,12 @@ async def build(
     document: ExtractedDocument | None = None,
 ) -> profile_builder.BuildResult:
     """Run the pipeline against a stand-in model."""
+    router, _ = stub_router(answer)
     return await profile_builder.build_profile(
         document if document is not None else make_document(),
         session=session,
         profile_id=profile_id,
-        client=cast(LLMClient, StubLLM(answer)),
+        router=router,
         today=TODAY,
     )
 
@@ -453,6 +536,122 @@ async def test_collapsing_keeps_both_spellings_on_the_surviving_row(
     assert set(profile.skills[0].raw_names) == {"Python", "Python 3"}
 
 
+# ── evidence, kept apart from level ───────────────────────────────────
+
+
+async def test_a_skill_dated_by_a_job_stack_is_corroborated(
+    db_session: AsyncSession, profiles: ProfileRepository, pending_id: UUID, fake_embeddings: None
+) -> None:
+    """A skill the resume ties to a dated job is the only kind whose years are
+    computed rather than assumed, and ``evidence`` is what records that.
+
+    The link is made through the job's ``stack`` rather than the skill's own
+    ``companies`` list on purpose: the model fills ``companies`` unreliably, and
+    the per-job stack is the fallback that recovers the dates. If that fallback
+    stops working the skill silently becomes undated — same name, same level
+    even, but nothing behind it — and only ``evidence`` would show it."""
+    extraction = make_extraction(
+        work_periods=(job("Acme", "2019-01", "2023-12", stack=["Python"]),),
+        skills=[ExtractedSkill(name="Python", mentioned_in="work_description")],
+    )
+
+    await build(db_session, pending_id, extraction)
+
+    profile = await stored(profiles, db_session, pending_id)
+    assert [skill.canonical_name for skill in profile.skills] == ["python"]
+    python = profile.skills[0]
+    assert python.evidence is SkillEvidence.CORROBORATED
+    assert python.years is not None
+    # Five dated years, so the level is measured rather than defaulted.
+    assert python.level is SkillLevel.STRONG
+
+
+async def test_a_sidebar_only_skill_is_stated_and_lands_at_working_not_basic(
+    db_session: AsyncSession, profiles: ProfileRepository, pending_id: UUID, fake_embeddings: None
+) -> None:
+    """The phase 2.5 fix, pinned end to end.
+
+    A skill named only in the sidebar has nothing dating it. It used to be
+    stored as ``basic``, which the coverage score multiplies by 0.7 — so a
+    candidate lost 30% of that skill's weight for not writing a technology
+    stack under each job. That is a formatting habit, not a competence, and the
+    penalty fell hardest on senior resumes written as prose.
+
+    Level now says how well and ``evidence`` says how sure, and they must stay
+    separate: an undated skill is ``working`` (the neutral rung) and ``stated``.
+    Collapsing them again would reintroduce the discount with nothing in the
+    schema to notice."""
+    extraction = make_extraction(
+        work_periods=(job("Acme", "2019-01", "2023-12", stack=["Python"]),),
+        skills=[
+            ExtractedSkill(name="Python", mentioned_in="work_description"),
+            ExtractedSkill(name="Kubernetes", mentioned_in="skills_block"),
+        ],
+    )
+
+    await build(db_session, pending_id, extraction)
+
+    profile = await stored(profiles, db_session, pending_id)
+    by_name = {skill.canonical_name: skill for skill in profile.skills}
+    assert by_name["kubernetes"].evidence is SkillEvidence.STATED
+    assert by_name["kubernetes"].years is None
+    assert by_name["kubernetes"].level is SkillLevel.WORKING
+    # The dated skill in the same resume is the control: "stated" has to be a
+    # statement about this skill, not about every skill on the profile.
+    assert by_name["python"].evidence is SkillEvidence.CORROBORATED
+
+
+# ── the call is accounted for ─────────────────────────────────────────
+
+
+async def test_the_extraction_usage_reaches_the_ledger(
+    db_session: AsyncSession,
+    pending_id: UUID,
+    fake_embeddings: None,
+    ledger: usage_ledger.UsageLedger,
+) -> None:
+    """``/metrics`` reports what this process has spent, and the ledger is the
+    only place it reads. Nothing else counts this call: providers deliberately
+    do not record their own usage, because a logical operation made of several
+    calls should be attributable to the operation — so if the pipeline forgets
+    to record, an upload costs money and the endpoint reports zero.
+
+    The accounting bucket is asserted as well as the number. Resume extraction
+    runs on subscription quota, and quota added to invoiced dollars produces a
+    figure that is neither the bill nor the usage but will be read as money."""
+    result = await build(db_session, pending_id, make_extraction())
+
+    assert result.usage == STUB_USAGE
+    extraction_calls = ledger.by_task[LLMTask.RESUME_EXTRACTION.value]
+    assert extraction_calls.calls == 1
+    assert extraction_calls.input_tokens == STUB_USAGE.input_tokens
+    assert extraction_calls.output_tokens == STUB_USAGE.output_tokens
+    assert ledger.by_provider["stub"].calls == 1
+    # Quota, priced as if it were sold, and never confused with an invoice.
+    assert ledger.subscription_usd == pytest.approx(STUB_USAGE.cost_usd)
+    assert ledger.invoiced_usd == 0.0
+
+
+async def test_a_failed_run_still_reports_what_the_extraction_cost(
+    db_session: AsyncSession,
+    pending_id: UUID,
+    fake_embeddings: None,
+    monkeypatch: pytest.MonkeyPatch,
+    ledger: usage_ledger.UsageLedger,
+) -> None:
+    """The model was paid for whether or not the rest of the run worked. A
+    failure that dropped the usage would make the cheapest way to hide spend a
+    broken embedding step — and the embedding step is exactly the one that
+    fails on a machine without the extra."""
+    monkeypatch.setattr(embeddings, "get_provider", unavailable_provider)
+
+    result = await build(db_session, pending_id, make_extraction())
+
+    assert result.status is ParseStatus.FAILED
+    assert result.cost_usd == STUB_USAGE.cost_usd
+    assert ledger.by_task[LLMTask.RESUME_EXTRACTION.value].calls == 1
+
+
 # ── failure handling ──────────────────────────────────────────────────
 
 
@@ -613,19 +812,27 @@ async def test_a_pdf_is_handed_to_the_model_as_a_document(
 ) -> None:
     """Line-oriented text extraction reads straight across a two-column resume,
     interleaving the sidebar with the body. Sending that text instead of the
-    file would quietly halve the quality of every extraction."""
-    client = StubLLM(make_extraction())
+    file would quietly halve the quality of every extraction.
+
+    The task the call is made under is asserted here too. It is no longer a
+    label: provider, model, effort and — on the CLI — which tools the agent may
+    use all key off it, and ``RESUME_EXTRACTION`` is the single task allowed to
+    read a file off the disk. A call made under any other task would either be
+    routed elsewhere or arrive without the permission it needs to see this
+    PDF."""
+    router, provider = stub_router(make_extraction())
     pdf = make_document(raw_text="sidebar text", source_format="pdf")
 
     await profile_builder.build_profile(
         pdf,
         session=db_session,
         profile_id=pending_id,
-        client=cast(LLMClient, client),
+        router=router,
         today=TODAY,
     )
 
-    call = client.calls[0]
+    call = provider.calls[0]
+    assert call["task"] is LLMTask.RESUME_EXTRACTION
     assert [document.content for document in call["documents"]] == [pdf.file_bytes]
     assert "sidebar text" not in str(call["variables"]["resume_text"])
 
@@ -635,16 +842,16 @@ async def test_a_text_upload_is_sent_as_text(
 ) -> None:
     """DOCX and plain text have no column problem worth solving, and attaching
     them as documents would inflate every request for nothing."""
-    client = StubLLM(make_extraction())
+    router, provider = stub_router(make_extraction())
 
     await profile_builder.build_profile(
         make_document(raw_text="Опыт работы: 2 года."),
         session=db_session,
         profile_id=pending_id,
-        client=cast(LLMClient, client),
+        router=router,
         today=TODAY,
     )
 
-    call = client.calls[0]
+    call = provider.calls[0]
     assert call["documents"] == ()
     assert call["variables"]["resume_text"] == "Опыт работы: 2 года."

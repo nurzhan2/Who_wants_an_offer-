@@ -13,7 +13,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.db.enums import Seniority, SkillLevel
+from app.db.enums import Seniority, SkillEvidence, SkillLevel
 from app.resume import enricher
 from app.resume.skills import SkillCanonicalizer
 from app.schemas.llm import ExtractedSkill, ProfileExtraction, SkillMention, StatedLevel, WorkPeriod
@@ -277,7 +277,44 @@ def test_a_sidebar_only_skill_still_has_no_evidence() -> None:
     )
 
     assert skills[0].years is None
-    assert skills[0].level is SkillLevel.BASIC
+    assert skills[0].level is SkillLevel.WORKING
+    assert skills[0].evidence is SkillEvidence.STATED
+
+
+def test_a_dated_skill_is_corroborated() -> None:
+    """The two fields answer different questions, and this is the one that says
+    the years behind the level are computed rather than assumed."""
+    periods = (
+        WorkPeriod(
+            company="Acme", title="Engineer", start="2020-01", end="2023-12", stack=["Python"]
+        ),
+    )
+    skills, _ = enricher.enrich_skills(
+        extraction(skills=(skill("Python"),), periods=periods),
+        today=TODAY,
+        canonicalizer=canonicalizer(),
+    )
+
+    assert skills[0].evidence is SkillEvidence.CORROBORATED
+
+
+def test_one_dated_mention_corroborates_the_merged_skill() -> None:
+    """Merging must not let an undated spelling erase the evidence a dated one
+    brought with it."""
+    periods = (
+        WorkPeriod(
+            company="Acme", title="Engineer", start="2020-01", end="2023-12", stack=["Python"]
+        ),
+    )
+    skills, _ = enricher.enrich_skills(
+        extraction(
+            skills=(skill("Python 3"), skill("Python", companies=("Acme",))), periods=periods
+        ),
+        today=TODAY,
+        canonicalizer=canonicalizer(),
+    )
+
+    assert skills[0].evidence is SkillEvidence.CORROBORATED
 
 
 # ── unknown skills ────────────────────────────────────────────────────
@@ -325,35 +362,33 @@ def test_blank_skill_names_are_ignored(raw: str) -> None:
 
 def test_a_stated_level_beats_anything_inferred() -> None:
     """When the resume says it, believe it: the heuristic exists for the rest."""
-    level = enricher.infer_level(stated="basic", years=Decimal("10"), has_work_evidence=True)
-
-    assert level is SkillLevel.BASIC
+    assert enricher.infer_level(stated="basic", years=Decimal("10")) is SkillLevel.BASIC
 
 
 @pytest.mark.parametrize(
     ("years", "expected"),
     [
-        (None, SkillLevel.BASIC),
         (Decimal("0.5"), SkillLevel.BASIC),
         (Decimal("2"), SkillLevel.WORKING),
         (Decimal("4"), SkillLevel.STRONG),
         (Decimal("8"), SkillLevel.EXPERT),
     ],
 )
-def test_level_follows_years_when_there_is_work_evidence(
-    years: Decimal | None, expected: SkillLevel
-) -> None:
+def test_level_follows_years_when_the_skill_is_dated(years: Decimal, expected: SkillLevel) -> None:
     """Years at a named employer are the strongest evidence available."""
-    assert enricher.infer_level(stated=None, years=years, has_work_evidence=True) is expected
+    assert enricher.infer_level(stated=None, years=years) is expected
 
 
-def test_a_skill_only_ever_listed_is_capped_at_working() -> None:
-    """Naming a technology in a bullet list is not the same as describing having
-    used it, however long the career is. Without the cap, a long CV would turn
-    every sidebar entry into expertise."""
-    level = enricher.infer_level(stated=None, years=Decimal("9"), has_work_evidence=False)
+def test_an_undated_skill_is_neutral_rather_than_weak() -> None:
+    """A skill with nothing dating it used to be scored ``basic``, which the
+    coverage score multiplies by 0.7.
 
-    assert level is SkillLevel.WORKING
+    Plenty of strong candidates never write a technology list under each job,
+    so that was a 30% penalty for a formatting habit rather than a fact about
+    the person. The uncertainty is recorded as ``evidence`` instead; the level
+    is the neutral rung.
+    """
+    assert enricher.infer_level(stated=None, years=None) is SkillLevel.WORKING
 
 
 # ── seniority ─────────────────────────────────────────────────────────
@@ -482,6 +517,7 @@ def test_stale_skills_are_identifiable() -> None:
         raw_names=("Python",),
         years=None,
         level=SkillLevel.WORKING,
+        evidence=SkillEvidence.STATED,
         last_used_year=2025,
     )
     cold = enricher.EnrichedSkill(
@@ -489,6 +525,7 @@ def test_stale_skills_are_identifiable() -> None:
         raw_names=("Angular",),
         years=None,
         level=SkillLevel.WORKING,
+        evidence=SkillEvidence.STATED,
         last_used_year=2019,
     )
 
@@ -502,7 +539,8 @@ def test_a_skill_never_used_at_a_job_is_not_stale() -> None:
         canonical_name="rust",
         raw_names=("Rust",),
         years=None,
-        level=SkillLevel.BASIC,
+        level=SkillLevel.WORKING,
+        evidence=SkillEvidence.STATED,
         last_used_year=None,
     )
 

@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.db.enums import ParseStatus, RemoteType, Seniority, SkillLevel
+from app.db.enums import ParseStatus, RemoteType, Seniority, SkillEvidence, SkillLevel
 from app.schemas.common import CurrencyCode, ReadModel
 
 Years = Annotated[Decimal, Field(ge=0, le=60, decimal_places=1)]
@@ -44,6 +44,9 @@ class SkillCreate(BaseModel):
     raw_names: list[str] = Field(default_factory=list)
     years: Years | None = None
     level: SkillLevel = SkillLevel.WORKING
+    #: Whether dated work backs the level up. Shown in the UI and given to the
+    #: LLM verdict; whether it changes the score is a phase 5 decision.
+    evidence: SkillEvidence = SkillEvidence.STATED
     last_used_year: int | None = Field(default=None, ge=1970, le=2100)
 
 
@@ -55,6 +58,7 @@ class SkillRead(ReadModel):
     raw_names: list[str]
     years: Decimal | None
     level: SkillLevel
+    evidence: SkillEvidence
     last_used_year: int | None
 
 

@@ -1,11 +1,15 @@
-"""Anthropic client wrapper.
+"""The Anthropic API as an LLM provider.
+
+Chosen for the tasks that run often and cannot wait: re-rank, pasted-vacancy
+parsing, and as the terminus of every fallback chain. It is the only provider
+that is available whenever a key is configured.
 
 What this adds over the bare SDK:
 
-* **Two models, chosen per call.** ``LLMTier.HOT`` is the cheap path — vacancy
-  re-rank and Telegram post parsing, thousands of calls per pipeline run.
-  ``LLMTier.HEAVY`` is resume extraction and cover letters, which happen rarely
-  and where quality is worth the money.
+* **Two models, chosen by task.** The tasks in ``HEAVY_TASKS`` — resume
+  extraction, cover letters, tooling — run rarely and their quality decides
+  everything downstream, so they get the strong model. Everything else is the
+  hot path, thousands of calls per pipeline run, and gets the cheap one.
 * **Effort is chosen per call too**, never globally. One global setting would
   either overspend on the hot path or underthink on the cold one; phase 8 turns
   that difference into a real invoice.
@@ -23,8 +27,7 @@ What this adds over the bare SDK:
 import base64
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import StrEnum
-from typing import Any, Literal
+from typing import Any
 
 import anthropic
 from anthropic import AsyncAnthropic
@@ -41,13 +44,17 @@ from app.core.config import settings
 from app.core.exceptions import LLMError
 from app.core.logging import get_logger
 from app.llm import prompts
+from app.llm.base import (
+    BatchViaLoop,
+    Document,
+    Effort,
+    LLMResult,
+    LLMTask,
+    LLMUsage,
+)
 from app.llm.pricing import TokenUsage, cost_usd
 
 logger = get_logger(__name__)
-
-#: How hard the model should think. Named at the call site, never defaulted
-#: globally — see the module docstring.
-Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 #: Transport failures worth retrying. A 400 is a bug in our request and must
 #: not be retried; a 429 or a 5xx is the server asking us to wait.
@@ -60,11 +67,12 @@ RETRYABLE = (
 )
 
 
-class LLMTier(StrEnum):
-    """Which configured model a call should use."""
-
-    HOT = "hot"
-    HEAVY = "heavy"
+#: Which configured model each task uses. The cold tasks are rare and their
+#: quality decides everything downstream; the hot ones run thousands of times a
+#: pipeline run and must stay cheap.
+HEAVY_TASKS: frozenset[LLMTask] = frozenset(
+    {LLMTask.RESUME_EXTRACTION, LLMTask.COVER_LETTER, LLMTask.TOOLING}
+)
 
 
 class LLMRefusalError(LLMError):
@@ -78,23 +86,16 @@ class LLMRefusalError(LLMError):
     problem_type = "llm-refusal"
 
 
-@dataclass(frozen=True, slots=True)
-class Document:
-    """A file handed to the model as-is, so it sees the layout."""
-
-    content: bytes
-    media_type: str = "application/pdf"
-
-    def to_block(self) -> dict[str, Any]:
-        """The content block the Messages API expects."""
-        return {
-            "type": "document",
-            "source": {
-                "type": "base64",
-                "media_type": self.media_type,
-                "data": base64.standard_b64encode(self.content).decode(),
-            },
-        }
+def document_block(document: Document) -> dict[str, Any]:
+    """The content block the Messages API expects for a file."""
+    return {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": document.media_type,
+            "data": base64.standard_b64encode(document.content).decode(),
+        },
+    }
 
 
 @dataclass(slots=True)
@@ -112,23 +113,17 @@ class RetryBudget:
         self.remaining = max(1, self.remaining - attempts)
 
 
-@dataclass(frozen=True, slots=True)
-class LLMResult[ResultT: BaseModel]:
-    """A validated answer plus what it cost to get."""
+class AnthropicAPIProvider(BatchViaLoop):
+    """Everything this project sends to the Anthropic API goes through here."""
 
-    value: ResultT
-    model: str
-    usage: TokenUsage
-    cost_usd: float | None
-    #: 1 when the model got it right first time, 2 after a validation retry.
-    attempts: int
-
-
-class LLMClient:
-    """Everything this project sends to Anthropic goes through here."""
+    name = "api"
 
     def __init__(self, client: AsyncAnthropic | None = None) -> None:
         self._client = client or self._build_client()
+
+    def is_available(self) -> bool:
+        """Whether a key is configured. Nothing is sent to find out."""
+        return settings.anthropic_api_key is not None
 
     @staticmethod
     def _build_client() -> AsyncAnthropic:
@@ -145,19 +140,20 @@ class LLMClient:
         )
 
     @staticmethod
-    def model_for(tier: LLMTier) -> str:
-        """Resolve a tier to the configured model id."""
-        return settings.anthropic_model_heavy if tier is LLMTier.HEAVY else settings.anthropic_model
+    def model_for(task: LLMTask) -> str:
+        """Resolve a task to the configured model id."""
+        return settings.anthropic_model_heavy if task in HEAVY_TASKS else settings.anthropic_model
 
     async def complete_json[ResultT: BaseModel](
         self,
         prompt_name: str,
         response_model: type[ResultT],
         *,
-        effort: Effort,
-        tier: LLMTier = LLMTier.HOT,
-        variables: dict[str, object] | None = None,
+        task: LLMTask,
+        variables: dict[str, Any] | None = None,
         documents: Sequence[Document] = (),
+        effort: Effort | None = None,
+        cached_prefix: str | None = None,
         max_tokens: int | None = None,
     ) -> LLMResult[ResultT]:
         """Render a prompt, call the model, return a validated object.
@@ -167,10 +163,28 @@ class LLMClient:
         validated here, and a validation failure earns exactly one retry with
         the error text fed back. A second failure is an :class:`LLMError`: at
         that point the caller should fall back, not keep paying.
+
+        ``cached_prefix`` becomes the FIRST content block, marked for caching.
+        The order is the whole mechanism: caching matches a prefix, so anything
+        placed after the varying part of the message caches nothing. In re-rank
+        the candidate profile is identical across all thirty calls, which is
+        one full-price read and twenty-nine at a tenth of it — but only while
+        it stays in front.
         """
-        model = self.model_for(tier)
+        model = self.model_for(task)
+        chosen_effort = effort or settings.effort_for(task)
         rendered = prompts.render(prompt_name, **(variables or {}))
-        content: list[dict[str, Any]] = [document.to_block() for document in documents]
+
+        content: list[dict[str, Any]] = []
+        if cached_prefix:
+            content.append(
+                {
+                    "type": "text",
+                    "text": cached_prefix,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            )
+        content.extend(document_block(document) for document in documents)
         content.append({"type": "text", "text": rendered})
 
         messages: list[dict[str, Any]] = [{"role": "user", "content": content}]
@@ -182,7 +196,7 @@ class LLMClient:
                 model=model,
                 messages=messages,
                 response_model=response_model,
-                effort=effort,
+                effort=chosen_effort,
                 max_tokens=max_tokens or settings.anthropic_max_tokens,
                 budget=budget,
             )
@@ -224,9 +238,17 @@ class LLMClient:
             self._log(prompt_name, model, total, attempt, "ok", source=source)
             return LLMResult(
                 value=value,
-                model=model,
-                usage=total,
-                cost_usd=cost_usd(model, total),
+                usage=LLMUsage(
+                    provider=self.name,
+                    model=model,
+                    task=task,
+                    input_tokens=total.input_tokens,
+                    output_tokens=total.output_tokens,
+                    cache_read_tokens=total.cache_read_tokens,
+                    cache_write_tokens=total.cache_write_tokens,
+                    cost_usd=cost_usd(model, total),
+                    accounting="measured",
+                ),
                 attempts=attempt,
             )
 

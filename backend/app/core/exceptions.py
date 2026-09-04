@@ -103,6 +103,18 @@ class SchemaMismatchError(AppError):
     problem_type = "schema-mismatch"
 
 
+class ConfigurationError(AppError):
+    """The configuration cannot be served safely.
+
+    Raised at startup, like SchemaMismatchError: a deployment that is wired
+    wrongly should refuse to serve rather than discover it under load.
+    """
+
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    title = "Invalid configuration"
+    problem_type = "configuration-error"
+
+
 class LLMError(AppError):
     """The LLM call failed, or returned something the schema rejects twice in a row."""
 

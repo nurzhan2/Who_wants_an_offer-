@@ -45,7 +45,7 @@ skills, the experience delta and the LLM's verdict. See
 | DB | PostgreSQL 17 + `pgvector` |
 | Queue / schedule | APScheduler (v1) → Celery + Redis (v2) |
 | Embeddings | `BAAI/bge-m3` via sentence-transformers (multilingual RU/EN/KZ) |
-| LLM | Anthropic Claude (resume extraction, re-rank, cover letters) |
+| LLM | Routed per task: Claude Code CLI (subscription), Anthropic API, local Ollama |
 | Frontend | React 18, Vite, TypeScript, TanStack Query + Table, Tailwind, shadcn/ui |
 | Infra | Docker Compose, GitHub Actions CI |
 
@@ -63,6 +63,19 @@ npm --prefix frontend install && npm --prefix frontend run dev
 
 With `make` available, the same thing is `make install && make up && make dev`.
 
+## Parsing a resume
+
+```bash
+uv run python scripts/parse_resume.py path/to/cv.pdf
+uv run python scripts/parse_resume.py path/to/cv.pdf --show-columns   # no LLM needed
+```
+
+Resume extraction is routed to the Claude Code CLI by default, so this needs no
+API key — only `claude` on PATH. `--show-columns` prints what pdfplumber makes
+of a two-column PDF, which is the fastest way to see why the file goes to the
+model whole rather than as extracted text. Names, emails and phone numbers are
+masked unless you pass `--show-pii`.
+
 ## Development
 
 | Task | Command |
@@ -72,6 +85,9 @@ With `make` available, the same thing is `make install && make up && make dev`.
 | Type check | `uv run mypy backend/app` |
 | Tests + coverage | `uv run pytest` |
 | Frontend gates | `npm --prefix frontend run typecheck && npm --prefix frontend run lint` |
+| Fast tests (no DB, no model) | `uv run pytest -m "not db and not slow"` |
+| Real embedding model | `make verify-embeddings` (needs `uv sync --extra embeddings`) |
+| Local inference speed | `make bench-ollama` |
 
 Tests need PostgreSQL. Point `TEST_DATABASE_URL` at a throwaway database
 (`docker compose up -d db` provisions `offers_test` automatically). Locally,

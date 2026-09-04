@@ -11,12 +11,66 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from app.llm.base import Effort, LLMTask
+
 Environment = Literal["development", "production"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 #: Port 5436 is the docker-compose stack. A local PostgreSQL on 5432 would
 #: answer too, but without pgvector — a confusing failure much later.
 DEV_DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5436/offers"
+
+#: Providers the router knows how to build. A routing entry naming anything
+#: else is a configuration error, caught at startup rather than on the one call
+#: that needed it.
+PROVIDER_NAMES: frozenset[str] = frozenset({"api", "cli", "ollama"})
+
+
+def default_routing() -> dict[str, str]:
+    """Which provider serves which task.
+
+    The split is arithmetic, not taste. A Claude Code CLI call carries about
+    50,000 tokens of its own system prompt whatever the payload — measured at
+    $0.064 for a prompt whose answer is ``{"ok": true}`` — so the tasks that run
+    once per upload go there and the ones that run hundreds of times a day do
+    not. Re-rank alone, at 120 calls a day, would be roughly $44 a day of
+    subscription quota before a single useful token.
+    """
+    return {
+        LLMTask.RESUME_EXTRACTION.value: "cli",
+        LLMTask.COVER_LETTER.value: "cli",
+        LLMTask.TOOLING.value: "cli",
+        LLMTask.TELEGRAM_PARSE.value: "ollama",
+        LLMTask.VACANCY_PARSE.value: "api",
+        LLMTask.RERANK.value: "api",
+    }
+
+
+def default_fallback_chain() -> dict[str, list[str]]:
+    """Where a call goes when its provider cannot serve it.
+
+    The API is the terminus: it is the only provider available whenever a key
+    is configured. Every fallback is logged at WARNING — a quiet switch would
+    put two extraction qualities in the same dataset with no way to tell which
+    rows came from which.
+    """
+    return {"cli": ["api"], "ollama": ["api"], "api": []}
+
+
+def default_task_effort() -> dict[str, Effort]:
+    """How hard to think, per task.
+
+    One global setting would either overspend on the hot path or underthink on
+    the cold one: re-rank runs 120 times a day, resume extraction runs once.
+    """
+    return {
+        LLMTask.RESUME_EXTRACTION.value: "high",
+        LLMTask.COVER_LETTER.value: "high",
+        LLMTask.TOOLING.value: "high",
+        LLMTask.VACANCY_PARSE.value: "medium",
+        LLMTask.TELEGRAM_PARSE.value: "low",
+        LLMTask.RERANK.value: "low",
+    }
 
 
 class ModelPricing(BaseModel):
@@ -99,6 +153,35 @@ class Settings(BaseSettings):
     anthropic_max_retries: Annotated[int, Field(ge=0, le=10)] = 4
     #: USD per million tokens, keyed by model id. See ModelPricing.
     llm_pricing: dict[str, ModelPricing] = Field(default_factory=default_pricing)
+    #: task -> provider. Moving a task between providers is configuration.
+    llm_routing: dict[str, str] = Field(default_factory=default_routing)
+    #: provider -> ordered fallbacks. An empty list means "fail, do not move".
+    llm_fallback_chain: dict[str, list[str]] = Field(default_factory=default_fallback_chain)
+    #: task -> effort.
+    llm_task_effort: dict[str, Effort] = Field(default_factory=default_task_effort)
+
+    # ── Claude Code CLI provider ──────────────────────────────────────
+    #: Resolved from PATH once at startup when unset. An explicit path wins,
+    #: which is how a machine with several installs picks one.
+    claude_cli_binary: str | None = None
+    claude_cli_timeout: Annotated[float, Field(gt=0)] = 300.0
+    #: Reading a file costs a turn, so a task that reads a PDF needs more than
+    #: one. Too few and the call dies against the limit having paid in full.
+    claude_cli_max_turns: Annotated[int, Field(ge=1, le=20)] = 6
+    #: A local process, not a server. Two at a time is plenty.
+    claude_cli_concurrency: Annotated[int, Field(ge=1, le=8)] = 2
+
+    # ── Ollama provider ───────────────────────────────────────────────
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "qwen2.5:7b-instruct"
+    ollama_timeout: Annotated[float, Field(gt=0)] = 180.0
+
+    #: Two-stage re-rank: a cheap pass over everything, an expensive pass over
+    #: what survives. Wired in phase 5; the models live here so switching it on
+    #: is configuration rather than a code change.
+    rerank_stage_models: list[str] = Field(
+        default_factory=lambda: ["claude-haiku-4-5", "claude-sonnet-5"]
+    )
 
     # ── Embeddings ────────────────────────────────────────────────────
     embedding_model: str = "BAAI/bge-m3"
@@ -169,6 +252,51 @@ class Settings(BaseSettings):
         exactly what the README tells you to do — made the app refuse to start.
         """
         return default_pricing() if value is None else value
+
+    @model_validator(mode="after")
+    def _routing_is_complete_and_terminating(self) -> "Settings":
+        """Reject a routing table that cannot answer some call.
+
+        Every failure here is a startup error rather than a surprise on the one
+        task nobody exercised: a task with no route, a provider that does not
+        exist, or a fallback chain that loops instead of reaching a terminus.
+        """
+        missing = sorted({task.value for task in LLMTask} - set(self.llm_routing))
+        if missing:
+            raise ValueError(f"LLM_ROUTING does not cover: {missing}")
+
+        unknown = sorted(set(self.llm_routing.values()) - PROVIDER_NAMES)
+        if unknown:
+            raise ValueError(f"LLM_ROUTING names unknown providers: {unknown}")
+
+        named = set(self.llm_fallback_chain) | {
+            name for chain in self.llm_fallback_chain.values() for name in chain
+        }
+        unknown_chain = sorted(named - PROVIDER_NAMES)
+        if unknown_chain:
+            raise ValueError(f"LLM_FALLBACK_CHAIN names unknown providers: {unknown_chain}")
+
+        for start in self.llm_fallback_chain:
+            seen = {start}
+            current = start
+            while chain := self.llm_fallback_chain.get(current):
+                current = chain[0]
+                if current in seen:
+                    raise ValueError(f"LLM_FALLBACK_CHAIN loops through {current!r}")
+                seen.add(current)
+
+        missing_effort = sorted({task.value for task in LLMTask} - set(self.llm_task_effort))
+        if missing_effort:
+            raise ValueError(f"LLM_TASK_EFFORT does not cover: {missing_effort}")
+        return self
+
+    def provider_for(self, task: LLMTask) -> str:
+        """Which provider a task is routed to."""
+        return self.llm_routing[task.value]
+
+    def effort_for(self, task: LLMTask) -> Effort:
+        """How hard a task should think."""
+        return self.llm_task_effort[task.value]
 
     @field_validator("cors_origins", mode="before")
     @classmethod

@@ -11,13 +11,14 @@ catch are the ones where they drift apart:
 * a profile stuck in ``pending`` for ever because the process that was going to
   parse it is gone.
 
-**No test here may reach Anthropic.** ``httpx``'s ``ASGITransport`` really does
+**No test here may reach a model.** ``httpx``'s ``ASGITransport`` really does
 run FastAPI background tasks once the response is finished, so an upload test
-that left ``parse_in_background`` alone would build an ``LLMClient`` and call
-the API. Every test therefore either replaces ``parse_in_background`` with a
-recorder (``scheduled_parses``) or, where the task itself is the subject,
-stubs out the two things it reaches for: ``profile_builder.build_profile`` and
-``session_factory``.
+that left ``parse_in_background`` alone would build the real ``LLMRouter`` and
+call whichever provider resume extraction is routed to — the Claude Code CLI by
+default, which is a real subprocess and a real bill. Every test therefore
+either replaces ``parse_in_background`` with a recorder (``scheduled_parses``)
+or, where the task itself is the subject, stubs out the two things it reaches
+for: ``profile_builder.build_profile`` and ``session_factory``.
 """
 
 import os
@@ -38,7 +39,7 @@ from app.core.exceptions import PROBLEM_JSON
 from app.db.enums import ParseStatus
 from app.db.models import CandidateProfile
 from app.db.repositories.profile import ProfileRepository
-from app.llm.client import LLMClient
+from app.llm.router import LLMRouter
 from app.resume import profile_builder
 from app.services import resume as resume_service
 
@@ -48,11 +49,12 @@ UPLOAD_URL = f"{settings.api_v1_prefix}/resume/upload"
 #: Enough of a PE header for `filetype` to recognise a Windows executable.
 EXECUTABLE_BYTES = b"MZ\x90\x00\x03\x00\x00\x00" + b"\x00" * 512
 
-#: Passed instead of ``None`` so ``parse_in_background`` never constructs a real
-#: ``LLMClient``. Nothing ever calls a method on it: the tests that use it stub
-#: ``build_profile``, so an attribute access here would be a test that lies
-#: about not talking to Anthropic.
-UNUSED_LLM_CLIENT = cast(LLMClient, object())
+#: Passed instead of ``None`` so ``parse_in_background`` never builds the real
+#: router — which would resolve a provider, and the configured one for resume
+#: extraction is a CLI subprocess. Nothing ever calls a method on it: the tests
+#: that use it stub ``build_profile``, so an attribute access here would be a
+#: test that lies about not talking to a model.
+UNUSED_ROUTER = cast(LLMRouter, object())
 
 
 @pytest.fixture
@@ -276,7 +278,7 @@ async def test_staged_file_is_deleted_after_a_successful_parse(
     staging_dir.mkdir(parents=True)
     staged.write_bytes((RESUMES / "single_column_ru.pdf").read_bytes())
 
-    await resume_service.parse_in_background(profile_id, staged, client=UNUSED_LLM_CLIENT)
+    await resume_service.parse_in_background(profile_id, staged, router=UNUSED_ROUTER)
 
     assert calls == [profile_id]
     assert not staged.exists()
@@ -299,7 +301,7 @@ async def test_staged_file_is_deleted_when_the_parse_fails(
     staging_dir.mkdir(parents=True)
     staged.write_bytes((RESUMES / "single_column_ru.pdf").read_bytes())
 
-    await resume_service.parse_in_background(profile_id, staged, client=UNUSED_LLM_CLIENT)
+    await resume_service.parse_in_background(profile_id, staged, router=UNUSED_ROUTER)
 
     assert not staged.exists()
     # The failure was recorded rather than lost: a profile whose task blew up

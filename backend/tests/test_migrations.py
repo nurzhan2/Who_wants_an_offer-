@@ -37,6 +37,7 @@ EXPECTED_ENUM_TYPES = {
     "remote_type",
     "salary_period",
     "seniority",
+    "skill_evidence",
     "skill_level",
 }
 

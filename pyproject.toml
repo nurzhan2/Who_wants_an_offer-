@@ -72,6 +72,13 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.ruff.lint.isort]
 known-first-party = ["app", "factories", "helpers"]
 
+[tool.ruff.lint.per-file-ignores]
+# RUF001 guards against homoglyph attacks — a Cyrillic "с" hiding in code that
+# reads as ASCII. In a file whose whole point is a realistic Russian job post,
+# every other letter trips it and the signal is zero. Scoped to the files that
+# genuinely carry Russian sample text rather than disabled globally.
+"scripts/bench_ollama.py" = ["RUF001"]
+
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
 

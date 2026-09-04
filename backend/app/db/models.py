@@ -48,6 +48,7 @@ from app.db.enums import (
     RemoteType,
     SalaryPeriod,
     Seniority,
+    SkillEvidence,
     SkillLevel,
     pg_enum,
 )
@@ -133,6 +134,12 @@ class ProfileSkill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     level: Mapped[SkillLevel] = mapped_column(
         pg_enum(SkillLevel, "skill_level"),
         default=SkillLevel.WORKING,
+        nullable=False,
+    )
+    #: How well is one question; how we know is another. See SkillEvidence.
+    evidence: Mapped[SkillEvidence] = mapped_column(
+        pg_enum(SkillEvidence, "skill_evidence"),
+        default=SkillEvidence.STATED,
         nullable=False,
     )
     last_used_year: Mapped[int | None] = mapped_column(Integer)

@@ -23,7 +23,7 @@ from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 
-from app.db.enums import Seniority, SkillLevel
+from app.db.enums import Seniority, SkillEvidence, SkillLevel
 from app.resume import dates
 from app.resume.skills import SkillCanonicalizer, default_canonicalizer
 from app.schemas.llm import ProfileExtraction, StatedLevel
@@ -67,6 +67,8 @@ class EnrichedSkill:
     raw_names: tuple[str, ...]
     years: Decimal | None
     level: SkillLevel
+    #: Whether dated work backs the level up, or the resume merely said so.
+    evidence: SkillEvidence
     last_used_year: int | None
     #: True when the canonicaliser did not recognise the name and the canonical
     #: form is a slug of the original. Counted so the phase 4 dictionary work
@@ -115,34 +117,30 @@ def _level_from(stated: StatedLevel | None) -> SkillLevel | None:
     return SkillLevel(stated)
 
 
-def infer_level(
-    *, stated: StatedLevel | None, years: Decimal | None, has_work_evidence: bool
-) -> SkillLevel:
-    """Proficiency, preferring what the resume says over what we can guess.
+def infer_level(*, stated: StatedLevel | None, years: Decimal | None) -> SkillLevel:
+    """How well the candidate knows a skill.
 
-    Without a stated level the evidence is years plus where the skill appeared.
-    A skill that only ever shows up in a bullet list is capped at ``working``
-    however long the career is: listing a technology is not the same as
-    describing having used it.
+    Only how well. Whether we can prove it is ``SkillEvidence``, and the two
+    used to be the same field: a skill with nothing dating it was scored
+    ``basic``, which the coverage score multiplies by 0.7. That punished
+    candidates who do not list a technology stack under each job — a formatting
+    habit, not a competence — so an undated skill is now ``working``, the
+    neutral rung, and the uncertainty is recorded separately.
     """
     explicit = _level_from(stated)
     if explicit is not None:
         return explicit
 
-    if years is None or years < Decimal("1"):
-        inferred = SkillLevel.BASIC
-    elif years < Decimal("3"):
-        inferred = SkillLevel.WORKING
-    elif years < Decimal("6"):
-        inferred = SkillLevel.STRONG
-    else:
-        inferred = SkillLevel.EXPERT
-
-    if not has_work_evidence and LEVEL_ORDER.index(inferred) > LEVEL_ORDER.index(
-        SkillLevel.WORKING
-    ):
+    if years is None:
+        # Nothing to measure. Neutral, not a penalty.
         return SkillLevel.WORKING
-    return inferred
+    if years < Decimal("1"):
+        return SkillLevel.BASIC
+    if years < Decimal("3"):
+        return SkillLevel.WORKING
+    if years < Decimal("6"):
+        return SkillLevel.STRONG
+    return SkillLevel.EXPERT
 
 
 def _stronger(left: SkillLevel, right: SkillLevel) -> SkillLevel:
@@ -180,6 +178,13 @@ def _merge(existing: EnrichedSkill, incoming: EnrichedSkill) -> EnrichedSkill:
         raw_names=tuple(raw_names),
         years=years,
         level=_stronger(existing.level, incoming.level),
+        # One dated mention corroborates the skill however many undated ones
+        # accompany it.
+        evidence=(
+            SkillEvidence.CORROBORATED
+            if SkillEvidence.CORROBORATED in (existing.evidence, incoming.evidence)
+            else SkillEvidence.STATED
+        ),
         last_used_year=last_used,
         # Known beats unknown: if any spelling was recognised, the skill is.
         is_unknown=existing.is_unknown and incoming.is_unknown,
@@ -250,15 +255,13 @@ def enrich_skills(
         companies = companies_for(extracted.companies, canonical, extraction, resolver)
         span = dates.experience_with(extraction.work_periods, companies, today=today)
         years = span.years if span.months else None
-        has_work_evidence = extracted.mentioned_in == "work_description" or bool(companies)
 
         skill = EnrichedSkill(
             canonical_name=canonical,
             raw_names=(raw,),
             years=years,
-            level=infer_level(
-                stated=extracted.level, years=years, has_work_evidence=has_work_evidence
-            ),
+            level=infer_level(stated=extracted.level, years=years),
+            evidence=(SkillEvidence.CORROBORATED if years is not None else SkillEvidence.STATED),
             last_used_year=dates.last_used_year(extraction.work_periods, companies, today=today),
             is_unknown=is_unknown,
         )

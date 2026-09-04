@@ -28,7 +28,7 @@ from app.db.enums import ParseStatus
 from app.db.models import CandidateProfile
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import session_factory
-from app.llm.client import LLMClient
+from app.llm.router import LLMRouter, get_router
 from app.resume import extractor, profile_builder
 
 logger = get_logger(__name__)
@@ -84,7 +84,7 @@ async def accept_upload(
 
 
 async def parse_in_background(
-    profile_id: UUID, path: Path, *, client: LLMClient | None = None
+    profile_id: UUID, path: Path, *, router: LLMRouter | None = None
 ) -> None:
     """Do the slow half of the upload.
 
@@ -92,13 +92,13 @@ async def parse_in_background(
     moment the response is sent, and reusing it here would either fail or write
     into a transaction nobody will commit.
     """
-    llm = client or LLMClient()
+    llm = router or get_router()
     try:
         content = await asyncio.to_thread(path.read_bytes)
         document = extractor.extract(content, path.name)
         async with session_factory() as session:
             await profile_builder.build_profile(
-                document, session=session, profile_id=profile_id, client=llm
+                document, session=session, profile_id=profile_id, router=llm
             )
             await session.commit()
     except Exception as exc:  # a background task must never die silently
