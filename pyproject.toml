@@ -78,6 +78,13 @@ known-first-party = ["app", "factories", "helpers"]
 # every other letter trips it and the signal is zero. Scoped to the files that
 # genuinely carry Russian sample text rather than disabled globally.
 "scripts/bench_ollama.py" = ["RUF001"]
+# Every finding this module reports is written for the person reading it, in
+# Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
+# fire on almost every word here and would bury a genuine homoglyph.
+"backend/app/resume/ats_audit.py" = ["RUF001", "RUF002"]
+# Its assertions are about Russian resume text and the Russian findings raised
+# on it, so the same reasoning applies as for the module under test.
+"backend/tests/test_ats_audit.py" = ["RUF001", "RUF002"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"

@@ -200,6 +200,23 @@ class Settings(BaseSettings):
     #: Set in dev to cache source responses on disk and stop hammering APIs.
     http_cache_dir: Path | None = None
 
+    # ── ATS readability audit ─────────────────────────────────────────
+    # Thresholds for modelling a dumb parser. They are configuration because
+    # they are judgement calls calibrated against real files, not constants.
+    #: A gap wider than this share of the page width separates two columns.
+    ats_column_gap_ratio: Annotated[float, Field(gt=0, lt=1)] = 0.06
+    #: A band must hold this share of the page's words to count as a column,
+    #: so a page number in a corner is not a second column.
+    ats_min_column_share: Annotated[float, Field(gt=0, lt=1)] = 0.08
+    #: Above this share of lines reading across columns, extraction is broken.
+    ats_mixed_line_ratio: Annotated[float, Field(gt=0, le=1)] = 0.15
+    #: Below this many characters, the file has no usable text layer.
+    ats_min_text_chars: Annotated[int, Field(ge=0)] = 200
+    #: Above this share of unrecognisable characters, the font did not survive.
+    ats_broken_glyph_ratio: Annotated[float, Field(gt=0, lt=1)] = 0.05
+    #: Above this share of words inside tables, sectioning is at risk.
+    ats_table_word_ratio: Annotated[float, Field(gt=0, le=1)] = 0.30
+
     # ── Resume upload ─────────────────────────────────────────────────
     resume_max_file_size_mb: Annotated[int, Field(ge=1, le=100)] = 10
     #: A profile stuck in "pending" longer than this is reported as failed:

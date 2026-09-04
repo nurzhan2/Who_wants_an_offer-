@@ -16,6 +16,7 @@ that matters — what is in the database afterwards is.
 """
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -32,6 +33,7 @@ from app.db.enums import ParseStatus, Seniority, SkillLevel
 from app.db.models import CandidateProfile, ProfileSkill
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import get_session
+from app.schemas.ats import ATSReport, Finding, FindingCode, Severity
 from app.schemas.profile import CandidateProfileUpdate
 from factories import make_profile
 
@@ -407,3 +409,139 @@ async def test_no_active_profile_is_none_rather_than_an_error(
     await db_session.flush()
 
     assert await profiles.get_active() is None
+
+
+# ── GET /{id}/ats-report ──────────────────────────────────────────────
+
+
+def ats_url(profile_id: UUID | str) -> str:
+    """The readability report for one profile."""
+    return f"{PROFILES_URL}/{profile_id}/ats-report"
+
+
+CLEAN_REPORT = ATSReport(
+    score=100,
+    findings=[],
+    checks_run=list(FindingCode),
+    source_format="pdf",
+    page_count=1,
+    word_count=204,
+)
+
+SCAN_REPORT = ATSReport(
+    score=0,
+    findings=[
+        Finding(
+            code=FindingCode.NO_TEXT_LAYER,
+            severity=Severity.CRITICAL,
+            title="Нет текстового слоя",
+            explanation="Из файла извлекается 0 символов.",
+            fix="Экспортируй резюме в PDF из текстового редактора.",
+            penalty=100,
+        )
+    ],
+    checks_run=[FindingCode.NO_TEXT_LAYER],
+    source_format="pdf",
+    page_count=1,
+    word_count=0,
+)
+
+
+async def test_ats_report_is_served_from_what_was_stored(
+    async_client: AsyncClient,
+    profiles: ProfileRepository,
+    db_session: AsyncSession,
+) -> None:
+    """Read back, not recomputed: the uploaded file is long gone by then."""
+    reserved = await profiles.create_pending(
+        filename="scan.pdf",
+        size_bytes=23_338,
+        source_format="pdf",
+        started_at=datetime.now(UTC),
+        ats_report=SCAN_REPORT,
+    )
+    await db_session.flush()
+
+    response = await async_client.get(ats_url(reserved.id))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["score"] == 0
+    assert body["findings"][0]["code"] == FindingCode.NO_TEXT_LAYER.value
+    # The explanation and the fix are the point of the endpoint: a bare score
+    # tells the candidate nothing they can act on.
+    assert body["findings"][0]["fix"]
+    assert body["findings"][0]["explanation"]
+
+
+async def test_a_profile_without_a_report_is_not_reported_as_clean(
+    async_client: AsyncClient,
+    profiles: ProfileRepository,
+    db_session: AsyncSession,
+) -> None:
+    """The dangerous failure mode this endpoint has to avoid.
+
+    Profiles uploaded before the audit existed have no report, and an audit that
+    crashed leaves none either. Answering 200 with an empty finding list would
+    tell those candidates their resume is machine-readable — a claim nothing
+    checked. The absence is reported as an absence."""
+    reserved = await profiles.create_pending(
+        filename="old.pdf", size_bytes=1, source_format="pdf", started_at=datetime.now(UTC)
+    )
+    await db_session.flush()
+
+    response = await async_client.get(ats_url(reserved.id))
+
+    assert response.status_code == 404
+    assert response.headers["content-type"] == PROBLEM_JSON
+    # Distinct from the profile's own 404: the profile exists, the report does not.
+    assert "report" in response.json()["detail"].lower()
+
+
+async def test_an_unknown_profile_has_no_report(async_client: AsyncClient) -> None:
+    """Same 404, so a wrong id cannot be told apart from a missing report by
+    status alone — and neither leaks whether that profile exists."""
+    assert (await async_client.get(ats_url(uuid4()))).status_code == 404
+
+
+async def test_the_report_survives_the_jsonb_round_trip(
+    profiles: ProfileRepository, db_session: AsyncSession
+) -> None:
+    """The column is JSONB, so the enums and the nested findings go through a
+    dict and come back. A field that serialised but did not validate would only
+    surface on somebody's upload."""
+    reserved = await profiles.create_pending(
+        filename="r.pdf",
+        size_bytes=1,
+        source_format="pdf",
+        started_at=datetime.now(UTC),
+        ats_report=SCAN_REPORT,
+    )
+    await db_session.flush()
+
+    assert await profiles.get_ats_report(reserved.id) == SCAN_REPORT
+
+
+async def test_the_profile_response_does_not_carry_the_report(
+    async_client: AsyncClient,
+    profiles: ProfileRepository,
+    db_session: AsyncSession,
+) -> None:
+    """They are ready at different times, so they are separate resources.
+
+    The report exists the moment the file lands; the profile it belongs to is
+    still being extracted for another half-minute. Folding the report into the
+    polled response would put a few kilobytes on every poll to deliver something
+    that stopped changing before the polling began."""
+    reserved = await profiles.create_pending(
+        filename="r.pdf",
+        size_bytes=1,
+        source_format="pdf",
+        started_at=datetime.now(UTC),
+        ats_report=CLEAN_REPORT,
+    )
+    await db_session.flush()
+
+    body = (await async_client.get(url_for(reserved.id))).json()
+
+    assert "ats_report" not in body

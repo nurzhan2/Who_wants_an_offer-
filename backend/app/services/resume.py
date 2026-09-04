@@ -29,7 +29,8 @@ from app.db.models import CandidateProfile
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import session_factory
 from app.llm.router import LLMRouter, get_router
-from app.resume import extractor, profile_builder
+from app.resume import ats_audit, extractor, profile_builder
+from app.schemas.ats import ATSReport
 
 logger = get_logger(__name__)
 
@@ -42,6 +43,29 @@ class UploadAccepted:
 
     profile_id: UUID
     parse_status: ParseStatus
+
+
+def _audit(document: extractor.ExtractedDocument) -> ATSReport | None:
+    """Judge machine readability, or give up quietly if the audit itself breaks.
+
+    Runs in the request rather than the background task on purpose. The report
+    is the one useful thing available before the LLM has finished — a resume no
+    parser can read is worth saying so within the second, not after forty of
+    them — and the checks are arithmetic on word boxes, not a model call.
+
+    A failure here must not fail the upload: a resume that defeats the auditor
+    is still a resume. It is logged rather than swallowed, and the profile keeps
+    a NULL report, which the API reports as "no report" and never as "clean".
+    """
+    try:
+        return ats_audit.audit(
+            document.file_bytes,
+            source_format=document.source_format,
+            raw_text=document.raw_text,
+        )
+    except Exception as exc:
+        logger.exception("resume.ats_audit_failed", error=type(exc).__name__)
+        return None
 
 
 def upload_path(profile_id: UUID, source_format: str) -> Path:
@@ -59,6 +83,7 @@ async def accept_upload(
     immediate 422 instead of a background failure nobody is watching.
     """
     document = extractor.extract(content, filename)
+    report = await asyncio.to_thread(_audit, document)
 
     profiles = ProfileRepository(session)
     profile = await profiles.create_pending(
@@ -66,6 +91,7 @@ async def accept_upload(
         size_bytes=document.size_bytes,
         source_format=document.source_format,
         started_at=datetime.now(UTC),
+        ats_report=report,
     )
 
     settings.upload_dir.mkdir(parents=True, exist_ok=True)
@@ -79,6 +105,8 @@ async def accept_upload(
         size_bytes=document.size_bytes,
         page_count=document.page_count,
         needs_ocr=document.needs_ocr,
+        ats_score=report.score if report else None,
+        ats_findings=[f.code.value for f in report.findings] if report else None,
     )
     return UploadAccepted(profile_id=profile.id, parse_status=ParseStatus.PENDING), path
 

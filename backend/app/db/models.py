@@ -96,6 +96,12 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     parse_error: Mapped[str | None] = mapped_column(Text)
     parse_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    #: Whether a machine can read the uploaded file, as
+    #: :class:`app.schemas.ats.ATSReport`. Computed once at upload — the file
+    #: itself is deleted when parsing ends, so it cannot be recomputed later.
+    #: NULL means no audit was recorded, which is not the same as a clean one.
+    ats_report: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+
     # What the user uploaded, so the dashboard can say which resume is live.
     resume_filename: Mapped[str | None] = mapped_column(String(255))
     resume_size_bytes: Mapped[int | None] = mapped_column(Integer)

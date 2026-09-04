@@ -22,8 +22,18 @@ fly. Six files, each aimed at one thing that breaks a naive extractor:
     is the fixture that catches an extractor which only walks ``doc.paragraphs``.
 ``plain.txt``
     UTF-8 text, no layout at all.
+``scanned.pdf``
+    A picture of a resume: the page is one raster image and the text layer is
+    empty. Reads as a resume to a person and as a blank page to a parser.
+``image_contacts.pdf``
+    Ordinary single-column text, except the one line holding the email and the
+    phone number is an image. Everything an employer needs to *read* survives;
+    the only thing they need to *reply* does not.
 
-Every fixture carries the same four traps on purpose, because the tests assert
+The last two are for the ATS audit rather than the extractor, so they skip the
+traps below: their whole content is the one defect each is named after.
+
+Every text fixture carries the same four traps on purpose, because the tests assert
 on them: overlapping employment (a full-time job and a freelance one running at
 the same time, so summing durations gives the wrong total), a job that is still
 current, near-duplicate skills that canonicalise to one entry ("Python" and
@@ -60,8 +70,9 @@ import structlog
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.shared import Pt
+from PIL import Image, ImageDraw, ImageFont
 from reportlab.lib.pagesizes import A4
-from reportlab.lib.utils import simpleSplit
+from reportlab.lib.utils import ImageReader, simpleSplit
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.pdfgen.canvas import Canvas
@@ -85,6 +96,14 @@ FONT_CANDIDATES: tuple[tuple[str, str], ...] = (
     ("/Library/Fonts/Arial.ttf", "Arial Bold.ttf"),
     ("/System/Library/Fonts/Supplemental/Arial.ttf", "Arial Bold.ttf"),
 )
+
+#: Filled in by :func:`register_fonts`. Pillow needs the TTF path; reportlab
+#: only hands back its own registered name.
+FONT_FILES: dict[str, Path] = {}
+
+#: Pixels per point when rasterising. 2x is about 144 DPI — the resolution an
+#: office scanner produces and well above what any text check needs.
+RASTER_SCALE = 2
 
 #: Frozen clock for the DOCX core properties and zip entries.
 FIXED_TIME = datetime(2024, 1, 1, tzinfo=UTC)
@@ -147,13 +166,19 @@ def render_pdf(draw: Callable[[Canvas], None]) -> bytes:
 
 
 def register_fonts() -> None:
-    """Embed the first Cyrillic-capable TTF pair found on this machine."""
+    """Embed the first Cyrillic-capable TTF pair found on this machine.
+
+    The resolved paths are kept in ``FONT_FILES`` as well, because the rastered
+    fixtures draw with Pillow rather than reportlab and need the file itself.
+    """
     for regular, bold_name in FONT_CANDIDATES:
         regular_path = Path(regular)
         bold_path = regular_path.with_name(bold_name)
         if regular_path.is_file() and bold_path.is_file():
             pdfmetrics.registerFont(TTFont(FONT, str(regular_path)))
             pdfmetrics.registerFont(TTFont(FONT_BOLD, str(bold_path)))
+            FONT_FILES[FONT] = regular_path
+            FONT_FILES[FONT_BOLD] = bold_path
             return
     tried = ", ".join(candidate for candidate, _ in FONT_CANDIDATES)
     raise SystemExit(f"No Cyrillic-capable TTF found. Looked for: {tried}")
@@ -456,6 +481,74 @@ DOCX_ROWS: tuple[tuple[str, str], ...] = (
 )
 
 
+# ── ATS-audit fixtures ────────────────────────────────────────────────
+#
+# These two carry no traps for the extractor. Each is built around exactly one
+# defect, so a test that fires on it is testing that defect and nothing else.
+
+#: The line whose absence from the text layer is the whole point of
+#: image_contacts.pdf. Drawn as pixels there, never as text.
+CONTACT_LINE = line("Алматы, Казахстан  ·  v.ottiskov@example.com  ·  +7 700 000 00 42")
+
+IMAGE_CONTACTS_HEAD: tuple[Block, ...] = (
+    Block("Вера Оттискова", bold=True, size=16),
+    Block("QA Automation Engineer", size=11),
+)
+
+#: Ordinary, well-behaved text: one column, real headings, enough of it that no
+#: other check has anything to say. The only thing missing is a way to reply.
+IMAGE_CONTACTS_BODY: tuple[Block, ...] = (
+    line("Готова к переезду: нет  ·  Формат работы: удалённо"),
+    head("О себе"),
+    line(
+        "Инженер по автоматизации тестирования. Пишу и поддерживаю end-to-end "
+        "тесты для веб-приложений, отвечаю за стабильность прогонов в CI и за "
+        "то, чтобы упавший тест означал сломанный продукт, а не флаки."
+    ),
+    head("Опыт работы"),
+    Block("ООО «Ровный Отпечаток» — Алматы", bold=True, space_before=2),
+    line("Senior QA Automation Engineer"),
+    line("05.2021 — по настоящее время"),
+    line("Перевела ручную регрессию на Playwright, время прогона с 9 часов до 40 минут."),
+    line("Стек: Python, Playwright, pytest, Docker, GitLab CI"),
+    Block("ТОО «Светлый Тираж» — Астана", bold=True, space_before=6),
+    line("QA Engineer"),
+    line("02.2018 — 04.2021"),
+    line("Ручное и автоматизированное тестирование биллинга, первые автотесты на Selenium."),
+    line("Стек: Python, Selenium, PostgreSQL"),
+    head("Образование"),
+    line("Восточный технический университет, программная инженерия, 2017"),
+    head("Навыки"),
+    line("Python, Playwright, pytest, Selenium, Docker, GitLab CI, PostgreSQL, REST API"),
+    head("Языки"),
+    line("Русский — родной, английский — B2, казахский — B1"),
+)
+
+#: Content for scanned.pdf. Rendered entirely as pixels, so what it says is
+#: irrelevant to the assertion — but a fixture a human cannot read is a fixture
+#: nobody will maintain, so it says something sensible.
+SCANNED_BODY: tuple[Block, ...] = (
+    Block("Пётр Растров", bold=True, size=16),
+    Block("Backend Developer", size=11),
+    line("Караганда, Казахстан  ·  p.rastrov@example.com  ·  +7 700 000 00 73"),
+    head("О себе"),
+    line(
+        "Backend-разработчик. Проектирую и сопровождаю HTTP-сервисы, "
+        "занимаюсь миграциями схем и производительностью запросов."
+    ),
+    head("Опыт работы"),
+    Block("ООО «Плоский Скан» — Караганда", bold=True, space_before=2),
+    line("Backend Developer"),
+    line("03.2020 — по настоящее время"),
+    line("Сервис заказов на FastAPI, перевод отчётов с синхронных выгрузок на очередь."),
+    line("Стек: Python, FastAPI, PostgreSQL, Redis"),
+    head("Образование"),
+    line("Южный индустриальный университет, вычислительная техника, 2019"),
+    head("Навыки"),
+    line("Python, FastAPI, PostgreSQL, Redis, Docker, Git"),
+)
+
+
 # ── builders ──────────────────────────────────────────────────────────
 
 
@@ -495,6 +588,96 @@ def build_two_column() -> bytes:
         top = PAGE_HEIGHT - 102
         draw_column(canvas, TWO_COLUMN_SIDEBAR, x=48, top=top, width=140, leading=12.0)
         draw_column(canvas, TWO_COLUMN_BODY, x=214, top=top, width=333, leading=12.6)
+
+    return render_pdf(draw)
+
+
+def rasterise(
+    blocks: Iterable[Block], *, width_pt: float, pad_pt: float, leading: float
+) -> Image.Image:
+    """Draw blocks into a grayscale bitmap, the way a scanner would see them.
+
+    Pillow rather than reportlab on purpose: the point of these fixtures is a
+    page whose glyphs are *pixels*, with nothing behind them for pdfplumber to
+    extract. Anything drawn through the PDF canvas would carry a text layer.
+    """
+    scale = RASTER_SCALE
+    text_width = width_pt - 2 * pad_pt
+    lines: list[tuple[str, Block]] = [
+        (piece, block)
+        for block in blocks
+        for piece in simpleSplit(
+            block.text, FONT_BOLD if block.bold else FONT, block.size, text_width
+        )
+    ]
+    height_pt = pad_pt * 2 + leading * len(lines) + sum(b.space_before for _, b in lines)
+    canvas = Image.new("L", (round(width_pt * scale), round(height_pt * scale)), 255)
+    draw = ImageDraw.Draw(canvas)
+
+    y = pad_pt
+    for text, block in lines:
+        y += block.space_before
+        font = ImageFont.truetype(
+            str(FONT_FILES[FONT_BOLD if block.bold else FONT]), block.size * scale
+        )
+        draw.text((pad_pt * scale, y * scale), text, font=font, fill=0)
+        y += leading
+    # A scan is never pure black on pure white. Flattening to a handful of grey
+    # levels keeps the file honest without making the run non-deterministic.
+    return canvas.quantize(colors=16).convert("L")
+
+
+def as_png(image: Image.Image) -> ImageReader:
+    """Wrap a bitmap for ``drawImage``. PNG carries no timestamp, so this is stable."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    buffer.seek(0)
+    return ImageReader(buffer)
+
+
+def build_scanned() -> bytes:
+    """A resume that is a photograph of a resume: no text layer at all."""
+    page = rasterise(SCANNED_BODY, width_pt=PAGE_WIDTH, pad_pt=48, leading=13.0)
+
+    def draw(canvas: Canvas) -> None:
+        canvas.drawImage(
+            as_png(page),
+            0,
+            PAGE_HEIGHT - page.height / RASTER_SCALE,
+            width=PAGE_WIDTH,
+            height=page.height / RASTER_SCALE,
+        )
+
+    return render_pdf(draw)
+
+
+def build_image_contacts() -> bytes:
+    """Real text everywhere except the line that says how to reach the candidate.
+
+    This is the failure nobody notices. The resume reads perfectly, scores
+    perfectly, and gets shortlisted — and then the contact line is a picture, so
+    the tracking system files the candidate with no email and no phone.
+    """
+    strip = rasterise((CONTACT_LINE,), width_pt=360, pad_pt=1, leading=11.0)
+
+    def draw(canvas: Canvas) -> None:
+        y = draw_column(
+            canvas,
+            IMAGE_CONTACTS_HEAD,
+            x=48,
+            top=PAGE_HEIGHT - 60,
+            width=PAGE_WIDTH - 96,
+            leading=12.4,
+        )
+        canvas.drawImage(as_png(strip), 48, y - 2, width=360, height=strip.height / RASTER_SCALE)
+        draw_column(
+            canvas,
+            IMAGE_CONTACTS_BODY,
+            x=48,
+            top=y - 16,
+            width=PAGE_WIDTH - 96,
+            leading=12.4,
+        )
 
     return render_pdf(draw)
 
@@ -562,6 +745,8 @@ def main() -> None:
     write("mixed_ru_en.pdf", build_single_page(MIXED_RU_EN))
     write("with_table.docx", build_docx())
     write("plain.txt", PLAIN_TXT.encode("utf-8"))
+    write("scanned.pdf", build_scanned())
+    write("image_contacts.pdf", build_image_contacts())
 
     expected = OUT_DIR / "two_column_ru.expected.json"
     if not expected.is_file():

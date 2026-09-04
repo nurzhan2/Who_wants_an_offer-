@@ -16,6 +16,7 @@ format, sizes and durations. The same goes for ``parse_error``, which reaches
 both the API and the logs.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -31,7 +32,7 @@ from app.llm import usage as usage_ledger
 from app.llm.base import Document, LLMTask, LLMUsage
 from app.llm.router import LLMRouter, get_router
 from app.matching import embeddings
-from app.resume import enricher
+from app.resume import ats_audit, enricher
 from app.resume.extractor import ExtractedDocument
 from app.schemas.llm import ProfileExtraction
 from app.schemas.profile import CandidateProfileCreate, SkillCreate
@@ -145,6 +146,36 @@ def to_profile_create(
     )
 
 
+async def _record_ats_report(
+    profiles: ProfileRepository,
+    profile_id: UUID,
+    document: ExtractedDocument,
+    extraction: ProfileExtraction,
+) -> None:
+    """Redo the readability audit now that there is something to compare against.
+
+    Upload could only judge the file itself. This run adds the comparison the
+    report exists for: what the model read off the page, against what survives
+    into the text layer an employer's parser sees.
+
+    Failure here is logged and dropped. The audit is a diagnostic; losing it
+    must not fail a parse that otherwise succeeded, and the profile keeps the
+    structural report written at upload rather than nothing.
+    """
+    try:
+        report = await asyncio.to_thread(
+            ats_audit.audit,
+            document.file_bytes,
+            source_format=document.source_format,
+            raw_text=document.raw_text,
+            extraction=extraction,
+        )
+    except Exception as exc:
+        logger.exception("resume.ats_coverage_failed", error=type(exc).__name__)
+        return
+    await profiles.set_ats_report(profile_id, report)
+
+
 async def build_profile(
     document: ExtractedDocument,
     *,
@@ -176,6 +207,7 @@ async def build_profile(
 
         await profiles.update_from_extraction(profile_id, payload)
         await profiles.replace_skills(profile_id, payload.skills)
+        await _record_ats_report(profiles, profile_id, document, extraction)
 
         vector = await embeddings.encode_profile(
             headline=payload.headline,

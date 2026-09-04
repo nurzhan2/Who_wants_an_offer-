@@ -41,6 +41,7 @@ from app.db.models import CandidateProfile
 from app.db.repositories.profile import ProfileRepository
 from app.llm.router import LLMRouter
 from app.resume import profile_builder
+from app.schemas.ats import ATSReport, FindingCode
 from app.services import resume as resume_service
 
 RESUMES = Path(__file__).parent / "fixtures" / "resumes"
@@ -371,3 +372,83 @@ async def test_profile_pending_within_the_timeout_stays_pending(
     assert resolved is not None
     assert resolved.parse_status is ParseStatus.PENDING
     assert resolved.parse_error is None
+
+
+# ── the ATS report, written at upload ─────────────────────────────────
+
+
+def upload_of(name: str) -> dict[str, tuple[str, bytes, str]]:
+    """A multipart payload carrying one named fixture."""
+    return {"file": (name, (RESUMES / name).read_bytes(), "application/pdf")}
+
+
+async def test_upload_stores_the_ats_report_on_the_reserved_row(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    staging_dir: Path,
+    scheduled_parses: list[tuple[UUID, Path]],
+) -> None:
+    """The report has to exist before the background task runs.
+
+    It is computed from the uploaded bytes, and the staged file is deleted the
+    moment parsing ends — so an audit deferred to the task would be an audit
+    that can never be recomputed if the task dies. Asserted on the reserved row
+    while the parse is still PENDING, which is exactly that window."""
+    response = await async_client.post(UPLOAD_URL, files=upload_of("two_column_ru.pdf"))
+    profile_id = UUID(response.json()["profile_id"])
+
+    profile = await ProfileRepository(db_session).get(profile_id)
+
+    assert profile is not None
+    assert profile.parse_status is ParseStatus.PENDING
+    assert profile.ats_report is not None
+    report = ATSReport.model_validate(profile.ats_report)
+    assert FindingCode.COLUMN_INTERLEAVING in {f.code for f in report.findings}
+    assert not report.is_machine_readable
+
+
+async def test_upload_of_a_clean_resume_stores_a_clean_report(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    staging_dir: Path,
+    scheduled_parses: list[tuple[UUID, Path]],
+) -> None:
+    """The other half of the assertion above: a well-formed PDF is not flagged."""
+    response = await async_client.post(UPLOAD_URL, files=resume_upload())
+    profile_id = UUID(response.json()["profile_id"])
+
+    profile = await ProfileRepository(db_session).get(profile_id)
+
+    assert profile is not None
+    assert profile.ats_report is not None
+    assert ATSReport.model_validate(profile.ats_report).score == 100
+
+
+async def test_an_audit_that_breaks_does_not_break_the_upload(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    staging_dir: Path,
+    scheduled_parses: list[tuple[UUID, Path]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resume that defeats the auditor is still a resume.
+
+    The audit is a diagnostic, not a gate. If it raises, the upload must still
+    be accepted and the profile must still be parsed — with no report, which the
+    API reports as "no report" and never as a clean bill of health."""
+
+    def explode(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("pdfplumber fell over")
+
+    monkeypatch.setattr(resume_service.ats_audit, "audit", explode)
+
+    response = await async_client.post(UPLOAD_URL, files=resume_upload())
+
+    assert response.status_code == 202
+    profile_id = UUID(response.json()["profile_id"])
+    profile = await ProfileRepository(db_session).get(profile_id)
+    assert profile is not None
+    assert profile.ats_report is None
+    # The upload still went through the whole path.
+    assert profile.parse_status is ParseStatus.PENDING
+    assert len(scheduled_parses) == 1

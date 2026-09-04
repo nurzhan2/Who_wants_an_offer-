@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.db.enums import ParseStatus
 from app.db.models import CandidateProfile, ProfileSkill
+from app.schemas.ats import ATSReport
 from app.schemas.profile import CandidateProfileCreate, CandidateProfileUpdate, SkillCreate
 
 
@@ -112,7 +113,13 @@ class ProfileRepository:
         await self.session.execute(stmt)
 
     async def create_pending(
-        self, *, filename: str, size_bytes: int, source_format: str, started_at: datetime
+        self,
+        *,
+        filename: str,
+        size_bytes: int,
+        source_format: str,
+        started_at: datetime,
+        ats_report: ATSReport | None = None,
     ) -> CandidateProfile:
         """Reserve a profile row before parsing starts.
 
@@ -127,11 +134,37 @@ class ProfileRepository:
             resume_filename=filename,
             resume_size_bytes=size_bytes,
             resume_format=source_format,
+            # Stored now because the staged file is deleted when parsing ends.
+            ats_report=ats_report.model_dump(mode="json") if ats_report else None,
             is_active=False,
         )
         self.session.add(instance)
         await self.session.flush()
         return instance
+
+    async def set_ats_report(self, profile_id: UUID, report: ATSReport) -> None:
+        """Replace the report stored at upload with the fuller one.
+
+        The upload could only judge the file. Once extraction has finished there
+        is a second reading to compare against, so the report is recomputed and
+        overwritten rather than merged: one function builds it, in one place,
+        and a half-updated report would be a shape nothing else produces.
+        """
+        await self.session.execute(
+            sa_update(CandidateProfile)
+            .where(CandidateProfile.id == profile_id)
+            .values(ats_report=report.model_dump(mode="json"), updated_at=func.now())
+        )
+
+    async def get_ats_report(self, profile_id: UUID) -> ATSReport | None:
+        """The stored readability report, or None if none was recorded.
+
+        Validated on the way out rather than trusted: the column is JSONB
+        written by an older version of the schema for older profiles.
+        """
+        stmt = select(CandidateProfile.ats_report).where(CandidateProfile.id == profile_id)
+        stored = (await self.session.execute(stmt)).scalar_one_or_none()
+        return ATSReport.model_validate(stored) if stored else None
 
     async def update_from_extraction(
         self, profile_id: UUID, payload: CandidateProfileCreate
