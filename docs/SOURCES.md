@@ -83,6 +83,7 @@ Ashby, Workable. Идём напрямую в ATS: свежее, полнее, �
 | `smartrecruiters` | `GET https://api.smartrecruiters.com/v1/companies/{company}/postings` | per-company | |
 | `personio` | `GET https://{company}.jobs.personio.de/xml` | DE | XML |
 | `teamtailor` | `https://{company}.teamtailor.com/jobs.json` | EU/Nordics | |
+| `freehire` | `GET https://freehire.me/api` (базовый URL — в конфиг) | мультирынок | Публичный REST, JSON, без ключа. Техвакансии: разработка, данные, DevOps, remote. Выдача уже структурирована — скиллы, грейд, категория — то есть нормализация дешевле, чем на RSS-источниках. Бэкенд MIT и self-hostable, поэтому базовый URL держим в конфиге: инстанс может переехать или быть поднят своим |
 
 ATS-источники требуют списка компаний — `app/sources/ats/company_boards.yaml`.
 Это самый качественный канал: данные из первых рук, без посредников и
@@ -153,7 +154,7 @@ ATS-источники требуют списка компаний — `app/sou
 | --- | --- | --- |
 | Ядро | 3 | `hh`, `telegram`, `jsearch` |
 | 1 | 3 | `remotive`, `arbeitnow` |
-| 2 | 8 | `adzuna`, `jooble`, `careerjet`, `himalayas`, `remoteok`, `jobicy`, `weworkremotely` |
+| 2 | 8 | `adzuna`, `jooble`, `careerjet`, `himalayas`, `remoteok`, `jobicy`, `weworkremotely`, `freehire` |
 | 3 | 8 | ATS: `greenhouse`, `lever`, `ashby`, `recruitee`, `workable`, `smartrecruiters`, `personio`, `teamtailor` + список компаний |
 | 4 | 8 | `habr`, `getmatch`, `djinni`, `enbek`, `relocate_me`, `landing_jobs` |
 | 5 | 8 | `hn_hiring`, `eures`, `cryptojobslist`, `themuse`, `findwork` |
