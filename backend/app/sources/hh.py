@@ -53,11 +53,14 @@ from sits in ``<template style="display:none" id="HH-Lux-InitialState">`` as
 escaped JSON; ``vacancyView`` is the posting and ``vacancyFieldsDictionary`` is
 the decoding table for its enums, shipped with the page, which is why none of
 those vocabularies are hardcoded here. We are parsing somebody else's internal
-state and it will change without warning, so a missing marker or an empty
-``vacancyView`` raises :class:`HHMarkupError` rather than returning nothing —
-and ``test_hh_canary.py`` asks the live site the same question on a schedule.
-The alternative is finding out from a dashboard that has quietly shown zero
-new hh postings for a week.
+state and it will change without warning, so a missing marker raises
+:class:`HHMarkupError` rather than returning nothing — once it has happened
+three times in a run, because one odd page is not a redesign — and
+``test_hh_canary.py`` asks the live site the same question on a schedule. An
+empty ``vacancyView`` is the one quiet case, because that is what a posting
+taken down looks like: hh answers 404 with the marker still in place. The
+alternative to all of this is finding out from a dashboard that has quietly
+shown zero new hh postings for a week.
 
 Three measurements that shaped the parsing, all from 22 live pages on
 2026-09-06 and none of them guessable from the API documentation:
