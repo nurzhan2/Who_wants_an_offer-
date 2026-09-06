@@ -23,6 +23,7 @@ violation.
 """
 
 import ast
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -123,9 +124,46 @@ def test_the_agent_keeps_its_own_settings() -> None:
     assert (AGENT_ROOT / "config.py").is_file()
 
 
-def test_the_profile_and_the_screenshots_are_ignored_by_git() -> None:
-    """The profile holds a live hh session; a screenshot shows a logged-in account."""
+def test_everything_the_agent_writes_is_ignored_by_git() -> None:
+    """Every artefact of a logged-in session, not the three somebody remembered.
+
+    The first version of this listed exactly the patterns that were present, so
+    it passed while three more were committable: the probe's reports (which copy
+    the owner's own application state for a vacancy out of an authenticated
+    page), the session signal, and the run's results. The repo has a live remote
+    and ``git add -A`` staged them.
+    """
     ignored = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
 
-    for pattern in ("agent/profile/", "agent/screenshots/", "agent/*.sqlite3"):
+    for pattern in (
+        "agent/profile/",
+        "agent/screenshots/",
+        "agent/*.sqlite3",
+        "agent/queue.json",
+        "agent/queue-results.json",
+        "agent/answers/",
+        "agent/probe/",
+        "agent/session_signal.json",
+    ):
         assert pattern in ignored, f"{pattern} must never be committable"
+
+
+def test_nothing_the_agent_writes_is_tracked_right_now() -> None:
+    """The patterns are one thing; what is actually in the index is another."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "agent"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    leaked = [
+        name
+        for name in tracked
+        if any(
+            part in name
+            for part in ("profile/", "screenshots/", ".sqlite3", "probe/", "session_signal")
+        )
+    ]
+
+    assert not leaked, f"an artefact of the owner's session is committed: {leaked}"
