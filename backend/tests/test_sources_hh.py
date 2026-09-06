@@ -296,7 +296,10 @@ async def test_only_vacancy_sitemaps_are_ever_requested(
     await collect(hh)
 
     asked = [str(call.request.url) for call in http.calls]
-    assert any("resumes0.xml" in url for url in _index_body().split()) or True
+    # The index really does list a resumes file — without this the two
+    # assertions below quantify over an opportunity the connector was never
+    # given, and would pass on a fixture that had never mentioned resumes.
+    assert "resumes0.xml" in _index_body()
     assert not [url for url in asked if "resumes" in url]
     assert not [url for url in asked if "/employers" in url or "/vacancies" in url]
     assert VACANCY0_URL in asked
@@ -315,6 +318,9 @@ async def test_no_request_this_connector_makes_carries_a_query_string(
 
     await collect(hh)
 
+    # Not vacuous: a walk that issued nothing would satisfy the comparison
+    # below, and this test is the one naming the rule hh's robots.txt states.
+    assert len(http.calls) > 3
     assert [call.request.url.query for call in http.calls] == [b""] * len(http.calls)
 
 
@@ -621,8 +627,13 @@ async def test_the_employers_billing_block_is_never_stored(
     ``HH_AUTO_RENEWAL`` with ``intervalMinutes = 4320`` inside it. None of it
     describes the job. The derived flags beside it do, and those are kept.
     """
-    serve(http, [FULL])
-    assert "HH_AUTO_RENEWAL" in json.dumps(state(FULL), ensure_ascii=False)
+    payload = state(FULL)
+    assert "HH_AUTO_RENEWAL" in json.dumps(payload, ensure_ascii=False)
+    payload["vacancyView"]["vacancyProperties"]["calculatedStates"]["HH"].update(
+        {"advertising": True, "anonymous": True}
+    )
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
 
     posting = (await collect(hh))[0]
 
@@ -630,8 +641,11 @@ async def test_the_employers_billing_block_is_never_stored(
     assert "HH_AUTO_RENEWAL" not in stored
     assert "serviceId" not in stored
     assert "packageName" not in stored
-    assert derived(posting)["pay_for_performance"] is False
-    assert derived(posting)["anonymous"] is False
+    # Asserted against values that are NOT the model's defaults, so the wiring
+    # is what is under test and not the dataclass. Every captured page carries
+    # false for both, so the fixture is bent rather than trusted.
+    assert derived(posting)["advertising"] is True
+    assert derived(posting)["anonymous"] is True
 
 
 async def test_recruiter_contacts_and_search_telemetry_are_never_stored(
@@ -1474,3 +1488,101 @@ async def test_a_shape_change_reports_the_field_and_not_the_page(
     for leaked in ("contactInfo", "managerId", "HH_AUTO_RENEWAL", "vacancyProperties"):
         assert leaked not in detail
     assert len(detail) < 500
+
+
+async def test_every_derived_field_is_wired_to_the_page_it_came_from(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The block a walk actually produces, field by field, from a real page.
+
+    Each rule below has its own unit test against the helper that implements it
+    — the salary shapes, remoteness from workFormats, the derived publication
+    flags. What none of those can catch is the wiring: replace
+    ``salary=_salary(...)`` with ``salary=None`` in ``_derive`` and every one of
+    them still passes, because they never look at what a crawl hands over.
+    Twelve such cuts were applied at once to this connector and the whole suite
+    stayed green.
+
+    So this asserts the finished block, on the payload hh really served for
+    vacancy 136773120 on 2026-09-06. It is deliberately not a spot check: a
+    field added to HHDerived and left unwired should fail here.
+    """
+    serve(http, [FULL])
+
+    block = derived((await collect(hh))[0])
+
+    assert block == {
+        "external_id": FULL,
+        "url": vacancy_url(FULL),
+        "city": "Алматы",
+        "country": "KZ",
+        "remote": "no",
+        "salary": {
+            "min": "300000",
+            "max": "500000",
+            "currency": "KZT",
+            "is_gross": True,
+            "period": "month",
+            "mode": "MONTH",
+            "frequency": "TWICE_PER_MONTH",
+        },
+        "published_at": "2026-09-06T09:56:03.075000+03:00",
+        "expires_at": "2026-09-30T09:56:03.086000+03:00",
+        "key_skills": [
+            "Деловое общение",
+            "Эмпатия",
+            "Телефонные переговоры",
+            "Работа с базами данных",
+            "Деловая переписка",
+            "Работа с большим объемом информации",
+            "забота",
+            "Обратная связь",
+        ],
+        "language_requirements": [],
+        "professional_role_ids": [121],
+        "work_formats": ["ON_SITE"],
+        "employment_form": "FULL",
+        "work_experience": "between1And3",
+        "labels": {
+            "employmentForm": "Полная",
+            "workFormats": "На месте работодателя",
+            "workExperience": "1–3 года",
+        },
+        "closed_for_applicants": False,
+        "accredited_it_employer": False,
+        "employer_on_additional_check": False,
+        "anonymous": False,
+        "advertising": False,
+        "pay_for_performance": False,
+        "description_html": block["description_html"],
+        "sitemap_lastmod": "2026-09-06T10:00:00Z",
+    }
+    assert block["description_html"].startswith("<p><strong>Мы Inspire</strong>")
+
+
+async def test_the_sitemap_timestamp_is_what_the_cache_is_keyed_on(
+    hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The mechanism the thirty-day TTL rests on, asserted where it is supplied.
+
+    The transport's own test proves a changed salt is a miss and an unchanged
+    one a hit. What that cannot show is that hh passes one: every test here runs
+    with the dev cache off, so deleting the argument breaks nothing in this file
+    and nothing in that one, and a deployment with HTTP_CACHE_DIR set then
+    serves month-old vacancy pages.
+    """
+    salts: list[str | None] = []
+    original = type(hh.http).get_text
+
+    async def spy(self: Any, url: str, **kwargs: Any) -> str:
+        if "/vacancy/" in url:
+            salts.append(kwargs.get("cache_salt"))
+        text: str = await original(self, url, **kwargs)
+        return text
+
+    monkeypatch.setattr(type(hh.http), "get_text", spy)
+    serve(http, [FULL])
+
+    await collect(hh)
+
+    assert salts == ["2026-09-06T10:00:00+00:00"]

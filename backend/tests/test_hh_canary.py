@@ -30,9 +30,9 @@ outcome as not having one.
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
-import httpx
 import pytest
 
+from app.core.exceptions import SourceError
 from app.sources.hh import HHSite, HHSource
 from app.sources.http import SourceClient
 
@@ -84,8 +84,13 @@ async def test_the_sitemap_still_lists_dated_vacancy_pages(hh: HHSource, site: H
 
     assert len(entries) > 100, "a city sitemap held 1387 entries when this was written"
     newest = max(entry.lastmod for entry in entries)
-    assert datetime.now(UTC) - newest < timedelta(days=365), (
-        "every lastmod is over a year old, which is not a live sitemap"
+    # A week, not a year. The whole incremental design rests on lastmod moving,
+    # and the measured file had its newest entries stamped within the hour — so
+    # a threshold loose enough to pass on a sitemap frozen last spring reports
+    # nothing for the 300-odd daily runs in which the crawl finds no new
+    # vacancy, which is exactly the silence this file exists to break.
+    assert datetime.now(UTC) - newest < timedelta(days=7), (
+        "the newest lastmod in this sitemap is over a week old — it has stopped moving"
     )
 
 
@@ -109,7 +114,12 @@ async def test_a_live_vacancy_page_still_carries_the_state_we_parse(
     for entry in newest:
         try:
             body = await hh.http.get_text(entry.url)
-        except httpx.HTTPError:  # pragma: no cover - a flaky network, not a change
+        except SourceError:
+            # SourceError, not httpx.HTTPError: the transport turns a 404 into
+            # one of ours, and a posting taken down between the sitemap being
+            # written and this run reading it is the most ordinary thing that
+            # can happen here. Catching the wrong type made a normal Tuesday
+            # look like hh having changed, on a job that runs daily.
             continue
         state = hh._state(entry, body)
         if state is not None:

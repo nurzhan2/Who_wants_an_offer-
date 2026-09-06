@@ -11,10 +11,17 @@ by. A store that quietly shared one row between files would let a busy file's
 position hide every entry of a quiet one — and the symptom is not an error, it
 is a city that stops producing vacancies.
 
-**A write replaces, and it is one statement.** Two slices of one crawl can be
-recording neighbouring keys at the same moment, and a read-modify-write here
-would lose one of them; a merge would resurrect a field its author had
-deliberately dropped.
+**A write replaces rather than merges**, because the connector owns the value
+and a merge would carry a field its author dropped forward for as long as the
+row lived.
+
+What these tests do NOT establish is the other half of that sentence in the
+repository's own docstring: that the write is a single statement, so two slices
+of one crawl recording neighbouring keys cannot lose one another. Every test
+below is a sequential await on one session, and a read-modify-write
+implementation would satisfy all of them. That property is visible in the code —
+one ``INSERT ... ON CONFLICT DO UPDATE`` — and proving it needs two concurrent
+sessions, which is a different test than any of these and is not written yet.
 """
 
 import pytest
