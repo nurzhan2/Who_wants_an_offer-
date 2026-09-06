@@ -51,7 +51,9 @@ from app.db.enums import RemoteType, SalaryPeriod
 from app.pipeline.runner import UPSERT_BATCH
 from app.sources.base import RawPosting, SearchQuery
 from app.sources.hh import (
+    MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
+    MAX_TIED_IDS,
     WATERMARK_LAG,
     FileWatermark,
     HHMarkupError,
@@ -1586,3 +1588,115 @@ async def test_the_sitemap_timestamp_is_what_the_cache_is_keyed_on(
     await collect(hh)
 
     assert salts == ["2026-09-06T10:00:00+00:00"]
+
+
+# -- the rules a mutation pass found nothing holding ---------------------
+
+
+async def test_a_posting_that_answers_410_is_skipped_like_a_404(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """410 Gone means the same thing as 404 here and must not abort the walk.
+
+    hh answers 404 for most removals, and the walk survives that. Nothing held
+    the other half of the pair: with 410 dropped from GONE_STATUSES the
+    exception escapes ``_fetch``, the whole crawl ends on one retired posting,
+    and the suite stayed green.
+    """
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(dated([FULL, NO_COMPENSATION])))
+    )
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(410, text="Gone"))
+    http.get(vacancy_url(NO_COMPENSATION)).mock(
+        return_value=httpx.Response(200, text=page(state(NO_COMPENSATION)))
+    )
+
+    postings = await collect(hh)
+
+    assert [posting.external_id for posting in postings] == [NO_COMPENSATION]
+
+
+def test_an_hourly_rate_keeps_its_period() -> None:
+    """Both mappings, not just the one every captured page happened to use.
+
+    Every live sample paid by the month, so removing HOUR from the table broke
+    nothing anybody could see — and an hourly salary with no period is a number
+    the normaliser cannot compare to anything.
+    """
+    hourly = _salary({"from": 4000, "currencyCode": "KZT", "gross": False, "mode": "HOUR"})
+    monthly = _salary({"from": 400000, "currencyCode": "KZT", "gross": False, "mode": "MONTH"})
+
+    assert hourly is not None and hourly.period is SalaryPeriod.HOUR
+    assert monthly is not None and monthly.period is SalaryPeriod.MONTH
+
+
+async def test_the_name_the_employer_chose_is_the_one_stored(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """``visibleName`` wins over ``name``, which the fixtures cannot show.
+
+    Every captured page has the two equal, so reversing the preference was
+    invisible to the suite. They differ in the wild — a legal entity on one side
+    and the brand a candidate would recognise on the other — and the dashboard
+    should show the second.
+    """
+    payload = state(FULL)
+    payload["vacancyView"]["company"]["name"] = 'ТОО "Инспайр Интернешнл КЗ"'
+    payload["vacancyView"]["company"]["visibleName"] = "Inspire"
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
+
+    assert (await collect(hh))[0].company == "Inspire"
+
+
+async def test_the_country_comes_from_the_page_not_from_the_site(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The site's country is the fallback, and the fixtures cannot tell them apart.
+
+    Every captured page is a KZ vacancy on a KZ host, so reading the site
+    instead of the page changed nothing visible. hh publishes postings whose
+    area sits in another country — that is what ``@countryIsoCode`` is for.
+    """
+    payload = state(FULL)
+    payload["vacancyView"]["area"]["@countryIsoCode"] = "UZ"
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
+
+    assert derived((await collect(hh))[0])["country"] == "UZ"
+
+
+def test_the_tie_list_cannot_grow_without_bound() -> None:
+    """The cap on ids remembered at one timestamp, which nothing was holding.
+
+    The list exists so that resuming neither repeats nor skips entries sharing a
+    second. It is stored as JSONB on every save, so an unbounded one is a row
+    that grows all run; past the cap the tie resolves by repeating, which costs
+    requests and never costs a posting.
+    """
+    mark = FileWatermark()
+    for index in range(MAX_TIED_IDS + 10):
+        mark = mark.advanced(
+            SitemapEntry(external_id=str(index), url=vacancy_url(str(index)), lastmod=WHEN)
+        )
+
+    assert len(mark.ids_at_lastmod) == MAX_TIED_IDS
+    # The cap keeps the NEWEST ids: those are the ones a resume would otherwise
+    # re-fetch first.
+    assert mark.ids_at_lastmod[-1] == str(MAX_TIED_IDS + 9)
+    assert mark.is_done(
+        SitemapEntry(external_id=str(MAX_TIED_IDS + 9), url=vacancy_url("x"), lastmod=WHEN)
+    )
+
+
+def test_a_sitemap_id_too_long_for_the_column_is_dropped() -> None:
+    """``vacancy_source.external_id`` is 200 characters and a cut id is a different key.
+
+    hh's ids are nine digits, so nothing in the fixtures comes near it — which
+    is exactly why the guard needs a test rather than a sample.
+    """
+    site = HHSite(host=HOST, city="Алматы", country="KZ")
+    long_id = "1" * (MAX_EXTERNAL_ID + 1)
+
+    assert _entry(site, f"https://{HOST}/vacancy/{long_id}", "2026-09-06T10:00:00+03:00") is None
+    assert _entry(site, f"https://{HOST}/vacancy/1" * 1, "2026-09-06T10:00:00+03:00") is not None
