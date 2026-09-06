@@ -24,7 +24,7 @@ from agent.gate import SubmitGate, UnmandatedRequestError, vacancy_id_in
 from agent.journal import Entry, Journal
 from agent.letter import DEFAULT_MAX_LENGTH, LetterProblem, UnsafeLetterError, check, inspect
 from agent.mandate import mint
-from agent.prefilter import Verdict, decide, read
+from agent.prefilter import Verdict, decide, decide_before_opening, read
 from agent.queue import CONTRACT_VERSION, FileQueue, QueueFormatError, QueueItem
 from agent.state import Actor, Status
 from agent.state_page import read_applied, read_state
@@ -393,3 +393,76 @@ def test_the_page_state_is_read_out_of_the_same_marker_the_crawler_uses() -> Non
 
     assert read_state(page) == LIVE_STATE
     assert read_state("<html>hh redesigned this</html>") is None
+
+
+# ── the two stages, which a dry run caught and unit tests had not ─────
+
+
+def test_the_queue_stage_does_not_demand_facts_that_live_on_the_page() -> None:
+    """The bug a first dry run found, and the reason the two stages are separate.
+
+    ``decide`` treats ``facts=None`` as "the page could not be read", which is a
+    stop. At the queue stage the facts are not missing but unknowable — they are
+    on a page nobody has opened — so calling the page-stage decision there sends
+    every vacancy to a human and the run reports, truthfully and uselessly, that
+    there is nothing to send. Every unit test passed while it did that, because
+    each one called ``decide`` with facts in hand.
+    """
+    assert (
+        decide_before_opening(
+            closed_for_applicants=False, archived=False, external_application=False
+        ).verdict
+        is Verdict.PROCEED
+    )
+    assert (
+        decide(
+            facts=None,
+            closed_for_applicants=False,
+            archived=False,
+            already_applied=False,
+            has_letter=True,
+        ).verdict
+        is Verdict.MANUAL
+    )
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"archived": True}, Verdict.SKIP),
+        ({"closed_for_applicants": True}, Verdict.SKIP),
+        ({"external_application": True}, Verdict.MANUAL),
+    ],
+)
+def test_the_queue_stage_still_rules_out_what_the_crawler_knew(
+    kwargs: dict[str, Any], expected: Verdict
+) -> None:
+    """Its whole purpose: not spending a page load on a certain failure."""
+    base: dict[str, Any] = {
+        "closed_for_applicants": False,
+        "archived": False,
+        "external_application": False,
+    }
+
+    assert decide_before_opening(**{**base, **kwargs}).verdict is expected
+
+
+def test_a_second_run_leaves_alone_what_only_a_person_can_move() -> None:
+    """The other bug the same dry run found.
+
+    A vacancy the previous run put in ``needs_manual`` is waiting on a human.
+    Re-queueing it is a transition the state machine forbids to a machine — the
+    rule is right — so a run that tries anyway dies on the second invocation with
+    an IllegalTransitionError instead of quietly skipping. The journal
+    remembering something is not an error condition.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        journal = Journal(Path(directory) / "agent.sqlite3")
+        journal.record(Entry("1", Status.NEEDS_MANUAL, reason="в письме ссылка"), actor=Actor.AGENT)
+
+        entry = journal.get("1")
+        assert entry is not None and entry.status is Status.NEEDS_MANUAL
+        # The run must consult this before recording anything, which is what
+        # agent/run.py::_to_candidates now does.
+        with pytest.raises(Exception, match="needs_manual to queued"):
+            journal.record(Entry("1", Status.QUEUED), actor=Actor.AGENT)

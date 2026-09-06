@@ -44,7 +44,7 @@ from agent.journal import Entry, Journal
 from agent.letter import UnsafeLetterError
 from agent.letter import check as check_letter
 from agent.mandate import digest
-from agent.prefilter import Verdict, decide
+from agent.prefilter import Verdict, decide_before_opening
 from agent.queue import FileQueue, QueueItem, Result
 from agent.selectors import SelectorsNotVerifiedError, assert_ready_to_apply
 from agent.session import check as session_check
@@ -99,14 +99,23 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
     """
     candidates: list[Candidate] = []
     for item in items:
-        decision = decide(
-            facts=None,
+        previous = journal.get(item.vacancy_id)
+        if previous is not None and previous.status is not Status.QUEUED:
+            # Already dealt with, or waiting on a person. A run must not drag an
+            # item back out of a state only a human may leave — the state
+            # machine forbids it, and the right behaviour when the journal
+            # remembers something is to leave it alone rather than to crash.
+            print(
+                f"  пропускаю {item.vacancy_id} ({item.title}): "
+                f"{previous.status.value}" + (f" — {previous.reason}" if previous.reason else "")
+            )
+            continue
+        # The queue stage, which knows only what the crawler stored. The
+        # letter requirement, the employer test and whether we have already
+        # applied all live on the page and are decided there, in submit().
+        decision = decide_before_opening(
             closed_for_applicants=item.closed_for_applicants,
             archived=item.archived,
-            # Not read from a page yet: the queue cannot know it. The real
-            # check happens on the page, before the click.
-            already_applied=False,
-            has_letter=bool(item.letter),
             external_application=item.external_application,
         )
         if decision.verdict is not Verdict.PROCEED:

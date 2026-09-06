@@ -118,6 +118,35 @@ def read(state: dict[str, Any], vacancy_id: str) -> ResponseFacts | None:
     )
 
 
+def decide_before_opening(
+    *,
+    closed_for_applicants: bool,
+    archived: bool,
+    external_application: bool = False,
+) -> Decision:
+    """What the queue alone can rule out, before a page is opened.
+
+    A separate function from :func:`decide` because the two stages know
+    different things, and conflating them produces a bug that unit tests do not
+    catch: ``decide`` reads ``facts=None`` as "the page was unreadable", which is
+    a stop — but at the queue stage the facts are not missing, they are simply
+    not knowable yet, because they live on the page. Calling the page-stage
+    decision here sends every vacancy to a human and the run reports, truthfully
+    and uselessly, that there is nothing to send.
+
+    A ``PROCEED`` from this function means "worth opening", never "worth
+    sending". The real decision happens on the page, with the letter
+    requirement, the test flag and the idempotency reading in hand.
+    """
+    if archived:
+        return Decision(Verdict.SKIP, "вакансия в архиве")
+    if closed_for_applicants:
+        return Decision(Verdict.SKIP, "вакансия закрыта для откликов")
+    if external_application:
+        return Decision(Verdict.MANUAL, "отклик оформляется на сайте работодателя")
+    return Decision(Verdict.PROCEED, "стоит открыть")
+
+
 def decide(
     *,
     facts: ResponseFacts | None,
@@ -127,7 +156,11 @@ def decide(
     has_letter: bool,
     external_application: bool = False,
 ) -> Decision:
-    """What to do with one vacancy, in the order the reasons matter.
+    """What to do with one vacancy once its page has been read.
+
+    Everything :func:`decide_before_opening` rules out is re-checked here,
+    because a vacancy can close between a crawl and a run and the page is the
+    later witness.
 
     ``already_applied`` is tri-state on purpose: ``None`` means the page did not
     tell us, which is a reason to stop rather than a reason to proceed. It is
