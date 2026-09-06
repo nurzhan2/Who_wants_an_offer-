@@ -217,6 +217,67 @@ def redact(url: str | httpx.URL) -> str:
     return cleaned.geturl()
 
 
+def refuse_forbidden(url: httpx.URL, *, slug: str | None = None) -> None:
+    """Raise unless this exact URL may be requested.
+
+    Three separate bans, and they are separate on purpose. A whole host is
+    closed when its terms forbid automated collection; a query string is closed
+    when robots.txt forbids one and the robots layer cannot say so; a path is
+    closed when that part of an otherwise open host is shut. Collapsing them
+    into one list would mean either losing ``api.hh.ru``'s dictionaries or
+    reopening its jobseeker endpoints.
+
+    A free function rather than a method because it has to be callable with no
+    connector in hand: :func:`guard_redirects` applies it to URLs that no code
+    in this process chose.
+    """
+    prefix = f"{slug}: " if slug else ""
+    host = (url.host or "").lower()
+
+    def covers(rule: str) -> bool:
+        return host == rule or host.endswith(f".{rule}")
+
+    if any(covers(blocked) for blocked in BLOCKED_HOSTS):
+        raise SourceError(
+            f"{prefix}обращение к {host} запрещено на уровне транспорта", source_slug=slug
+        )
+    # ``covers`` matches subdomains, and api.hh.ru is one of hh.ru's — but it
+    # serves no robots.txt at all (404, which RFC 9309 reads as no
+    # restrictions), so hh.kz's ``Disallow: *?*`` is not its rule and applying
+    # it here would refuse ``/professional_roles?locale=RU`` while blaming a
+    # file that host does not have. Its jobseeker endpoints are closed by
+    # BLOCKED_PATHS; its dictionaries take parameters and stay open.
+    if url.query and host != "api.hh.ru" and any(covers(rule) for rule in QUERYLESS_HOSTS):
+        raise SourceError(
+            f"{prefix}robots.txt на {host} запрещает любой URL со строкой запроса — "
+            "запрос отклонён транспортом",
+            source_slug=slug,
+        )
+    for rule, prefixes in BLOCKED_PATHS.items():
+        if covers(rule) and url.path.startswith(prefixes):
+            raise SourceError(
+                f"{prefix}путь {url.path} на {host} закрыт на уровне транспорта",
+                source_slug=slug,
+            )
+
+
+async def guard_redirects(request: httpx.Request) -> None:
+    """Apply the bans to every request httpx makes, not only to the first.
+
+    The client follows redirects, and httpx resolves the chain internally: the
+    URL actually fetched is chosen by the remote server. Checking only what a
+    connector passed in means a single 302 reaches ``/search/vacancy?text=…``,
+    ``/sitemap/resumes0.xml`` or linkedin.com with every ban and robots.txt
+    bypassed — measured, not theorised. A request event hook is the one place
+    that sees each hop, and raising from it stops the hop before it is sent.
+
+    Installed on the client rather than checked afterwards on
+    ``response.history``, because by then the request has already been made,
+    and "we never asked for it" is the whole promise.
+    """
+    refuse_forbidden(request.url)
+
+
 class TokenBucket:
     """Async token bucket. Both time sources are injected, and that is the point."""
 
@@ -564,6 +625,11 @@ class SourceClient:
         # Borrowed versus owned, exactly as ollama.py decided it.
         self._owns_client = client is None
         self._client = client
+        if client is not None:
+            # Appended rather than assigned: the client belongs to the caller
+            # and may carry hooks of its own. A borrowed client that skipped
+            # this would be a way to reach a banned host by construction.
+            client.event_hooks.setdefault("request", []).append(guard_redirects)
         self._cache = cache if cache is not None else _default_cache()
         self._robots = robots if robots is not None else RobotsCache()
         self.clock = clock
@@ -585,6 +651,7 @@ class SourceClient:
                 # logged and is testable — the same reason the Anthropic client
                 # is built with max_retries=0.
                 transport=httpx.AsyncHTTPTransport(retries=0),
+                event_hooks={"request": [guard_redirects]},
             )
         return self._client
 
@@ -638,43 +705,8 @@ class SourceClient:
         return response
 
     def _refuse_forbidden(self, source: BaseSource, url: httpx.URL) -> None:
-        """Refuse what no connector is allowed to ask for, before anything else runs.
-
-        Three separate bans, and they are separate on purpose. A whole host is
-        closed when its terms forbid automated collection; a query string is
-        closed when robots.txt forbids one and the robots layer cannot say so;
-        a path is closed when that part of an otherwise open host is shut.
-        Collapsing them into one list would mean either losing ``api.hh.ru``'s
-        dictionaries or reopening its jobseeker endpoints.
-        """
-        host = (url.host or "").lower()
-
-        def covers(rule: str) -> bool:
-            return host == rule or host.endswith(f".{rule}")
-
-        if any(covers(blocked) for blocked in BLOCKED_HOSTS):
-            raise SourceError(
-                f"{source.slug}: обращение к {host} запрещено на уровне транспорта",
-                source_slug=source.slug,
-            )
-        # ``covers`` matches subdomains, and api.hh.ru is one of hh.ru's — but
-        # it serves no robots.txt at all (404, which RFC 9309 reads as no
-        # restrictions), so hh.kz's ``Disallow: *?*`` is not its rule and
-        # applying it here would refuse ``/professional_roles?locale=RU`` while
-        # blaming a file that host does not have. Its jobseeker endpoints are
-        # closed by BLOCKED_PATHS; its dictionaries take parameters and stay open.
-        if url.query and host != "api.hh.ru" and any(covers(rule) for rule in QUERYLESS_HOSTS):
-            raise SourceError(
-                f"{source.slug}: robots.txt на {host} запрещает любой URL со строкой "
-                "запроса — запрос отклонён транспортом",
-                source_slug=source.slug,
-            )
-        for rule, prefixes in BLOCKED_PATHS.items():
-            if covers(rule) and url.path.startswith(prefixes):
-                raise SourceError(
-                    f"{source.slug}: путь {url.path} на {host} закрыт на уровне транспорта",
-                    source_slug=source.slug,
-                )
+        """Refuse what no connector is allowed to ask for, before anything else runs."""
+        refuse_forbidden(url, slug=source.slug)
 
     async def _check_robots(self, source: BaseSource, url: httpx.URL, bucket: TokenBucket) -> None:
         allowed = await self._robots.allows(self.http, url, user_agent=settings.user_agent)

@@ -1056,3 +1056,76 @@ async def test_a_changed_salt_is_a_cache_miss_and_an_unchanged_one_is_a_hit(
     assert (first, again) == ("first", "first")
     assert route.call_count == 2, "the repeat came from disk, the changed salt did not"
     assert moved == "second"
+
+
+# -- redirects, which the remote server chooses ------------------------
+
+
+@pytest.mark.parametrize(
+    ("destination", "expected"),
+    [
+        ("https://almaty.hh.kz/search/vacancy?text=python", "запроса"),
+        ("https://almaty.hh.kz/sitemap/resumes0.xml", "закрыт"),
+        ("https://www.linkedin.com/jobs/view/1", "linkedin.com"),
+    ],
+)
+async def test_a_redirect_cannot_carry_a_request_somewhere_it_may_not_go(
+    clients: ClientFactory, http: respx.MockRouter, destination: str, expected: str
+) -> None:
+    """The bans have to survive a hop the remote server picked.
+
+    The client follows redirects and httpx resolves the chain internally, so
+    checking only the URL a connector passed in leaves every ban and robots.txt
+    behind on the first hop. A 302 from a page we are allowed to read is then
+    enough to reach hh's search, somebody's resume, or LinkedIn. Refused at the
+    hop, not afterwards on response.history: by then it has been fetched, and
+    "we never asked for it" is the promise.
+    """
+    http.get("https://almaty.hh.kz/robots.txt").mock(
+        return_value=httpx.Response(200, text="User-agent: *\nAllow: /\n")
+    )
+    start = "https://almaty.hh.kz/vacancy/1"
+    http.get(start).mock(return_value=httpx.Response(302, headers={"location": destination}))
+    landing = http.get(destination).mock(return_value=httpx.Response(200, text="must not be read"))
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(start)
+
+    assert landing.call_count == 0
+    assert expected in excinfo.value.detail
+
+
+async def test_an_ordinary_redirect_still_works(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The guard refuses banned destinations, not redirects.
+
+    Sources move pages, and a connector that broke on every 301 would be worse
+    than one that followed them.
+    """
+    http.get(ROBOTS_URL).mock(return_value=httpx.Response(404))
+    http.get(PAGE_URL).mock(
+        return_value=httpx.Response(301, headers={"location": f"{HOST}/jobs/1-moved"})
+    )
+    moved = http.get(f"{HOST}/jobs/1-moved").mock(return_value=httpx.Response(200, text="here"))
+
+    assert await bind(clients(), CrawlSource()).get_text(PAGE_URL) == "here"
+    assert moved.call_count == 1
+
+
+async def test_a_borrowed_client_is_guarded_too(
+    borrowed: httpx.AsyncClient, clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """A client handed in from outside must not be a way around the bans.
+
+    The hook is appended rather than assigned, because the client belongs to
+    whoever built it and may carry hooks of its own.
+    """
+    page = http.get("https://indeed.com/viewjob").mock(
+        return_value=httpx.Response(200, text="must not be read")
+    )
+
+    with pytest.raises(SourceError):
+        await bind(clients(borrowed), ApiSource()).get_text("https://indeed.com/viewjob")
+
+    assert page.call_count == 0

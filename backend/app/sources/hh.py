@@ -229,6 +229,15 @@ MODE_TO_PERIOD: dict[str, SalaryPeriod] = {
     "HOUR": SalaryPeriod.HOUR,
 }
 
+#: A language requirement, as hh renders it into ``keySkills``: a language
+#: name, a non-breaking space, an em dash, a CEFR level and its Russian label —
+#: ``"Русский" + U+00A0 + "— C1 — Продвинутый"``. Nine of the 121 skills seen across 22
+#: pages were these. They are requirements, but they are not hard skills, and
+#: docs/MATCHING.md computes hh coverage as a set intersection over the skill
+#: list at full weight — so leaving them in would report every candidate as
+#: missing a required "skill" whose name is a sentence about Kazakh.
+LANGUAGE_SKILL = re.compile(r"^(?P<language>[^\s—]+)\s*—\s*(?P<level>[ABC][12])\s*—")
+
 #: ``workFormats`` is the only honest witness of remoteness on the page.
 FORMAT_TO_REMOTE: dict[str, RemoteType] = {
     "REMOTE": RemoteType.FULL,
@@ -443,7 +452,7 @@ class HHVacancyView(BaseModel):
     published_at: AwareDatetime | None = Field(default=None, alias="publicationDate")
     expires_at: AwareDatetime | None = Field(default=None, alias="validThroughTime")
     employment_form: str | None = Field(default=None, alias="employmentForm", max_length=40)
-    work_experience: str | None = Field(default=None, max_length=40)
+    work_experience: str | None = Field(default=None, alias="workExperience", max_length=40)
     closed_for_applicants: bool = Field(default=False, alias="closedForApplicants")
     #: Only the city is read from it; the rest is a street address and a map.
     address: dict[str, Any] | None = None
@@ -504,6 +513,11 @@ class HHDerived(BaseModel):
     #: asking a model to guess the same list out of the prose. Matching should
     #: branch on its presence.
     key_skills: tuple[str, ...] = ()
+    #: The language requirements hh renders into the same list, kept apart so
+    #: the skill intersection stays a skill intersection. Verbatim, because the
+    #: level and its label are both in the string and neither is ours to parse
+    #: into a vocabulary this project does not yet have.
+    language_requirements: tuple[str, ...] = ()
     professional_role_ids: tuple[int, ...] = ()
     work_formats: tuple[str, ...] = ()
     employment_form: str | None = None
@@ -648,6 +662,22 @@ class _SiteRun:
     unreadable: int = 0
 
 
+@dataclass(slots=True)
+class _Tail:
+    """The end of a drained sitemap file, held back until the walk is over.
+
+    The lag keeps the recorded position behind what has been handed to the
+    pipeline. When a file runs out there is nothing left to keep the lag
+    honest, so its remainder waits here until every posting of the run has been
+    yielded — at which point the runner writes its last batch immediately.
+    """
+
+    site: HHSite
+    name: str
+    mark: FileWatermark
+    entries: list[SitemapEntry]
+
+
 @register_source
 class HHSource(BaseSource):
     """HeadHunter, read through its own sitemap."""
@@ -736,30 +766,32 @@ class HHSource(BaseSource):
             logger.info("sources.hh.keywords_ignored", keywords=keywords, sites=len(sites))
 
         budget = CrawlBudget(remaining=MAX_PAGES_PER_RUN)
-        # Every site gets its share before any site gets seconds. One shared
-        # counter walked in order would mean the first city in the file takes
-        # the whole budget for as long as its backfill lasts — about a dozen
-        # runs — while the others report a clean, successful, empty crawl.
+        # Every city gets an equal share. One shared counter walked in order
+        # would mean the first city in the file takes the whole budget for as
+        # long as its backfill lasts — about a dozen runs — while the others
+        # report a clean, successful, empty crawl.
+        #
+        # What a city does not spend is NOT handed to another one inside the
+        # same run. Doing that means walking a site twice, and the second walk
+        # re-reads its index and every sitemap and re-buys its head slice, which
+        # records no position by design. The unspent budget is not lost; the
+        # next run spends it, starting where this one stopped.
         share = max(1, MAX_PAGES_PER_RUN // len(sites))
-        truncated: set[str] = set()
+        tails: list[_Tail] = []
         for site in sites:
-            async for posting in self._crawl_site(
-                site, budget, allowance=share, truncated=truncated
-            ):
+            async for posting in self._crawl_site(site, budget, allowance=share, tails=tails):
                 yield posting
-        # Whatever the finished sites did not spend goes to the ones that ran
-        # out. Only to those: revisiting a site that drained its work would
-        # re-read its sitemaps and re-buy its head slice for nothing.
-        for site in sites:
-            if site.host not in truncated:
-                continue
-            if budget.exhausted():
-                logger.info("sources.hh.site_not_reached", host=site.host)
-                continue
-            async for posting in self._crawl_site(
-                site, budget, allowance=budget.remaining, truncated=set()
-            ):
-                yield posting
+        # Everything has been handed over, so the end of each drained file — the
+        # part the lag was holding back — can be recorded. This is the last
+        # thing the walk does, because the runner writes its final batch as soon
+        # as this generator finishes: the window in which a recorded entry is
+        # still unwritten is that hand-off and nothing more. A run that dies
+        # earlier records none of these and re-fetches them next time.
+        for tail in tails:
+            mark = tail.mark
+            for entry in tail.entries:
+                mark = mark.advanced(entry)
+            await self._save_watermark(tail.site, tail.name, mark)
 
     async def search(self, query: SearchQuery) -> AsyncIterator[RawPosting]:
         """One query's worth of the same walk.
@@ -772,7 +804,7 @@ class HHSource(BaseSource):
             yield posting
 
     async def _crawl_site(
-        self, site: HHSite, budget: CrawlBudget, *, allowance: int, truncated: set[str]
+        self, site: HHSite, budget: CrawlBudget, *, allowance: int, tails: list["_Tail"]
     ) -> AsyncIterator[RawPosting]:
         """Walk one host: the index, then every sitemap's outstanding entries.
 
@@ -801,7 +833,6 @@ class HHSource(BaseSource):
             return budget.exhausted() or site_budget.exhausted()
 
         if stop():
-            truncated.add(site.host)
             return
         files = await self._vacancy_sitemaps(site)
         spend()
@@ -810,7 +841,6 @@ class HHSource(BaseSource):
         marks: dict[str, FileWatermark] = {}
         for name, url in files:
             if stop():
-                truncated.add(site.host)
                 logger.info("sources.hh.file_not_read", host=site.host, file=name)
                 continue
             entries = await self._sitemap_entries(site, url)
@@ -842,7 +872,6 @@ class HHSource(BaseSource):
 
         for name, entries in due.items():
             if stop():
-                truncated.add(site.host)
                 logger.info(
                     "sources.hh.file_not_reached",
                     host=site.host,
@@ -857,7 +886,13 @@ class HHSource(BaseSource):
             # declare written what was only ever in memory. Lagging by more than
             # one of those batches makes every entry the mark names one that has
             # already been committed.
-            pending: deque[SitemapEntry] = deque()
+            # Each entry is remembered with the number of postings yielded
+            # before it. The lag has to be measured in POSTINGS, not in entries:
+            # a stretch of entries that yield nothing — taken down, archived,
+            # answering for another vacancy — would otherwise push the mark
+            # forward while the postings before them were still unwritten, and a
+            # corpus this size has such stretches.
+            pending: deque[tuple[SitemapEntry, int]] = deque()
             unsaved = 0
             for index, entry in enumerate(entries):
                 if stop():
@@ -870,33 +905,33 @@ class HHSource(BaseSource):
                         remaining_in_file=len(entries) - index,
                         outstanding_on_site=outstanding,
                     )
-                    truncated.add(site.host)
                     await self._save_watermark(site, name, mark)
                     self._log_site(site, state, budget, outstanding)
                     return
+                before = state.stored
                 if entry.external_id in state.fetched_head:
                     # Already bought in the head pass. Walk past it so the mark
                     # can advance; do not pay for it twice.
-                    pending.append(entry)
+                    pending.append((entry, before))
                 else:
                     posting = await self._fetch_counted(entry, state)
                     spend()
-                    pending.append(entry)
+                    pending.append((entry, before))
                     if posting is not None:
                         yield posting
-                while len(pending) > WATERMARK_LAG:
-                    mark = mark.advanced(pending.popleft())
+                while pending and state.stored - pending[0][1] > WATERMARK_LAG:
+                    mark = mark.advanced(pending.popleft()[0])
                     unsaved += 1
                 if unsaved >= WATERMARK_SAVE_EVERY:
                     await self._save_watermark(site, name, mark)
                     unsaved = 0
-            # The file is drained, so the tail can be recorded. The exposure is
-            # the last unwritten batch, and it closes itself: hh re-publishes a
-            # posting every time its auto-renewal fires, which moves its lastmod
-            # and brings it back through here.
-            for entry in pending:
-                mark = mark.advanced(entry)
+            # The file is drained. Its remainder is not recorded here: the
+            # postings from it are still in the pipeline's unwritten batch, and
+            # a mark naming them would declare written what is only in memory.
+            # It waits until the whole walk is done — see ``search_batch``.
             await self._save_watermark(site, name, mark)
+            if pending:
+                tails.append(_Tail(site, name, mark, [entry for entry, _ in pending]))
 
         self._log_site(site, state, budget, outstanding)
 
@@ -965,7 +1000,15 @@ class HHSource(BaseSource):
         index_url = f"https://{site.host}{SITEMAP_INDEX_PATH}"
         body = await self.http.get_text(index_url)
         listed = SITEMAP_LOC.findall(body)
-        found = {(match.group(1), url) for url in listed if (match := VACANCY_SITEMAP.search(url))}
+        # The host is checked here for the reason ``_entry`` checks it on the
+        # vacancy URLs: a sitemap is a document somebody else writes, and every
+        # URL in it is input. The pattern is anchored on the file name and would
+        # happily match one on another host.
+        found = {
+            (match.group(1), url)
+            for url in listed
+            if (match := VACANCY_SITEMAP.search(url)) and urlsplit(url).hostname == site.host
+        }
         if not found:
             raise HHMarkupError(
                 f"hh: в {index_url} нет ни одного файла vacancy*.xml — формат карты "
@@ -1159,6 +1202,7 @@ class HHSource(BaseSource):
             city = view.area.name
         states = _calculated_states(view.vacancy_properties)
         company = view.company
+        skills, languages = _split_skills(unwrap(view.key_skills))
         return HHDerived(
             external_id=entry.external_id,
             url=entry.url,
@@ -1168,7 +1212,8 @@ class HHSource(BaseSource):
             salary=_salary(view.compensation),
             published_at=view.published_at,
             expires_at=view.expires_at,
-            key_skills=tuple(str(skill) for skill in unwrap(view.key_skills)),
+            key_skills=skills,
+            language_requirements=languages,
             professional_role_ids=tuple(
                 int(role) for role in unwrap(view.professional_role_ids) if _is_int(role)
             ),
@@ -1294,6 +1339,21 @@ def _salary(compensation: dict[str, Any] | None) -> HHSalary | None:
         mode=parsed.mode,
         frequency=parsed.frequency,
     )
+
+
+def _split_skills(entries: Sequence[Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """hh's requirement list, split into skills and the languages mixed into it.
+
+    ``Any`` on the way in because ``unwrap`` returns whatever the field held;
+    everything is stringified here, which is what the payload has always
+    contained.
+    """
+    skills: list[str] = []
+    languages: list[str] = []
+    for entry in entries:
+        value = str(entry)
+        (languages if LANGUAGE_SKILL.match(value) else skills).append(value)
+    return tuple(skills), tuple(languages)
 
 
 def _remote_from(formats: Sequence[str]) -> RemoteType:

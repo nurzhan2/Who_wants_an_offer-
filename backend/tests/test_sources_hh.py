@@ -1235,3 +1235,165 @@ def test_the_payment_schedule_is_never_read_as_the_period(frequency: str) -> Non
     assert salary is not None
     assert salary.period is SalaryPeriod.MONTH
     assert salary.frequency == frequency
+
+
+async def test_a_sitemap_index_pointing_off_host_is_not_followed(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The index is a document somebody else writes, so its URLs are input.
+
+    The file-name pattern is anchored on the tail of the path and would match
+    ``vacancy0.xml`` on any host at all. ``_entry`` already checks the host of
+    every vacancy URL for this reason; the index deserves the same.
+    """
+    http.get(INDEX_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "<?xml version='1.0'?><sitemapindex><sitemap>"
+                "<loc>https://evil.example/sitemap/vacancy0.xml</loc>"
+                "</sitemap></sitemapindex>"
+            ),
+        )
+    )
+    elsewhere = http.get("https://evil.example/sitemap/vacancy0.xml").mock(
+        return_value=httpx.Response(200, text=sitemap(dated([FULL])))
+    )
+
+    # Nothing on this host is a vacancy sitemap, which is itself a markup change.
+    with pytest.raises(HHMarkupError):
+        await collect(hh)
+
+    assert elsewhere.call_count == 0
+
+
+async def test_entries_that_yield_nothing_do_not_drag_the_position_forward(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lag is measured in postings, and a dead stretch is why.
+
+    Counting it in sitemap entries looks equivalent and is not: a run of
+    entries that yield nothing — taken down, archived, answering for a
+    different vacancy — pushes the mark forward while the postings before them
+    are still in the pipeline's unwritten batch. A corpus of fourteen thousand
+    pages has such stretches, and the damage is silent, because the mark then
+    says those postings were dealt with.
+    """
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 2)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
+    live = [FULL, NULL_COLLECTIONS]
+    # One more dead entry than the run can reach, so the file does not drain:
+    # a drained file legitimately records its tail once the walk is over, and
+    # what is under test here is the mark moving mid-walk.
+    dead = [NO_COMPENSATION, SALARY_TO_ONLY, SALARY_FROM_ONLY, SALARY_NO_FREQUENCY]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(live + dead))))
+    for vacancy_id in live:
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+    for vacancy_id in dead:
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(404, text=page({"vacancyView": {}, "errorCode": 404}))
+        )
+
+    postings = await collect(hh)
+
+    assert [posting.external_id for posting in postings] == live
+    # Two postings yielded and three dead entries after them: with the lag
+    # counted in entries the mark would have walked past both postings. Counted
+    # in postings, it has not moved at all.
+    assert store.saved == {}
+
+
+async def test_a_drained_file_records_its_tail_only_once_the_walk_is_over(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The blocker this ordering exists to prevent.
+
+    A file that runs out has nothing left to keep the lag honest, so recording
+    its remainder immediately declares written a batch the pipeline is still
+    holding. If the run then dies in a later file, those postings are lost and
+    the position says they were dealt with — they are never fetched again.
+
+    So the remainder waits until every posting of the run has been handed over.
+    Here the run dies in the second file, and the first file's tail is
+    deliberately not recorded.
+    """
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(dated([FULL, NULL_COLLECTIONS])))
+    )
+    for vacancy_id in (FULL, NULL_COLLECTIONS):
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+    broken = [NO_COMPENSATION, SALARY_TO_ONLY, SALARY_FROM_ONLY]
+    http.get(VACANCY1_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(broken))))
+    for vacancy_id in broken:
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text="<html>hh redesigned this page</html>")
+        )
+
+    with pytest.raises(HHMarkupError):
+        await collect(hh)
+
+    recorded = store.saved.get(f"sitemap:{HOST}:vacancy0", {}).get("ids_at_lastmod", [])
+    assert NULL_COLLECTIONS not in recorded, "the last posting of the file was declared done"
+
+
+async def test_a_walk_that_finishes_records_the_tail_it_was_holding(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """And the other half: holding it back forever would re-buy it every run."""
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
+    routes = serve(http, [FULL, NULL_COLLECTIONS])
+
+    assert len(await collect(hh)) == 2
+    assert store.saved[f"sitemap:{HOST}:vacancy0"]["ids_at_lastmod"] == [NULL_COLLECTIONS]
+
+    assert await collect(hh) == []
+    assert routes[FULL].call_count == 1
+
+
+async def test_the_experience_requirement_survives_the_page(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """A field with no alias reads nothing at all, and reads it quietly.
+
+    ``populate_by_name`` only adds the field name as an accepted key when there
+    IS an alias; without one, ``work_experience`` never matched hh's
+    ``workExperience`` and every posting carried a null where a requirement
+    should be. Nothing failed — the block was simply always empty, on all 22
+    captured pages.
+    """
+    serve(http, [FULL])
+
+    block = derived((await collect(hh))[0])
+
+    assert block["work_experience"] == "between1And3"
+    assert block["labels"]["workExperience"]
+
+
+async def test_language_requirements_do_not_pretend_to_be_skills(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """hh renders them into keySkills, and matching intersects that list at full weight.
+
+    Nine of 121 measured skills were strings like "Русский — C1 — Продвинутый".
+    Left in the skill set, every one of them reads as a required hard skill the
+    candidate does not have, and the name of the missing skill is a sentence
+    about a language.
+    """
+    payload = state(FULL)
+    payload["vacancyView"]["keySkills"] = {
+        "keySkill": ["Python", "Русский — C1 — Продвинутый", "SQL"]
+    }
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
+
+    block = derived((await collect(hh))[0])
+
+    assert block["key_skills"] == ["Python", "SQL"]
+    assert block["language_requirements"] == ["Русский — C1 — Продвинутый"]

@@ -34,9 +34,12 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
       - run: uv sync --frozen
-      # -m network selects exactly what pyproject deselects by default. CI is
-      # deliberately NOT set here: the skip-is-fatal rule exists so a green
-      # build means every test ran, and these tests answer to a site we do not
-      # control.
+      # -m network selects exactly what pyproject's addopts deselects.
+      #
+      # GitHub Actions sets CI=true in every step whether we ask or not, so
+      # conftest's skip-is-fatal guard is live here too. That is the behaviour
+      # we want and it is a constraint on this file: these tests must never
+      # skip. A source that cannot be reached has to fail loudly — a canary
+      # that skips itself when the site is down is a canary that never sings.
       - name: Ask hh
         run: uv run pytest -m network --no-cov -p no:cacheprovider
