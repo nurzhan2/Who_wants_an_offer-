@@ -37,6 +37,16 @@ http_cache/
 models/
 backups/
 
+# Local apply agent. The browser profile holds the owner's live hh session —
+# cookies, tokens, history — and is the one directory in this repository that
+# must never be committed by accident. The screenshots are taken on failure and
+# show a logged-in account.
+agent/profile/
+agent/screenshots/
+agent/*.sqlite3
+agent/queue.json
+agent/answers/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

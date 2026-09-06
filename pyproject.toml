@@ -39,6 +39,19 @@ dependencies = [
 embeddings = ["sentence-transformers>=6.0"]
 
 [dependency-groups]
+# The local apply agent. A group rather than a project dependency, and the
+# distinction is load-bearing: backend/Dockerfile builds with
+# `uv sync --frozen --no-dev`, which installs [project].dependencies and no
+# groups at all, so playwright can never reach the server image. The brief's
+# rule — «backend не должен зависеть от playwright» — is therefore a property of
+# how this is declared rather than a note in a README.
+#   uv sync --group agent && uv run playwright install chromium
+agent = [
+    "playwright>=1.62",
+    "httpx>=0.28",
+    "structlog>=24.4",
+]
+
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.25",
@@ -113,6 +126,11 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
 "backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]
 "backend/app/pipeline/runner.py" = ["RUF001", "RUF002"]
+# Every message this agent prints is read by the person whose account it is
+# about to act on, so all of them are Russian, and RUF001-003 fire on almost
+# every line. Scoped to the package rather than disabled globally.
+"agent/*.py" = ["RUF001", "RUF002", "RUF003"]
+"agent/tests/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
@@ -123,7 +141,7 @@ docstring-code-format = true
 # ── mypy ──────────────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.12"
-files = ["backend/app"]
+files = ["backend/app", "agent"]
 strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
@@ -138,7 +156,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["backend/tests"]
+testpaths = ["backend/tests", "agent/tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",

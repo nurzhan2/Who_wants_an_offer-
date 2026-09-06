@@ -28,6 +28,26 @@ test-fast: ## Tests that need neither PostgreSQL nor a model
 	# the live hh site.
 	$(UV) run pytest -m "not db and not slow and not network"
 
+agent-install: ## Install the apply agent's own dependencies and its browser
+	# A group, not a project dependency: backend/Dockerfile builds with
+	# `uv sync --frozen --no-dev` and never sees it.
+	$(UV) sync --group agent
+	$(UV) run playwright install chromium
+
+agent-login: ## Log in to hh by hand, once, in a visible window
+	$(UV) run python -m agent.login
+
+agent-probe: ## Stage 0, read-only: make agent-probe u=https://hh.kz/vacancy/123
+	$(UV) run python -m agent.probe_apply --stage inspect --url "$(u)"
+
+agent-check: ## The agent's own gates. No browser, no network, no account.
+	$(UV) run ruff check agent
+	$(UV) run mypy agent
+	$(UV) run pytest agent/tests -q
+
+agent-run: ## Dry run by default; add s=--send to reach the confirmation
+	$(UV) run python -m agent.run $(s)
+
 verify-embeddings: ## Load the real bge-m3 model and prove it works
 	$(UV) run --extra embeddings python scripts/verify_embeddings.py
 
