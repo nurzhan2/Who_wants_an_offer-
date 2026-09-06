@@ -18,6 +18,12 @@ and flaky on a loaded runner rather than exact.
 
 **robots.txt is applied to crawling, and crawling is not the same thing as
 calling an API.** The rule, and the reasoning, are under :class:`RobotsCache`.
+
+And one thing is stricter than robots.txt itself, because the standard library
+is weaker than the file: ``urllib.robotparser`` has no wildcard support, so a
+rule like hh's ``Disallow: *?*`` parses as a literal path prefix and matches
+nothing at all. Rules we can read but it cannot apply are enforced by
+:meth:`SourceClient._refuse_forbidden` instead of being silently discarded.
 """
 
 import asyncio
@@ -68,20 +74,47 @@ CACHE_SCHEMA = 1
 RETRYABLE_STATUS: frozenset[int] = frozenset({408, 429, 500, 502, 503, 504})
 
 #: Refused at the transport whatever a connector declares, so the bans in
-#: CLAUDE.md and in the phase brief are code rather than convention. hh is here
-#: because the user's own working resume lives on it and an account ban is not
-#: an acceptable outcome; the rest because their terms forbid automated
-#: collection outright.
+#: CLAUDE.md and in the phase brief are code rather than convention. These three
+#: forbid automated collection in their terms outright, so no path on them is
+#: reachable and no connector can argue otherwise.
 BLOCKED_HOSTS: frozenset[str] = frozenset(
     {
-        "hh.ru",
-        "hh.kz",
-        "api.hh.ru",
         "linkedin.com",
         "indeed.com",
         "glassdoor.com",
     }
 )
+
+#: Hosts whose robots.txt forbids every URL carrying a query string, enforced
+#: here because ``urllib.robotparser`` cannot enforce it.
+#:
+#: hh's ``User-agent: *`` group is ``Disallow: *?*`` with three narrow ``Allow``
+#: exceptions. CPython's ``RuleLine`` matches a rule as a literal path prefix
+#: and has no wildcard support at all, so ``*?*`` never matches anything and
+#: ``can_fetch(ua, "https://almaty.hh.kz/search/vacancy?text=python")`` answers
+#: True — measured against the live file on 2026-09-06. Leaving the rule to the
+#: robots layer would mean it was not applied at all, so the one form of URL hh
+#: actually refuses is refused here instead.
+QUERYLESS_HOSTS: frozenset[str] = frozenset({"hh.kz", "hh.ru"})
+
+#: Host to path prefixes that are closed on an otherwise reachable host. hh's
+#: search pages sit behind the query-string ban above and are named again here
+#: so that a connector cannot reach them even without parameters; the jobseeker
+#: half of ``api.hh.ru`` has answered 403 to every programmatic client since
+#: April 2026, while its dictionaries stay open and are what we call it for.
+#: Resumes are here for a reason worth stating: nothing else in the stack
+#: refuses them. ``robots.txt`` says ``Disallow: /resume$``, and
+#: ``urllib.robotparser`` quotes that into the literal prefix ``/resume%24``,
+#: which prefixes no real path — so ``can_fetch`` answers True for
+#: ``/resume/…`` and for ``/sitemap/resumes0.xml``, both measured against the
+#: live file on 2026-09-06. Those files are living people's CVs, and the one
+#: prohibition in this phase that must not depend on a connector getting a
+#: regular expression right is therefore stated at the transport.
+BLOCKED_PATHS: dict[str, tuple[str, ...]] = {
+    "hh.kz": ("/search", "/resume", "/sitemap/resumes"),
+    "hh.ru": ("/search", "/resume", "/sitemap/resumes"),
+    "api.hh.ru": ("/vacancies",),
+}
 
 #: Query parameters that carry a credential. Redacted before a URL reaches a log
 #: line or a cache envelope — jooble puts its key in the path, and a cache file
@@ -554,7 +587,7 @@ class SourceClient:
         target = httpx.URL(url)
         if params:
             target = target.copy_merge_params(params)
-        self._refuse_blocked(source, target)
+        self._refuse_forbidden(source, target)
 
         if source.access_mode is AccessMode.CRAWL:
             await self._check_robots(source, target, bucket)
@@ -579,13 +612,44 @@ class SourceClient:
             self._cache.write(key, response, slug=source.slug)
         return response
 
-    def _refuse_blocked(self, source: BaseSource, url: httpx.URL) -> None:
+    def _refuse_forbidden(self, source: BaseSource, url: httpx.URL) -> None:
+        """Refuse what no connector is allowed to ask for, before anything else runs.
+
+        Three separate bans, and they are separate on purpose. A whole host is
+        closed when its terms forbid automated collection; a query string is
+        closed when robots.txt forbids one and the robots layer cannot say so;
+        a path is closed when that part of an otherwise open host is shut.
+        Collapsing them into one list would mean either losing ``api.hh.ru``'s
+        dictionaries or reopening its jobseeker endpoints.
+        """
         host = (url.host or "").lower()
-        if any(host == blocked or host.endswith(f".{blocked}") for blocked in BLOCKED_HOSTS):
+
+        def covers(rule: str) -> bool:
+            return host == rule or host.endswith(f".{rule}")
+
+        if any(covers(blocked) for blocked in BLOCKED_HOSTS):
             raise SourceError(
                 f"{source.slug}: обращение к {host} запрещено на уровне транспорта",
                 source_slug=source.slug,
             )
+        # ``covers`` matches subdomains, and api.hh.ru is one of hh.ru's — but
+        # it serves no robots.txt at all (404, which RFC 9309 reads as no
+        # restrictions), so hh.kz's ``Disallow: *?*`` is not its rule and
+        # applying it here would refuse ``/professional_roles?locale=RU`` while
+        # blaming a file that host does not have. Its jobseeker endpoints are
+        # closed by BLOCKED_PATHS; its dictionaries take parameters and stay open.
+        if url.query and host != "api.hh.ru" and any(covers(rule) for rule in QUERYLESS_HOSTS):
+            raise SourceError(
+                f"{source.slug}: robots.txt на {host} запрещает любой URL со строкой "
+                "запроса — запрос отклонён транспортом",
+                source_slug=source.slug,
+            )
+        for rule, prefixes in BLOCKED_PATHS.items():
+            if covers(rule) and url.path.startswith(prefixes):
+                raise SourceError(
+                    f"{source.slug}: путь {url.path} на {host} закрыт на уровне транспорта",
+                    source_slug=source.slug,
+                )
 
     async def _check_robots(self, source: BaseSource, url: httpx.URL, bucket: TokenBucket) -> None:
         allowed = await self._robots.allows(self.http, url, user_agent=settings.user_agent)

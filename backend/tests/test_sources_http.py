@@ -839,3 +839,189 @@ async def test_a_key_in_the_url_never_reaches_the_cache_file(
     assert REDACTED in blob
     # Not in the file name either: the key is a digest, not the URL.
     assert all(SECRET not in str(path) for path in tmp_path.rglob("*"))
+
+
+# -- what hh's robots.txt forbids and robotparser cannot ---------------
+
+
+HH_ROBOTS = (
+    "User-agent: *\nAllow: *?u*\nAllow: *?currencyCode*\nDisallow: *?*\nDisallow: /resume$\n"
+)
+
+
+async def test_robotparser_really_does_allow_the_url_hh_forbids(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The premise of the guard below, pinned so nobody deletes it as paranoia.
+
+    hh closes its search with ``Disallow: *?*``. CPython's robotparser matches a
+    rule as a literal path prefix and has no wildcards at all, so that rule
+    matches nothing and this URL comes back allowed. Should a future CPython
+    learn wildcards, this test fails and the transport guard becomes belt and
+    braces rather than the only thing standing there -- either way somebody
+    reads the reasoning before changing it.
+    """
+    http.get("https://almaty.hh.kz/robots.txt").mock(
+        return_value=httpx.Response(200, text=HH_ROBOTS)
+    )
+    robots = RobotsCache()
+    client = clients()
+
+    allowed = await robots.allows(
+        client.http,
+        httpx.URL("https://almaty.hh.kz/search/vacancy?text=python"),
+        user_agent=USER_AGENT,
+    )
+
+    assert allowed is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://almaty.hh.kz/search/vacancy?text=python",
+        "https://hh.kz/vacancy/1?utm_source=x",
+        "https://hh.ru/vacancy/1?hhtmFrom=vacancy_search_list",
+    ],
+)
+async def test_a_query_string_on_hh_is_refused_before_anything_leaves(
+    clients: ClientFactory, http: respx.MockRouter, url: str
+) -> None:
+    """The rule robots states and robotparser cannot apply is applied here.
+
+    Any query string, not only a search: the file says ``Disallow: *?*`` and the
+    three ``Allow`` exceptions are narrower than anything a connector would
+    build. Refused before robots.txt is even fetched, so a connector cannot
+    reach the search results by any route.
+    """
+    robots = http.get("https://almaty.hh.kz/robots.txt").mock(
+        return_value=httpx.Response(200, text=HH_ROBOTS)
+    )
+    page = http.get(url).mock(return_value=httpx.Response(200, text="must not be read"))
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(url)
+
+    assert page.call_count == 0
+    assert robots.call_count == 0
+    assert "строкой запроса" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hh.kz/search/vacancy",
+        "https://almaty.hh.kz/search/vacancy",
+        "https://api.hh.ru/vacancies/123",
+    ],
+)
+async def test_hh_search_and_the_closed_api_are_refused_by_path(
+    clients: ClientFactory, http: respx.MockRouter, url: str
+) -> None:
+    """Named again without their parameters, so no spelling of them is reachable.
+
+    The jobseeker half of api.hh.ru has answered 403 to every programmatic
+    client since April 2026; the search pages are what robots forbids. Neither
+    is a host-wide ban, because the rest of both hosts is what the connector
+    legitimately reads.
+    """
+    page = http.get(url).mock(return_value=httpx.Response(200, text="must not be read"))
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(url)
+
+    assert page.call_count == 0
+    assert "закрыт" in excinfo.value.detail
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://api.hh.ru/areas/40",
+        "https://api.hh.ru/professional_roles",
+        "https://almaty.hh.kz/vacancy/136390570",
+        "https://almaty.hh.kz/sitemap/main.xml",
+    ],
+)
+async def test_the_open_parts_of_hh_stay_reachable(
+    clients: ClientFactory, http: respx.MockRouter, url: str
+) -> None:
+    """The point of a path ban rather than a host ban.
+
+    hh's dictionaries answer 200 and are the reference this project normalises
+    against; the sitemap and the vacancy pages are what robots.txt opens. A
+    blunter rule would have to give up one of them to forbid the other.
+    """
+    http.get("https://api.hh.ru/robots.txt").mock(return_value=httpx.Response(404))
+    http.get("https://almaty.hh.kz/robots.txt").mock(
+        return_value=httpx.Response(200, text=HH_ROBOTS)
+    )
+    page = http.get(url).mock(return_value=httpx.Response(200, text="{}"))
+
+    body = await bind(clients(), CrawlSource()).get_text(url)
+
+    assert body == "{}"
+    assert page.call_count == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://almaty.hh.kz/sitemap/resumes0.xml",
+        "https://hh.kz/resume/abcdef",
+        "https://hh.ru/resume",
+    ],
+)
+async def test_other_peoples_resumes_are_refused_by_the_transport(
+    clients: ClientFactory, http: respx.MockRouter, url: str
+) -> None:
+    """The one prohibition that must not depend on a connector's regex.
+
+    hh's sitemap index lists ``resumes0..14.xml`` in the same file the crawler
+    reads for vacancies, and those are living people's CVs. Nothing else in the
+    stack refuses them: robots.txt says ``Disallow: /resume$``, robotparser
+    quotes that into the literal prefix ``/resume%24``, and no real path starts
+    with it -- so the file we are obeying answers "allowed", as the second half
+    of this test shows. The connector picks its sitemaps with an allow-list, but
+    an allow-list is one edit away from being a substring test, and this is not
+    a mistake anybody should be able to make twice.
+    """
+    # Every hh host, because the second half of this test asks robots.txt what
+    # it makes of the same URL.
+    http.get(url__regex=r"https://[^/]+/robots\.txt").mock(
+        return_value=httpx.Response(200, text=HH_ROBOTS + "Disallow: /resume$\n")
+    )
+    page = http.get(url).mock(return_value=httpx.Response(200, text="must not be read"))
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(url)
+
+    assert page.call_count == 0
+    assert "закрыт" in excinfo.value.detail
+
+    permitted = await RobotsCache().allows(clients().http, httpx.URL(url), user_agent=USER_AGENT)
+    assert permitted is True, "the point: robots.txt does not close this for us"
+
+
+async def test_a_dictionary_call_with_parameters_still_reaches_api_hh_ru(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The suffix match must not lend hh.kz's rules to a host that has none.
+
+    ``api.hh.ru`` ends with ``hh.ru``, so a naive queryless rule refuses
+    ``/professional_roles?locale=RU`` -- and blames a robots.txt that host
+    answers 404 for, which RFC 9309 reads as no restrictions at all. Those
+    dictionaries are the reference this project normalises hh vacancies
+    against, and they take parameters.
+    """
+    http.get("https://api.hh.ru/robots.txt").mock(return_value=httpx.Response(404))
+    route = http.get("https://api.hh.ru/professional_roles").mock(
+        return_value=httpx.Response(200, json={"categories": []})
+    )
+
+    payload = await bind(clients(), CrawlSource()).get_json(
+        "https://api.hh.ru/professional_roles", params={"locale": "RU"}
+    )
+
+    assert payload == {"categories": []}
+    assert dict(route.calls[0].request.url.params) == {"locale": "RU"}

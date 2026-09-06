@@ -8,7 +8,7 @@
 | 0 | Каркас репозитория и тулинг | `prompts/01-foundation.md` | `uv`, ruff, mypy, pytest, pre-commit, CI, docker-compose |
 | 1 | Ядро бэкенда и БД | `prompts/01-foundation.md` | FastAPI, модели, Alembic, pgvector, health-check |
 | 2 | Загрузка и разбор резюме | `prompts/02-ingest.md` | PDF/DOCX → `CandidateProfile` + эмбеддинг |
-| 3 | Фреймворк коннекторов + батч 1 | `prompts/02-ingest.md` | `BaseSource`, реестр, `hh`, `remotive`, `arbeitnow` |
+| 3 | Фреймворк коннекторов + батч 1 | `prompts/02-ingest.md`, `MEGAPROMPT-hh-sitemap.md` | `BaseSource`, реестр, `jsearch`, `remotive`, `arbeitnow`, `hh` (через sitemap) |
 | 4 | Нормализация и дедупликация | `prompts/02-ingest.md` | словарь скиллов, парсер зарплат, fingerprint + simhash |
 | 5 | Движок соответствия | `prompts/03-matching-api.md` | фильтры, rule-скор, семантика, LLM re-rank |
 | 6 | Публичный API | `prompts/03-matching-api.md` | все эндпоинты v1, фильтры, пагинация |

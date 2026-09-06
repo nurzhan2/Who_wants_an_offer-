@@ -105,11 +105,16 @@ fails the build** — green has to mean everything actually ran.
 
 ## Legal
 
-Only sources with a public API or an explicitly permissive `robots.txt` are
-enabled by default. LinkedIn and Indeed connectors are **not** shipped — their
-terms of service prohibit automated collection. Every connector respects
-`robots.txt`, sets an identifying User-Agent and rate-limits itself.
-Collected data is stored for personal job-search use only.
+Every connector is either a documented API called under its published terms, or
+a crawl of the pages `robots.txt` allows — and what that file allows is enforced
+in the transport, not left to the connector. LinkedIn, Indeed and Glassdoor are
+refused at the transport whatever a connector declares: their terms prohibit
+automated collection. HeadHunter is read anonymously through its own sitemap,
+never with a query string, because that is the part of the site its `robots.txt`
+opens; its search pages and its closed jobseeker API are refused in the same
+place. No connector signs in, solves a challenge or disguises its User-Agent,
+which identifies the project and carries a contact. Collected data is stored for
+personal job-search use only.
 
 ## License
 

@@ -103,14 +103,16 @@ DoD из CLAUDE.md. Сначала план, потом код.
 
 4. Коннекторы:
 
-   a) app/sources/hh.py — slug "hh". GET https://api.hh.ru/vacancies.
-      Поддержка host=hh.kz и hh.ru через параметр. Пагинация с учётом
-      потолка 2000 результатов: при приближении к нему автоматически
-      дробить запрос по date_from/date_to (окна по дням) и по
-      professional_role. Описание догружается из /vacancies/{id}
-      (needs_detail_fetch = True), батчами с соблюдением rate limit.
-      Загрузка справочников /areas и /professional_roles с кэшем в БД
-      или на диск. Резолвер названия города в area_id.
+   a) app/sources/hh.py — slug "hh".
+      УСТАРЕЛО (06.09.2026). Путь через GET https://api.hh.ru/vacancies
+      мёртв: 403 любому программному клиенту без ключа работодателя.
+      Дробление окон при found > 2000 было нужно только поисковой выдаче
+      этого API и не реализовано.
+      Коннектор написан по другому заданию — MEGAPROMPT-hh-sitemap.md:
+      карта сайта <город>.hh.kz/sitemap/vacancy{N}.xml, затем
+      /vacancy/{id} без query-строки, разбор состояния фронтенда из
+      HH-Lux-InitialState. Справочники /areas и /professional_roles на
+      api.hh.ru по-прежнему открыты и остаются источником нормализации.
 
    b) app/sources/remotive.py — slug "remotive".
       GET https://remotive.com/api/remote-jobs, описание приходит сразу,
