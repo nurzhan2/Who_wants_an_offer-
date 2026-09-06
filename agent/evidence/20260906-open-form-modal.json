@@ -1,0 +1,43 @@
+{
+ "schema": "hh-agent-selector-evidence/1",
+ "stage": "open-form",
+ "authenticated": true,
+ "data_qa_seen": [
+  "add-cover-letter",
+  "hidden-resume-warning",
+  "mainmenu_createResume",
+  "mainmenu_profileAndResumes",
+  "mainmenu_vacancyResponses",
+  "modal-content-scroll-container",
+  "modal-footer",
+  "modal-header",
+  "modal-header-image",
+  "modal-overlay",
+  "profileAndResumes-badge",
+  "profileAndResumes-button",
+  "profileAndResumes-button-text",
+  "response-popup-close",
+  "response-popup-close-svg",
+  "resume-detail",
+  "resume-title",
+  "vacancy-response-link-top",
+  "vacancy-response-submit-popup",
+  "vacancyResponses-button",
+  "vacancyResponses-button-text"
+ ],
+ "decoys_seen": [
+  "vacancy-response-question",
+  "vacancy-response-question_employment_and_work_mode",
+  "vacancy-response-question_how_to_contact",
+  "vacancy-response-question_is_vacancy_open",
+  "vacancy-response-question_other",
+  "vacancy-response-question_salary_options",
+  "vacancy-response-question_work_place_location"
+ ],
+ "produced_by": "agent/peek_form.py — разовый скрипт, НЕ agent/probe_apply.py. Это редакция уже снятого измерения, а не прогон пробы.",
+ "contains": "Только имена data-qa, этап прогона и признак авторизации. Ни id вакансии, ни ссылок, ни откликов, ни данных владельца аккаунта.",
+ "measured_on": "2026-09-06",
+ "source_artefact": "agent/probe/form_<id вакансии>.json (каталог в .gitignore): полный дамп [data-qa] до и после клика по кнопке отклика, снятый 2026-09-06 в браузере владельца. Сам id вакансии сюда не переносится намеренно.",
+ "authentication_evidence": "Признак измерен по самому дампу, а не функцией agent.session.looks_authenticated: в шапке есть applicantProfilePage-button и mainmenu_vacancyResponses, а в модальном окне — resume-title с резюме владельца. Анонимному посетителю не показывают ничего из этого. Это слабее, чем измерение пробой, и здесь так и написано.",
+ "known_gap": "Поле сопроводительного письма отсутствует: кнопку add-cover-letter в этом прогоне никто не нажимал, поэтому textarea не появилась ни в одном дампе."
+}

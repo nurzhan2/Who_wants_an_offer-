@@ -1,60 +1,72 @@
 """Stage 0: look at the real apply form and write down what is there.
 
-The brief makes this blocking, and it is right to: the selectors for the apply
-button and the letter field are not known, hh uses ``data-qa`` attributes so a
-guess feels safe, and a guess that happens to match something clicks an unknown
-control on somebody's live account. Nothing in this package that touches the
-apply flow will start until this has been run — see
-``agent/selectors.py::assert_ready_to_apply``.
+The brief makes this blocking, and it is right to: hh uses ``data-qa``
+attributes, so a guessed selector feels safe, and a guess that happens to match
+something clicks an unknown control on somebody's live account. Nothing in this
+package that touches the apply flow starts until a run here has recorded what
+the page actually carries — see ``agent/selectors.py::assert_ready_to_apply``.
 
 Two stages, because they carry different risks.
 
 ``--stage inspect`` never clicks anything. It reads the page, dumps every
-``data-qa`` that could plausibly belong to an application, and dumps
-``applicantVacancyResponseStatuses`` for the vacancy. Run this on all four
-targets. It answers most of the open questions and it cannot send anything.
+``data-qa`` that could plausibly belong to an application, and dumps this
+vacancy's entry in ``applicantVacancyResponseStatuses`` verbatim. It cannot send
+anything at all.
 
-``--stage open-form`` clicks «Откликнуться», because the submit control and the
-letter field live on the other side of that click and there is no way to see
-them without it.
+``--stage open-form`` clicks the apply control, because the submit button, the
+resume line, the warning and the letter button live on the other side of that
+click and there is no way to see them without it.
 
-**And that click is the one genuinely dangerous thing in this package.** Two
-measured facts collide. The apply control is
-``<a href="/applicant/vacancy_response?vacancyId=…">``, so following it is a GET
-document navigation — a guard that blocks "writes" by looking at the HTTP method
-does not touch it. And ``context.route`` cannot see a request issued from a
-service worker or ``navigator.sendBeacon``, so no interception is absolute. If
-hh's response flow ever completes on that first GET, that click sends an
-application the owner did not confirm.
+**What that click was feared to do, and what it was measured to do.** The
+original version of this module refused to run ``open-form`` on anything but a
+vacancy the owner had already applied to, and the argument was sound at the
+time: the apply control is ``<a href="/applicant/vacancy_response?vacancyId=…">``
+so following it is a GET document navigation that a method-based guard does not
+touch, and ``context.route`` cannot see a request issued from a service worker,
+so no interception is absolute. If hh completed the application on that first
+GET, the click would send something nobody confirmed. Nobody knew whether it
+did, and the brief's instruction for exactly that situation is not to route
+around it.
 
-Nobody knows whether it does. The brief's instruction for exactly this situation
-is not to route around it: «Если какая-то из этих границ мешает выполнить
-задачу — не обходить её, а остановиться и написать об этом в отчёте».
+MEASURED 2026-09-06, on the owner's logged-in profile, on a fresh vacancy:
+**the click sends nothing.** Following the link fetches
+``GET /applicant/vacancy_response/popup?vacancyId=…&isTest=no&withoutTest=no
+&lux=true&fingerprintIteration2=…&alreadyApplied=false`` and renders a modal;
+the only other traffic was analytics, and a run that aborted every non-GET
+request produced the modal intact. So the refusal above is retired: it was
+protecting against a possibility that has now been checked, and keeping it would
+have kept ``--stage open-form`` unreachable — on an already-applied vacancy the
+plain ``-top`` control does not exist at all, so the stage's own guard demanded
+a page where its own selector could never match.
 
-So ``--stage open-form`` **refuses any target not labelled already_applied**.
-On a vacancy the owner has already applied to, a stray submit is a no-op, and
-the form is still there to be read. That is a structural refusal in
-:func:`open_form`, not a warning in a docstring. If the form on an
-already-applied vacancy turns out to differ so much that it teaches nothing
-about the fresh one, the honest answer is in the report: this design cannot
-learn the submit selector without risking one unconfirmed application, and that
-is the owner's decision to make, not this program's.
+``--already-applied`` survives as a *label*: it records what the owner believes
+about the target, so the report says which kind of page it photographed. It no
+longer gates anything.
 
-**The interceptor here refuses other vacancies, not this one.** The first
-version aborted every application-shaped request, and that included the
-navigation the apply link itself performs: the click landed on a Chromium error
-page, ``data_qa_after_click`` came back empty, and the procedure the README
-documents for unblocking the package could not be completed by anyone. It read
-like a second safety net and was in fact a hole in the floor.
+**What now carries the safety, since it is no longer a refusal.** Two
+independent guards, kept both because neither subsumes the other. The send is a
+non-GET request, so every non-GET is aborted here — measured to leave the modal
+working. And the URL check refuses any application-shaped request naming a
+different vacancy, which a method check would happily allow. A separate
+``page.on("request")`` recorder shouts if anything reached an application URL
+without passing the interceptor at all, which is what a service worker would
+look like.
 
-So the refusal above is the safety, and this is what it leaves: requests naming
-this one vacancy proceed, requests naming any other are aborted and reported,
-and a separate ``page.on("request")`` recorder shouts if anything reached an
-application URL without passing the interceptor at all — which is what a service
-worker would look like.
+**Waiting.** The modal lives in the main frame, not an iframe, and it appears
+LATER than two seconds after the click. The earlier report at
+``agent/probe/20260906-181519/probe.json`` contains none of the modal's names
+for exactly that reason: it waited two seconds and photographed the page before
+the modal rendered. Everything here waits for a selector.
 
-    uv run python -m agent.probe_apply --stage inspect  --url https://hh.kz/vacancy/123
-    uv run python -m agent.probe_apply --stage open-form --url ... --already-applied
+**The one thing still unmeasured.** ``add-cover-letter`` is the button that
+reveals the letter field; nobody had clicked it, so no textarea appears in any
+dump and the letter field's selector is genuinely unknown. This stage now
+clicks it and dumps again, and additionally lists every form control inside the
+modal with its attributes, so the answer arrives as a measurement instead of a
+guess.
+
+    uv run python -m agent.probe_apply --stage inspect   --url https://hh.kz/vacancy/123
+    uv run python -m agent.probe_apply --stage open-form --url https://hh.kz/vacancy/123
 """
 
 import argparse
@@ -67,20 +79,61 @@ from typing import Any, final
 
 from agent.browser import open_browser, screenshot_on_error
 from agent.gate import looks_like_an_application, post_body, vacancy_ids_in
-from agent.selectors import PROBE_DIR, PROBE_FILENAME
+from agent.hosts import open_hh_page, vacancy_id_in_path
+from agent.selectors import (
+    ADD_COVER_LETTER,
+    EVIDENCE_DIR,
+    PROBE_DIR,
+    PROBE_FILENAME,
+    RESPONSE_FORM,
+    SUBMIT_BUTTON,
+    any_apply_control,
+    redact,
+)
 from agent.session import looks_authenticated
-from agent.state_page import read_state, vacancy_id_from_url
+from agent.state_page import read_state
 
 #: Attributes worth reporting. Broad on purpose — a probe that only looked for
-#: what we expect would confirm what we expect.
-INTERESTING = re.compile(r"response|apply|negotiat|letter|submit|captcha|test|resume", re.I)
+#: what we expect would confirm what we expect. ``modal``, ``overlay``,
+#: ``popup``, ``warning`` and ``cover`` were added after the 2026-09-06
+#: measurement: the response form's own container is ``modal-overlay`` and the
+#: earlier pattern matched none of the modal's names, so the one element every
+#: other selector is scoped inside would not have been recorded at all.
+INTERESTING = re.compile(
+    r"response|apply|negotiat|letter|submit|captcha|test|resume"
+    r"|modal|overlay|popup|warning|cover|dialog",
+    re.I,
+)
 
-#: The «задать вопрос работодателю» widget. Eighteen of these were measured on
-#: three pages and every one of them matches a search for "response". They are
-#: reported in their own section so nobody mistakes one for the apply form.
+#: The «задать вопрос работодателю» widget. Seven of these on a vacancy page and
+#: every one of them matches a search for "response". They are reported in their
+#: own section so nobody mistakes one for the apply form.
 DECOY = re.compile(r"^vacancy-response-question")
 
 DATA_QA = re.compile(r'data-qa="([^"]+)"')
+
+#: How long the modal may take to render. Measured at more than two seconds and
+#: waited for by selector, never by clock.
+MODAL_TIMEOUT_MS: int = 20_000
+
+#: How long to wait for something to change after «Добавить сопроводительное».
+#: Shorter, and a timeout here is not a failure: the dump afterwards is taken
+#: either way and records whatever did appear.
+LETTER_TIMEOUT_MS: int = 8_000
+
+#: Every control that could be a text field, listed with its attributes. A tag
+#: name is not a guessed ``data-qa``: this asks the page what it has rather than
+#: asserting what it should have, which is the whole difference between this
+#: file and a guess.
+FORM_CONTROLS_JS = """els => els.map(e => ({
+  tag: e.tagName,
+  qa: e.getAttribute('data-qa') || '',
+  name: e.getAttribute('name') || '',
+  type: e.getAttribute('type') || '',
+  placeholder: e.getAttribute('placeholder') || '',
+  aria: e.getAttribute('aria-label') || '',
+  editable: e.isContentEditable === true
+}))"""
 
 
 @final
@@ -90,13 +143,16 @@ class RequestLog:
 
     #: Application-shaped requests that were refused: another vacancy's.
     intercepted: list[str] = field(default_factory=list)
-    #: This vacancy's own, which were let through. See ``open_form``'s guard.
+    #: Anything that was not a GET. The send is a non-GET, so this list being
+    #: the reason nothing left is a fact about the network, not a promise.
+    blocked_non_get: list[str] = field(default_factory=list)
+    #: This vacancy's own GETs, which were let through: the popup fetch.
     allowed: list[str] = field(default_factory=list)
     observed: list[str] = field(default_factory=list)
 
     def escapes(self) -> list[str]:
         """URLs the page reported that the route handler never got."""
-        seen = set(self.intercepted) | set(self.allowed)
+        seen = set(self.intercepted) | set(self.allowed) | set(self.blocked_non_get)
         return [url for url in self.observed if url not in seen]
 
 
@@ -116,8 +172,11 @@ def _collect_data_qa(page_html: str) -> dict[str, list[str]]:
 def _response_status(state: dict[str, Any], vacancy_id: str) -> Any:
     """This vacancy's entry in the applicant status map, verbatim.
 
-    ``Any`` because the whole point is to record a shape nobody has characterised
-    yet: interpreting it here would be the guess this stage exists to avoid.
+    ``Any`` because the whole point is to record a shape as it is: interpreting
+    it here would be the guess this stage exists to avoid. What reads it later
+    is looking for ``negotiations.total``, which is the only source of truth
+    about whether an application already exists — never the presence of a
+    button, because hh allows a repeat application and renders one.
     """
     statuses = state.get("applicantVacancyResponseStatuses")
     if not isinstance(statuses, dict):
@@ -125,28 +184,87 @@ def _response_status(state: dict[str, Any], vacancy_id: str) -> Any:
     return statuses.get(str(vacancy_id))
 
 
+def _form_controls(page: Any) -> Any:
+    """Every text-ish control inside the response modal, with its attributes.
+
+    ``Any`` for the page and the result: the page would mean importing
+    playwright at module scope, which ``agent/browser.py`` explains we do not
+    do, and the result is whatever the browser found, which is the point.
+
+    A failure is recorded rather than raised. This runs after the useful part of
+    the measurement and losing the whole run to it would be the wrong trade —
+    but it is never silently dropped, because a missing measurement that looks
+    like an empty one is how a gap gets forgotten.
+    """
+    try:
+        return page.eval_on_selector_all(
+            f"{RESPONSE_FORM.query} textarea, {RESPONSE_FORM.query} input, "
+            f"{RESPONSE_FORM.query} [contenteditable]",
+            FORM_CONTROLS_JS,
+        )
+    except Exception as error:
+        return {"error": f"{type(error).__name__}: {error}"}
+
+
 def _run_dir() -> Path:
-    """A fresh directory for this run's evidence."""
+    """A fresh directory for this run's full report."""
     stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     path = PROBE_DIR / stamp
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
+def _seen_names(report: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Every ``data-qa`` this report saw, across all of its dumps.
+
+    The evidence file is built from this rather than from one section, so a name
+    that only appeared after the letter button was clicked still counts as seen.
+    """
+    candidates: set[str] = set()
+    decoys: set[str] = set()
+    for key in ("data_qa", "data_qa_after_click", "data_qa_after_letter_click"):
+        section = report.get(key)
+        if not isinstance(section, dict):
+            continue
+        found = section.get("candidates")
+        if isinstance(found, list):
+            candidates.update(str(name) for name in found)
+        widgets = section.get("decoys_ask_the_employer_a_question")
+        if isinstance(widgets, list):
+            decoys.update(str(name) for name in widgets)
+    return sorted(candidates), sorted(decoys)
+
+
+def evidence_for(report: dict[str, Any]) -> dict[str, Any]:
+    """The committable half of a run: names, stage, authentication, nothing else.
+
+    Built by naming every field that goes in rather than by removing fields from
+    the report, so a new key in the report cannot leak by being forgotten.
+    """
+    candidates, decoys = _seen_names(report)
+    return redact(
+        candidates,
+        decoys,
+        stage=str(report.get("stage") or ""),
+        authenticated=report.get("authenticated") is True,
+    )
+
+
 def inspect(url: str, *, already_applied: bool) -> dict[str, Any]:
     """Read one vacancy page without touching anything on it."""
-    vacancy_id = vacancy_id_from_url(url)
+    vacancy_id = vacancy_id_in_path(url)
     if vacancy_id is None:
         raise SystemExit(f"Не похоже на ссылку вакансии: {url}")
 
     with open_browser() as context:
         page = context.new_page()
-        page.goto(url, wait_until="domcontentloaded")
+        landed = open_hh_page(page, url, expect_vacancy=vacancy_id)
         content = page.content()
 
     state = read_state(content) or {}
     return {
         "url": url,
+        "landed_url": landed,
         "vacancy_id": vacancy_id,
         "labelled_already_applied": already_applied,
         "stage": "inspect",
@@ -171,55 +289,50 @@ def inspect(url: str, *, already_applied: bool) -> dict[str, Any]:
 
 
 def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
-    """Click «Откликнуться» and record what appears. Only on an applied vacancy.
+    """Click the apply control, wait for the modal, and record what appeared.
 
-    The refusal below is the whole safety of this function; see the module
-    docstring for why a method-based guard and a route interceptor are both
-    insufficient on their own.
+    Then click «Добавить сопроводительное» and record again, because the letter
+    field is behind that second click and is the one selector nobody has
+    measured. See the module docstring for what the click was measured to do and
+    for the two guards that make sure nothing leaves.
     """
-    if not already_applied:
-        raise SystemExit(
-            "Этот этап кликает «Откликнуться», а гарантировать, что hh не оформит\n"
-            "отклик прямо на этом переходе, нельзя: ссылка — обычный GET, а\n"
-            "перехватчик запросов не видит service worker. Поэтому кликаем только\n"
-            "по вакансии, на которую отклик УЖЕ отправлен — там случайная отправка\n"
-            "ничего не меняет.\n\n"
-            "Запустите с --already-applied и ссылкой на такую вакансию.\n"
-            "Если формы на ней недостаточно, чтобы понять селекторы, — это\n"
-            "написано в отчёте, и решение рисковать одним неподтверждённым\n"
-            "откликом принимает владелец аккаунта, а не эта программа."
-        )
-
-    vacancy_id = vacancy_id_from_url(url)
+    vacancy_id = vacancy_id_in_path(url)
     if vacancy_id is None:
         raise SystemExit(f"Не похоже на ссылку вакансии: {url}")
 
     log = RequestLog()
-    from agent.selectors import APPLY_LINK
-
     with open_browser() as context:
 
         def guard(route: Any) -> None:
-            """Let this vacancy's own response flow through; refuse every other.
+            """Two independent refusals, plus a record of everything else.
 
-            The first version of this aborted *every* application-shaped
-            request, which included the navigation the apply link itself
-            performs — so the click landed on a Chromium error page, the report
-            came back with no candidates at all, and stage 0 could not be
-            completed. The whole package was unblockable by its own documented
-            procedure.
+            ``Any`` for the route because typing it means importing playwright
+            at module scope; see ``agent/browser.py``.
 
-            What carries the safety here is the ``--already-applied`` refusal
-            above, not this interceptor. The owner has said this vacancy already
-            has an application, so hh completing one on the navigation changes
-            nothing. Requests naming any *other* vacancy are still refused, and
-            everything is still recorded.
+            The method check: an application is sent with a non-GET request, so
+            aborting every non-GET makes a send physically impossible here
+            rather than merely unintended. Measured 2026-09-06 — a run that did
+            exactly this still rendered the modal completely, so nothing is lost.
+
+            The URL check: an application-shaped request naming a *different*
+            vacancy is refused whatever its method. Neither check subsumes the
+            other, which is why both are here.
+
+            What is NOT refused is this vacancy's own GET popup fetch. An
+            earlier version aborted it, the click landed on a Chromium error
+            page, the report came back empty, and the package could not be
+            unblocked by its own documented procedure.
             """
-            request_url = route.request.url
+            request = route.request
+            request_url = str(request.url)
+            if str(request.method).upper() != "GET":
+                log.blocked_non_get.append(f"{request.method} {request_url}")
+                route.abort()
+                return
             if not looks_like_an_application(request_url):
                 route.continue_()
                 return
-            strangers = vacancy_ids_in(request_url, post_body(route.request)) - {vacancy_id}
+            strangers = vacancy_ids_in(request_url, post_body(request)) - {vacancy_id}
             if strangers:
                 log.intercepted.append(request_url)
                 route.abort()
@@ -235,47 +348,134 @@ def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
                 log.observed.append(request.url) if looks_like_an_application(request.url) else None
             ),
         )
-        page.goto(url, wait_until="domcontentloaded")
         try:
-            page.click(APPLY_LINK.query, timeout=10_000)
-            page.wait_for_timeout(2_000)
-        except Exception as exc:
+            open_hh_page(page, url, expect_vacancy=vacancy_id)
+            # Whichever control this page carries. On an already-applied vacancy
+            # the plain "-top" one is absent entirely, which is what made this
+            # stage unreachable when it waited on that selector alone.
+            page.locator(any_apply_control()).first.click(timeout=15_000)
+            # By selector, never by clock: the modal renders later than two
+            # seconds after the click, and a fixed wait photographed the page
+            # before it existed. Waiting for the submit button as well, because
+            # the overlay can be on the page before its contents have loaded.
+            page.wait_for_selector(RESPONSE_FORM.query, timeout=MODAL_TIMEOUT_MS)
+            page.wait_for_selector(SUBMIT_BUTTON.query, timeout=MODAL_TIMEOUT_MS)
+        except Exception as error:
+            # Includes NavigatedElsewhereError, which is the interesting one: a
+            # page that is not the vacancy asked for is a finding, not a crash,
+            # and the report has to say which page it actually got.
             screenshot_on_error(page, f"probe-{vacancy_id}")
-            return {
-                "url": url,
-                "vacancy_id": vacancy_id,
-                "stage": "open-form",
-                "authenticated": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "requests_allowed": log.allowed,
-                "requests_blocked": log.intercepted,
-                "requests_escaped_interception": log.escapes(),
-            }
-        content = page.content()
+            return _failed(url, vacancy_id, already_applied, error, log)
+
+        opened = page.content()
+        modal_text = _modal_text(page)
+        controls_before = _form_controls(page)
+
+        # The second click, and the only reason this stage changed: the letter
+        # field is revealed by this button and has never been seen. Its absence
+        # is not fatal — the dump below records whatever is actually there.
+        letter_error: str | None = None
+        try:
+            page.locator(ADD_COVER_LETTER.query).first.click(timeout=LETTER_TIMEOUT_MS)
+            page.wait_for_selector(f"{RESPONSE_FORM.query} textarea", timeout=LETTER_TIMEOUT_MS)
+        except Exception as error:
+            # Recorded, not swallowed: a textarea that never appeared is a
+            # finding about the page, and the dump that follows still runs.
+            letter_error = f"{type(error).__name__}: {error}"
+        with_letter = page.content()
+        controls_after = _form_controls(page)
 
     return {
         "url": url,
         "vacancy_id": vacancy_id,
-        "labelled_already_applied": True,
+        "labelled_already_applied": already_applied,
         "stage": "open-form",
         # Measured, not claimed. agent/selectors.py refuses evidence from a run
         # this came back false for, because the response form is only visible
         # under an account and a hand-typed scope proves nothing.
-        "authenticated": looks_authenticated(read_state(content) or {}),
-        "data_qa_after_click": _collect_data_qa(content),
+        "authenticated": looks_authenticated(read_state(opened) or {}),
+        "data_qa_after_click": _collect_data_qa(opened),
+        "data_qa_after_letter_click": _collect_data_qa(with_letter),
         "selectors_ready_to_paste": [
-            f'[data-qa="{name}"]' for name in _collect_data_qa(content)["candidates"]
+            f'[data-qa="{name}"]' for name in _collect_data_qa(with_letter)["candidates"]
         ],
-        # This vacancy's own response requests, which were allowed through. If
-        # the list is non-empty the response really is a request we can
-        # recognise, which is what agent/gate.py relies on.
+        # The whole point of the second click. Whatever is in here is the answer
+        # to "what is the cover letter field", and it is an observation.
+        "form_controls_before_letter_click": controls_before,
+        "form_controls_after_letter_click": controls_after,
+        "letter_field_wait": letter_error or "textarea appeared",
+        # hh's own words in the modal. One data-qa carries several meanings and
+        # they can only be told apart by their text.
+        "modal_text": modal_text,
+        # This vacancy's own requests, which were allowed through.
         "requests_allowed": log.allowed,
-        # Requests naming some other vacancy. Should be empty.
+        # Requests naming some other vacancy.
         "requests_blocked": log.intercepted,
+        # Everything that was not a GET, which is where a send would have been.
+        "requests_blocked_non_get": log.blocked_non_get,
         # If this is non-empty the interception is not total and nothing this
         # package claims about consent holds. It is the loudest line in the report.
         "requests_escaped_interception": log.escapes(),
     }
+
+
+def _modal_text(page: Any) -> str:
+    """The modal's own words, or why they could not be read.
+
+    ``Any`` for the page, as everywhere here. Recorded because
+    ``hidden-resume-warning`` carries a hard refusal and a soft prediction under
+    the same name, and the only thing that separates them is this text.
+    """
+    try:
+        text = page.locator(RESPONSE_FORM.query).first.inner_text()
+    except Exception as error:
+        return f"<не прочитано: {type(error).__name__}: {error}>"
+    return str(text)
+
+
+def _failed(
+    url: str,
+    vacancy_id: str,
+    already_applied: bool,
+    error: Exception,
+    log: RequestLog,
+) -> dict[str, Any]:
+    """A report for a run that never reached the form."""
+    return {
+        "url": url,
+        "vacancy_id": vacancy_id,
+        "labelled_already_applied": already_applied,
+        "stage": "open-form",
+        # Unknown is recorded as not authenticated: the evidence check must
+        # never accept a run that could not say.
+        "authenticated": False,
+        "error": f"{type(error).__name__}: {error}",
+        "requests_allowed": log.allowed,
+        "requests_blocked": log.intercepted,
+        "requests_blocked_non_get": log.blocked_non_get,
+        "requests_escaped_interception": log.escapes(),
+    }
+
+
+def write_report(report: dict[str, Any]) -> tuple[Path, Path]:
+    """Write both halves of a run and return where they went.
+
+    Two files, because they have different audiences. The full report stays in
+    the gitignored ``agent/probe/`` directory: it carries this vacancy's id, its
+    URL and the owner's own application state for it. The redacted evidence file
+    carries only what ``agent/selectors.py`` reads, and it is committable — which
+    is the only way a selector can be verified anywhere but the owner's laptop.
+    """
+    directory = _run_dir()
+    full = directory / PROBE_FILENAME
+    full.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    EVIDENCE_DIR.mkdir(parents=True, exist_ok=True)
+    evidence = EVIDENCE_DIR / f"{directory.name}.json"
+    evidence.write_text(
+        json.dumps(evidence_for(report), ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    return full, evidence
 
 
 def main() -> int:
@@ -286,7 +486,7 @@ def main() -> int:
     parser.add_argument(
         "--already-applied",
         action="store_true",
-        help="эта вакансия уже с откликом (обязательно для --stage open-form)",
+        help="пометка: на эту вакансию отклик уже есть (только для отчёта)",
     )
     args = parser.parse_args()
 
@@ -296,13 +496,12 @@ def main() -> int:
         else open_form(args.url, already_applied=args.already_applied)
     )
 
-    directory = _run_dir()
-    path = directory / PROBE_FILENAME
-    path.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    full, evidence = write_report(report)
+    print(f"Полный отчёт: {full}")
+    print(f"Доказательство для agent/selectors.py: {evidence}")
+    print(f"Имя для поля evidence: {evidence.stem}")
 
     escaped = report.get("requests_escaped_interception") or []
-    print(f"Записано в {path}")
-    print(f"Каталог прогона для agent/selectors.py: {directory.name}")
     if escaped:
         print(
             "\nВНИМАНИЕ: запрос отклика прошёл мимо перехватчика:\n  "

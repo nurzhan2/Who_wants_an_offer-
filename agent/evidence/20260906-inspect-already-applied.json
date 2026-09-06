@@ -1,0 +1,24 @@
+{
+ "schema": "hh-agent-selector-evidence/1",
+ "stage": "inspect",
+ "authenticated": true,
+ "data_qa_seen": [
+  "mainmenu_createResume",
+  "mainmenu_profileAndResumes",
+  "mainmenu_vacancyResponses",
+  "profileAndResumes-badge",
+  "profileAndResumes-button",
+  "profileAndResumes-button-text",
+  "vacancy-response-link-top-again",
+  "vacancy-response-link-view-topic",
+  "vacancyResponses-button",
+  "vacancyResponses-button-text"
+ ],
+ "decoys_seen": [],
+ "produced_by": "agent/probe_apply.py --stage inspect (прогон 20260906-181120), отредактировано вручную под текущую схему доказательств.",
+ "contains": "Только имена data-qa, этап прогона и измеренный признак авторизации. Ни id вакансии, ни ссылок, ни откликов, ни данных владельца аккаунта.",
+ "measured_on": "2026-09-06",
+ "source_artefact": "agent/probe/20260906-181120/probe.json (в .gitignore): вакансия, на которую отклик уже был отправлен.",
+ "authentication_evidence": "Поле authenticated взято из самого отчёта: его измерила agent.session.looks_authenticated во время прогона.",
+ "known_gap": "Этап inspect ничего не кликает, поэтому элементов формы отклика здесь нет — только два управляющих элемента на самой странице вакансии."
+}

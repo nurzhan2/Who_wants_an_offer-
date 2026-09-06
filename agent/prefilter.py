@@ -23,13 +23,22 @@ string**:
                    "letterMaxLength": 10000,
                    "shortVacancy": {"@responseLetterRequired": false, ...}}}
 
-**The unknown shape is a stop, not a default.** The one thing this module cannot
-yet know is what that key looks like once the owner has actually applied — that
-needs an authenticated probe. So :func:`read` returns ``None`` when the shape is
-not one it recognises, and a ``None`` sends the vacancy to a human rather than
-to the apply flow. The alternative — treating "I could not read it" as "not
-applied yet" — is a design that starts double-applying on the day hh changes
-that key, quietly, to every vacancy at once.
+**The unknown shape is a stop, not a default.** :func:`read` returns ``None``
+when the shape is not one it recognises, and a ``None`` sends the vacancy to a
+human rather than to the apply flow. The alternative — treating "I could not
+read it" as "not applied yet" — is a design that starts double-applying on the
+day hh changes that key, quietly, to every vacancy at once. Since 2026-09-06 the
+applied signal itself is measured and lives in ``agent/state_page.py``; this
+module reads the conditions around it.
+
+**Three stages, not one, because they know different things.**
+:func:`decide_before_opening` runs on the queue, before a page load is spent.
+:func:`decide` runs on the vacancy page, where the letter requirement, the
+employer's test and the idempotency reading actually live. :func:`decide_on_form`
+runs on the response modal, which is the first and only place hh says whether it
+will accept an application from this account at all. Collapsing any two of them
+produces a decision made on facts that were not knowable yet, which is a bug
+unit tests do not catch because the missing fact simply reads as ``None``.
 """
 
 from dataclasses import dataclass
@@ -37,6 +46,7 @@ from enum import StrEnum
 from typing import Any, final
 
 from agent.state import Status
+from agent.state_page import FormWarnings, printable
 
 
 class Verdict(StrEnum):
@@ -70,6 +80,24 @@ class Decision:
 
 @final
 @dataclass(frozen=True, slots=True)
+class VacancyStatus:
+    """Whether the page still accepts applications at all.
+
+    Read from ``vacancyView`` rather than from the queue, because a vacancy can
+    close, be archived or be filled between a crawl and a run and the page is
+    the later witness.
+    """
+
+    #: The employer has archived it. Nothing to apply to.
+    archived: bool
+    #: hh's own ``closedForApplicants``, measured as a real boolean on live
+    #: pages on 2026-09-06 (unlike the four fields the brief named, which are
+    #: all ``null`` there).
+    closed_for_applicants: bool
+
+
+@final
+@dataclass(frozen=True, slots=True)
 class ResponseFacts:
     """What hh says about applying to one vacancy, read from its own page state."""
 
@@ -79,6 +107,47 @@ class ResponseFacts:
     has_test: bool
     #: hh's ceiling on the letter for this vacancy.
     letter_max_length: int
+    #: The test's questions, when hh put them somewhere this code recognises.
+    #: Empty is **not** "there are no questions" — see :func:`_test_questions`.
+    #: They exist to be shown to the person; nothing here or anywhere else in
+    #: this package produces an answer to one, not even a blank default.
+    test_questions: tuple[str, ...] = ()
+    #: ``responseImpossible``, measured as ``false`` on both probed vacancies.
+    #: What ``true`` means is inferred from the name, which is the reasoning
+    #: this package distrusts everywhere else — with one asymmetry that makes it
+    #: acceptable here. ``alreadyApplied`` was read to decide *go ahead*, and
+    #: being wrong about it meant a second application nobody can take back.
+    #: This is read only to *add* a stop: being wrong costs one vacancy shown to
+    #: a person. A guess that can only refuse is a different kind of guess from
+    #: one that can send.
+    response_impossible: bool = False
+
+
+def read_status(state: dict[str, Any]) -> VacancyStatus:
+    """Whether this vacancy is still open, from ``vacancyView``.
+
+    ``Any`` for the state for the reason CLAUDE.md asks for: it is hh's whole
+    boot payload and only the keys read here are validated.
+
+    Two shapes are accepted for the archive flag — ``vacancyView.status.archived``
+    and a flat ``vacancyView.archived`` — because hh serves the vacancy status as
+    a nested object in its API and the flat spelling is what this package's own
+    fixtures use. Neither was measured on a live archived page, so an absent flag
+    reads as "not archived" rather than as a stop: unlike the idempotency
+    question, being wrong here costs a page load and a refusal from hh, and
+    treating every unreadable page as archived would skip the whole queue in
+    silence.
+    """
+    view = state.get("vacancyView")
+    if not isinstance(view, dict):
+        return VacancyStatus(archived=False, closed_for_applicants=False)
+    status = view.get("status")
+    nested = status.get("archived") if isinstance(status, dict) else None
+    archived = nested if isinstance(nested, bool) else view.get("archived")
+    return VacancyStatus(
+        archived=archived is True,
+        closed_for_applicants=view.get("closedForApplicants") is True,
+    )
 
 
 def read(state: dict[str, Any], vacancy_id: str) -> ResponseFacts | None:
@@ -115,7 +184,63 @@ def read(state: dict[str, Any], vacancy_id: str) -> ResponseFacts | None:
         letter_required=required,
         has_test=test["hasTests"],
         letter_max_length=max_length,
+        test_questions=_test_questions(test),
+        response_impossible=entry.get("responseImpossible") is True,
     )
+
+
+#: Keys that could hold the list of an employer's test questions, and keys that
+#: could hold one question's text. **None of this was measured**: every probed
+#: vacancy had ``{"hasTests": false}`` and an empty test object, and the popup
+#: fetches the test separately. So this is a net cast over the plausible
+#: spellings, not a reading of a known shape.
+_QUESTION_LISTS: tuple[str, ...] = ("questions", "questionList", "items", "tasks")
+_QUESTION_TEXTS: tuple[str, ...] = ("text", "title", "name", "question", "body")
+
+
+def _test_questions(test: dict[str, Any]) -> tuple[str, ...]:
+    """The employer's questions, if hh happened to put them on the page.
+
+    ``Any`` because the test object is hh's; each candidate value is type-checked
+    before it is used.
+
+    **An empty result means "not found here", never "there are none".** The
+    caller must say so to the person in those words. The failure to avoid is a
+    card that reads «тест: вопросов нет» over a test that has five, because the
+    next thing a person does with that card is stop reading it.
+
+    Text quoted out of hh goes through :func:`~agent.state_page.printable`
+    first: a question is written by an employer, an employer can type an emoji,
+    and this console encodes cp1251 — which turns somebody else's decoration
+    into a crash halfway through a batch.
+    """
+    found: list[str] = []
+    for key in _QUESTION_LISTS:
+        items = test.get(key)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            text = _question_text(item)
+            if text is not None:
+                found.append(text)
+    return tuple(found)
+
+
+def _question_text(item: object) -> str | None:
+    """One question as a printable line, or None if this is not a question.
+
+    The first spelling that yields a non-empty string wins, so an object
+    carrying both ``title`` and ``text`` contributes one line rather than two.
+    """
+    if isinstance(item, str):
+        return printable(item.strip()) or None
+    if not isinstance(item, dict):
+        return None
+    for name in _QUESTION_TEXTS:
+        value = item.get(name)
+        if isinstance(value, str) and value.strip():
+            return printable(value.strip())
+    return None
 
 
 def decide_before_opening(
@@ -155,6 +280,7 @@ def decide(
     already_applied: bool | None,
     has_letter: bool,
     external_application: bool = False,
+    letter_field_known: bool = True,
 ) -> Decision:
     """What to do with one vacancy once its page has been read.
 
@@ -165,7 +291,33 @@ def decide(
     ``already_applied`` is tri-state on purpose: ``None`` means the page did not
     tell us, which is a reason to stop rather than a reason to proceed. It is
     checked first because applying twice is the one mistake the owner cannot
-    undo, and it is the mistake a stale local journal produces.
+    undo, and it is the mistake a stale local journal produces. Since 2026-09-06
+    the value comes from ``negotiations.total`` in
+    :func:`agent.state_page.read_applied`, which is a count rather than the
+    presence of an element — the apply *button* is present on vacancies already
+    applied to, because hh permits a second application.
+
+    ``closed_for_applicants`` and ``archived`` stay plain booleans so that this
+    signature keeps working for callers that already have them; :func:`read_status`
+    is where they come from when the caller is holding the page state.
+
+    ``external_application`` — an application completed on the employer's own
+    site — arrives from the queue, because no marker for it has been measured in
+    the page state. It goes to a person rather than being skipped: the vacancy is
+    real and worth applying to, just not from here.
+
+    ``letter_field_known`` defaults to ``True`` so that this signature keeps
+    working, but the caller in the browser must pass
+    ``selectors.letter_field_is_known()``. Sending *without* a letter was
+    measured end to end on 2026-09-06; the textarea that holds a letter was not,
+    because nobody clicked «Добавить сопроводительное» during the measurement.
+    So a vacancy that demands a letter goes to a person until that field has
+    been seen, even when a letter is sitting right there. This is a routing
+    decision, not an error: it takes one vacancy out of the batch rather than
+    stopping the run, and it is the difference between "we cannot do this yet"
+    and a guessed selector typing somebody's letter into whatever it happens to
+    match. It is checked here rather than by an import of ``agent.selectors``,
+    which would tie this module to the file another change owns.
     """
     if already_applied is None:
         return Decision(
@@ -188,7 +340,65 @@ def decide(
     if facts.has_test:
         # The brief's rule, and the reason for it: the employer reads these
         # answers as the candidate's own.
-        return Decision(Verdict.MANUAL, "работодатель приложил тест — отвечает человек")
+        return Decision(Verdict.MANUAL, _test_reason(facts.test_questions))
+    if facts.response_impossible:
+        return Decision(
+            Verdict.MANUAL,
+            "hh отметил вакансию как недоступную для отклика — посмотрите сами",
+        )
     if facts.letter_required and not has_letter:
         return Decision(Verdict.MANUAL, "нужно сопроводительное письмо, а его нет")
+    if facts.letter_required and not letter_field_known:
+        return Decision(
+            Verdict.MANUAL,
+            "вакансия требует письмо, а поле для него ещё никто не видел на живой "
+            "странице — отправьте этот отклик руками",
+        )
+    return Decision(Verdict.PROCEED, "можно откликаться")
+
+
+def _test_reason(questions: tuple[str, ...]) -> str:
+    """The line a person reads about an employer's test, with the questions in it.
+
+    When the questions were not on the page it says exactly that. It must not
+    say «вопросов нет»: the questions are fetched separately by hh's own popup,
+    so "not on this page" and "does not exist" are different facts, and a card
+    that conflates them teaches its reader to stop reading it.
+    """
+    head = "работодатель приложил тест — отвечает человек"
+    if not questions:
+        return f"{head}; вопросы hh на странице не отдал, откройте вакансию"
+    listed = "; ".join(f"{number}) {text}" for number, text in enumerate(questions, start=1))
+    return f"{head}; вопросы: {listed}"
+
+
+def decide_on_form(warnings: FormWarnings) -> Decision:
+    """What the open response modal says, once it has been read.
+
+    This is a separate stage because it is the first moment hh states whether it
+    will accept an application from this account for this vacancy at all — the
+    vacancy page itself says nothing about it. :func:`decide` has already run by
+    then and cannot be given this input without pretending it was knowable
+    earlier.
+
+    A blocking warning is never sent through, and hh's own sentence is carried
+    into the reason verbatim rather than paraphrased. The measured one is a
+    demand to change the resume's visibility, and a paraphrase of it would send
+    the owner looking for a setting under a name hh does not use.
+
+    A soft warning never blocks. It is hh's own analysis of why this application
+    is likely to be refused, it names a specific unmet requirement — the
+    measured one is an English level below what the employer set — and that is
+    more precise than any similarity score this project computes. It belongs
+    next to the match score on the confirmation card, and it belongs in the
+    journal, so it is returned in the reason of a ``PROCEED`` rather than
+    dropped.
+
+    Both can be present at once; that is what the one fully measured modal
+    carried.
+    """
+    if warnings.blocking is not None:
+        return Decision(Verdict.MANUAL, f"hh не принимает отклик: {warnings.blocking}")
+    if warnings.soft is not None:
+        return Decision(Verdict.PROCEED, f"можно откликаться; hh предупреждает: {warnings.soft}")
     return Decision(Verdict.PROCEED, "можно откликаться")

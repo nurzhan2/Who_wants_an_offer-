@@ -8,10 +8,18 @@ through exactly that. The brief is specific — «открыть страниц�
 is that nobody knows offhand which field that is.
 
 So it is measured rather than guessed. ``agent/login.py`` records which
-top-level keys of hh's page state appear after the owner logs in and are absent
-before, and this module asserts those keys are still there. That is a signal
-derived from the account rather than from the page loading, and it was produced
-by the same session it is checking.
+top-level keys of hh's page state mean the visitor has an account, and this
+module asserts those keys are still there. That is a signal derived from the
+account rather than from the page loading, and it was produced by the same
+session it is checking.
+
+**The two halves agree by construction, not by comment.** The field name is
+:data:`agent.login.SIGNAL_FIELD` and it is imported rather than retyped, so the
+writer and the reader cannot drift apart in a rename; what goes into that field
+is decided by :func:`agent.login.choose_signal`, which is a pure function and is
+tested by round-tripping its output through :func:`load_signal` and
+:func:`check`. Nothing here re-derives what "signed in" means: if it did, there
+would be two answers and no way to tell which one the file was written for.
 
 If the signal file does not exist, this refuses rather than degrading to a
 weaker check. A health check that quietly becomes "the page loaded" is worse
@@ -22,7 +30,7 @@ import json
 from pathlib import Path
 from typing import Any, final
 
-from agent.login import PROBE_URL, SIGNAL_PATH
+from agent.login import PROBE_URL, SIGNAL_FIELD, SIGNAL_PATH
 
 
 @final
@@ -43,7 +51,8 @@ def load_signal(path: Path = SIGNAL_PATH) -> list[str]:
             "Сначала: uv run python -m agent.login"
         )
     payload = json.loads(path.read_text(encoding="utf-8"))
-    keys = payload.get("appeared_after_login")
+    # The field name comes from login.py rather than being written twice.
+    keys = payload.get(SIGNAL_FIELD)
     if not isinstance(keys, list) or not keys:
         raise SignalUnknownError(f"{path.name} не содержит признаков авторизации")
     return [str(key) for key in keys]

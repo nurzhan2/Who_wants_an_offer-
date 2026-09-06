@@ -107,10 +107,26 @@ class Result:
     vacancy_id: str
     status: str
     reason: str | None = None
+    #: hh's own warning about this application, quoted from the response form:
+    #: «Такой отклик может получить отказ» followed by the requirement it names.
+    #:
+    #: A field of its own rather than a sentence inside :attr:`reason`, because
+    #: the two are different things to whoever stores this. ``reason`` is why
+    #: this agent ended where it did and is written for a person to read;
+    #: this is hh's analysis of the application itself — it names one unmet
+    #: requirement, which is more precise than any similarity score this project
+    #: computes, and it belongs beside the match score rather than in a log
+    #: line. It can be set on a ``sent`` result: the soft warning never blocks.
+    hh_warning: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         """The wire form. ``Any`` for the same boundary reason as above."""
-        return {"vacancy_id": self.vacancy_id, "status": self.status, "reason": self.reason}
+        return {
+            "vacancy_id": self.vacancy_id,
+            "status": self.status,
+            "reason": self.reason,
+            "hh_warning": self.hh_warning,
+        }
 
 
 @runtime_checkable

@@ -1,11 +1,11 @@
 """Every selector this agent uses, and proof that somebody looked at it.
 
 The brief is blunt about why this file exists: the selectors for the apply
-button and the letter form are NOT KNOWN, must not be invented, and must not be
-recalled from memory — «Угаданный селектор — это молчаливый провал на проде».
-hh does use ``data-qa`` attributes, which is exactly what makes guessing feel
-safe, and a guess that happens to match something produces an agent that clicks
-the wrong thing on somebody's real account.
+button and the letter form must not be invented and must not be recalled from
+memory — «Угаданный селектор — это молчаливый провал на проде». hh does use
+``data-qa`` attributes, which is exactly what makes guessing feel safe, and a
+guess that happens to match something produces an agent that clicks the wrong
+thing on somebody's real account.
 
 So a selector here is not a string. It is a string plus the evidence that a
 human saw it on a real page, and the evidence is checked at startup rather than
@@ -14,25 +14,42 @@ believed.
 **Why the evidence and not a date.** The obvious version of this file is a
 constant with ``# checked 2026-09-06`` beside it. That reduces the whole
 guarantee to "somebody typed a date", and a date is the easiest thing in the
-world to type next to a guess. :func:`assert_ready_to_apply` instead parses the
-probe's own report and requires that every ``data-qa`` the query depends on is
-one the probe recorded seeing, on the stage that can see the form, in a session
-it measured as logged in.
+world to type next to a guess. :func:`assert_ready_to_apply` instead parses a
+recorded list of what was on the page and requires that every ``data-qa`` the
+query depends on is one that record names, from a stage that could see it, in a
+session that was measured as logged in.
 
-The first version of that check asked whether the query string appeared anywhere
-in the file as text, and it was wrong in both directions at once. ``json.dumps``
-escapes the quotes inside ``[data-qa="…"]``, so a correctly written selector
-could never match — the documented unblocking procedure could not be completed.
-And any substring of the file could match, so a URL fragment, the JSON key
-``letterMaxLength`` and the single letter "a" all passed, as did a one-line file
-that is not even valid JSON. Both halves are now tested.
+**And exactly how strong that is.** Corrected 2026-09-07: this paragraph used to
+say "a machine-written record", and the check below cannot tell. A record is a
+JSON file in ``agent/evidence/``; it names what produced it, and that name is
+its own claim about itself, not a signature. Somebody willing to type a file can
+type ``"produced_by": "agent/probe_apply.py"`` into it. So the guarantee is not
+"this was measured by a machine" — it is narrower and still worth the code:
+a selector cannot be added without a committed file that lists the ``data-qa``
+names the page carried, and the name in the query has to be in that list. A
+guess fails that unless the guesser also edits the evidence, which is a
+deliberate act, in a reviewable diff, next to a field that says which artefact
+the file was redacted from. That is the whole of it, and overstating it would be
+worse than stating it small, because the next person trusts what is written
+here.
 
-**Why scope matters.** ``APPLY_LINK`` below was measured — but measured
-*logged out*, by fetching three public vacancy pages. That is genuinely useful
-and it is not enough to apply with: the page a logged-in applicant sees may
-carry a different control, and the form behind it was never seen at all. An
-anonymous scope is therefore explicitly insufficient for the apply flow, and
-:func:`assert_ready_to_apply` says so by name.
+**Where that record lives, and why it moved.** It used to be the probe's own
+report, in ``agent/probe/<run>/probe.json``. That directory is gitignored and
+has to be: a report carries the owner's own application state for a vacancy,
+read out of an authenticated page. The consequence was quietly fatal — the
+selectors could only ever be verified on the owner's laptop, and a test that
+asserts they are verified could not run anywhere else. So the probe now writes
+two files per run: the full report, gitignored as before, and a REDACTED
+evidence file in :data:`EVIDENCE_DIR` holding only what this check reads — the
+``data-qa`` names, the stage, and the measured authentication flag. No vacancy
+id, no URL, no negotiation records, nothing about the owner. That file is
+committable, and it is the one this module reads.
+
+**Why scope matters.** A selector measured logged out is genuinely useful and
+is not enough to apply with: the page a logged-in applicant sees carries
+different controls, and the form behind the apply link is not on the anonymous
+page at all. An anonymous scope is therefore explicitly insufficient for the
+apply flow, and :func:`assert_ready_to_apply` says so by name.
 
 **Why this fails at startup.** An unverified selector is not a per-vacancy
 error. If it were, running the apply flow before the probe would produce a run
@@ -41,6 +58,28 @@ wrong", which is a true statement about the wrong problem. It raises
 :class:`SelectorsNotVerifiedError` before the browser opens, listing everything
 outstanding at once, so the message is "you have not run the probe yet" and the
 answer is one command.
+
+**Two things measured on 2026-09-06 that this file records rather than encodes.**
+
+*There are two apply controls, not one.* A fresh vacancy carries
+``vacancy-response-link-top``; one that already has an application carries
+``vacancy-response-link-top-again`` («Отклик другим резюме») plus
+``vacancy-response-link-view-topic``, and the plain ``-top`` control is absent
+entirely. hh ALLOWS a repeat application, so the presence of ``-again`` does not
+mean "not applied yet" and its absence does not mean "applied". Idempotency is
+decided from ``applicantVacancyResponseStatuses[id].negotiations.total`` and
+never from which element is on the page. Both controls are named below because
+the flow has to recognise both, and — corrected 2026-09-07 — both are in
+:data:`REQUIRED_FOR_APPLYING`, because the flow can click either one and this
+file verifies what can be clicked rather than what is meant to be clicked.
+
+*The warning line has one name and several meanings.* ``hidden-resume-warning``
+carried, on the same account on the same day, a hard refusal — hh will not
+accept the application until the resume's visibility changes — and a soft
+prediction that the application may be rejected, naming the specific
+requirement the resume misses. They must be told apart by their text; the
+measured strings are :data:`RESUME_HIDDEN_REFUSAL` and
+:data:`LIKELY_REJECTION_WARNING`.
 """
 
 import json
@@ -51,10 +90,47 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final, final
 
-#: Where ``probe_apply.py`` writes what it saw. One directory per run; the file
-#: inside is what :func:`assert_ready_to_apply` reads back.
+#: Where ``probe_apply.py`` writes the full report of a run. One directory per
+#: run. Gitignored: a report contains the owner's own application state.
 PROBE_DIR: Final[Path] = Path(__file__).parent / "probe"
 PROBE_FILENAME: Final[str] = "probe.json"
+
+#: Where the redacted evidence goes: one JSON file per run, named after the run,
+#: containing only what :func:`assert_ready_to_apply` reads. Committable, and
+#: the only thing this module will accept as proof.
+EVIDENCE_DIR: Final[Path] = Path(__file__).parent / "evidence"
+
+#: Stamped into every evidence file so a future change of shape is a loud
+#: failure rather than a check that silently finds nothing and passes.
+EVIDENCE_SCHEMA: Final[str] = "hh-agent-selector-evidence/1"
+
+#: hh's exact words when the resume's visibility blocks the application. A hard
+#: stop: do not send, hand the vacancy to the owner, and show them this line
+#: rather than a paraphrase. Measured 2026-09-06 in ``hidden-resume-warning``,
+#: dumped to ``agent/probe/_warn.json``.
+#:
+#: Corrected 2026-09-07. hh writes U+00A0 after both «на», and this constant had
+#: them retyped as ordinary spaces — in the one file whose whole discipline is
+#: that measurements are not retyped from memory. The escapes are deliberate:
+#: the character is invisible in an editor, so spelling it out is the only way
+#: the next person can see that it is not a typo. It survives the console this
+#: runs on — cp1251 encodes U+00A0 as 0xA0 — so writing it exactly costs
+#: nothing. Nothing matches against this string: ``agent/state_page.py`` owns
+#: the matching, normalises hh's typographic spaces away first, and anchors on a
+#: few words rather than the sentence, because the sentence is hh's to reword.
+#: This constant is the record of what hh said, exactly, on the day it was read.
+RESUME_HIDDEN_REFUSAL: Final[str] = (
+    "Чтобы откликнуться на\u00a0эту вакансию, поменяйте видимость резюме "
+    "на\u00a0«Видно компаниям-клиентам HeadHunter»"
+)
+
+#: The same element, a different meaning: hh's own analysis of how this
+#: application is likely to go. Not a blocker — it is shown to the owner beside
+#: the match score, and it is more precise than any embedding, because it names
+#: the requirement that is unmet. Measured 2026-09-06, followed on that page by
+#: «Английский язык в резюме … ниже обязательного уровня, который указал
+#: работодатель.»
+LIKELY_REJECTION_WARNING: Final[str] = "Такой отклик может получить отказ"
 
 
 class Scope(StrEnum):
@@ -81,10 +157,17 @@ class Selector:
     #: every release, so a class selector is a time bomb with a fuse of days.
     query: str
     scope: Scope
-    #: The run directory under :data:`PROBE_DIR` whose report contains
-    #: :attr:`query`. ``None`` while unverified.
+    #: The evidence file under :data:`EVIDENCE_DIR`, without its extension,
+    #: whose record of the page contains :attr:`query`. ``None`` while
+    #: unverified.
     evidence: str | None = None
     checked_on: date | None = None
+    #: Which probe stages could have seen this control. The response modal only
+    #: exists after the apply link is clicked, so its parts need an
+    #: ``open-form`` run; the controls on the vacancy page itself are visible to
+    #: a run that clicks nothing, and demanding ``open-form`` for those would
+    #: reject perfectly good evidence.
+    seen_at_stages: frozenset[str] = frozenset({"open-form"})
     #: What this control does, in the words of somebody who has to fix it later.
     note: str = ""
 
@@ -95,60 +178,206 @@ class Selector:
 
     def evidence_path(self) -> Path | None:
         """Where the proof should be, if this claims to have any."""
-        return None if self.evidence is None else PROBE_DIR / self.evidence / PROBE_FILENAME
+        return None if self.evidence is None else EVIDENCE_DIR / f"{self.evidence}.json"
 
 
-# ── what has actually been seen ───────────────────────────────────────
+#: The two evidence files in this repository. Both are redactions of real
+#: measurements taken on 2026-09-06 on the owner's logged-in profile; each says
+#: inside itself which artefact it came from and which script produced it.
+OPEN_FORM_EVIDENCE: Final[str] = "20260906-open-form-modal"
+ALREADY_APPLIED_EVIDENCE: Final[str] = "20260906-inspect-already-applied"
 
-#: Measured on three live vacancy pages on 2026-09-06 with no account: an
-#: ``<a role="button">`` whose href is
+#: Stages at which a control on the vacancy page itself can be recorded.
+ON_THE_PAGE: Final[frozenset[str]] = frozenset({"inspect", "open-form"})
+
+
+# ── the two apply controls ────────────────────────────────────────────
+
+#: A fresh vacancy's «Откликнуться».
+#:
+#: Corrected 2026-09-07. This note used to state, as measurement, that the
+#: control is ``<a role="button">`` with an href of
 #: ``/applicant/vacancy_response?vacancyId=…&employerId=…&hhtmFrom=vacancy``.
-#: Anonymous scope on purpose — see the module docstring.
+#: Where that came from: ``page.html`` in the repository root — an untracked
+#: scratch dump of an hh SEARCH RESULTS page, so this trail can be deleted by a
+#: tidy-up, which is its own argument for writing down what it said — in which
+#: every card's apply control is exactly
+#: ``<a … role="button" data-qa="vacancy-serp__vacancy_response"
+#: href="/applicant/vacancy_response?vacancyId=136131345&employerId=5991214
+#: &hhtmFrom=vacancy_search_list">``. So the anchor, the role, the path and the
+#: two id parameters ARE measured — on a different control, on a different page.
+#: What is inferred is that ``vacancy-response-link-top`` on the vacancy page
+#: has the same shape, and ``hhtmFrom=vacancy`` in particular appears in no
+#: artefact at all; the 2026-09-06 probe dumps recorded ``data-qa`` names only
+#: and captured no attributes. Marked inferred rather than deleted because the
+#: inference is load-bearing: ``agent/submit.py`` reads this control's href and
+#: refuses to click when the vacancy id is not in it, so a control that turns
+#: out to be a ``<button>`` with no href fails closed and reports the wrong
+#: reason. Measuring it is one attribute read away in the next probe run.
+#:
+#: Following such a link is a GET document navigation, which is why
+#: ``agent/gate.py`` matches on the URL and not on the HTTP method.
 APPLY_LINK = Selector(
     name="apply_link",
     query='[data-qa="vacancy-response-link-top"]',
-    scope=Scope.ANONYMOUS,
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
     checked_on=date(2026, 9, 6),
-    note="Откликнуться, at the top of a vacancy page. Anonymous only.",
+    seen_at_stages=ON_THE_PAGE,
+    note="«Откликнуться» on a vacancy with no application yet.",
 )
 
-#: A decoy, recorded so that nobody rediscovers it as a candidate. Eighteen of
-#: these across three pages: the «задать вопрос работодателю» widget, whose
-#: names all start the same way as the real control. Never used for anything;
-#: it is here to be recognised.
+#: The same place on a vacancy that already has an application: «Отклик другим
+#: резюме».
+#:
+#: Corrected 2026-09-07: this used to say the control is named "so the flow can
+#: recognise the page, not so it can use it", which was not true of the code.
+#: ``agent/submit.py`` clicks ``any_apply_control().first``, so on a page that
+#: carries only this one, this is the control the flow clicks. That is not a
+#: repeat application slipping through — a vacancy with an application is turned
+#: away earlier, from ``negotiations.total``, and the only way to arrive here
+#: with this control on screen is a page that grew one between the read and the
+#: click. It does mean the selector is one the flow can act on, so it is
+#: verified like any other; see :data:`REQUIRED_FOR_APPLYING`.
+APPLY_LINK_AGAIN = Selector(
+    name="apply_link_again",
+    query='[data-qa="vacancy-response-link-top-again"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=ALREADY_APPLIED_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    seen_at_stages=ON_THE_PAGE,
+    note="«Отклик другим резюме». Presence proves nothing about idempotency.",
+)
+
+#: Next to it: the link to the conversation the existing application started.
+VIEW_TOPIC = Selector(
+    name="view_topic",
+    query='[data-qa="vacancy-response-link-view-topic"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=ALREADY_APPLIED_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    seen_at_stages=ON_THE_PAGE,
+    note="Link to the existing negotiation. Read-only, for the human.",
+)
+
+#: A decoy, recorded so that nobody rediscovers it as a candidate. Seven of
+#: these on a vacancy page: the «задать вопрос работодателю» widget, whose names
+#: all start the same way as the real control, so a substring search for
+#: "response" finds them first. Never used for anything; it is here to be
+#: recognised.
 QUESTION_WIDGET_DECOY = Selector(
     name="question_widget_decoy",
     query='[data-qa^="vacancy-response-question"]',
-    scope=Scope.ANONYMOUS,
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
     checked_on=date(2026, 9, 6),
+    seen_at_stages=ON_THE_PAGE,
     note="NOT the application form — this asks the employer a question.",
 )
 
-# ── what nobody has seen yet ──────────────────────────────────────────
-# Each of these is filled in from a probe run, by copying the query AND the run
-# directory name out of the report. Until then the apply flow will not start.
 
-SUBMIT_BUTTON = Selector(
-    name="submit_button",
-    query="",
-    scope=Scope.UNVERIFIED,
-    note="The control that actually sends the application.",
+def any_apply_control() -> str:
+    """A query matching whichever of the two apply controls this page carries.
+
+    Needed because the plain ``-top`` control is absent entirely from an
+    already-applied vacancy: waiting on it there is waiting for something that
+    will never appear, which is how ``--stage open-form`` became unreachable by
+    its own guard. Nothing decides idempotency from the result — see the module
+    docstring.
+    """
+    return f"{APPLY_LINK.query}, {APPLY_LINK_AGAIN.query}"
+
+
+# ── the response modal, measured on 2026-09-06 ────────────────────────
+# All of these appear only after the apply link is clicked, and later than two
+# seconds after it. Everything below carries the same evidence file.
+
+#: The modal itself. Its ``inner_text`` is what gets classified, and it is the
+#: anchor everything else is found inside. In the main frame, not an iframe.
+RESPONSE_FORM = Selector(
+    name="response_form",
+    query='[data-qa="modal-overlay"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note="The response modal. Wait for this, never for a fixed number of seconds.",
 )
 
+#: ``type=submit``. This is the one that sends.
+SUBMIT_BUTTON = Selector(
+    name="submit_button",
+    query='[data-qa="vacancy-response-submit-popup"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note=(
+        "Sends the application. Measured: it stays ENABLED even when hh has "
+        "already refused the application in the warning above it, so its "
+        "disabled state means nothing and must never be read as permission."
+    ),
+)
+
+#: ``type=button``. Opens the letter field; it is not the letter field.
+ADD_COVER_LETTER = Selector(
+    name="add_cover_letter",
+    query='[data-qa="add-cover-letter"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note="«Добавить сопроводительное» — reveals the letter field, does not send.",
+)
+
+#: Closes the modal without sending. What the flow uses to back out.
+CLOSE_RESPONSE_FORM = Selector(
+    name="close_response_form",
+    query='[data-qa="response-popup-close"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note="Closes the modal. The way out of a form that must not be submitted.",
+)
+
+#: Which resume hh will attach. Shown on the confirmation card, because the
+#: owner is agreeing to send this resume and not merely to apply.
+RESUME_TITLE = Selector(
+    name="resume_title",
+    query='[data-qa="resume-title"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note="The resume that will be sent. Belongs on the confirmation card.",
+)
+
+#: One element, several meanings. Classify by text — see the module docstring
+#: and the two measured strings above.
+HIDDEN_RESUME_WARNING = Selector(
+    name="hidden_resume_warning",
+    query='[data-qa="hidden-resume-warning"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=OPEN_FORM_EVIDENCE,
+    checked_on=date(2026, 9, 6),
+    note="A warning line whose meaning is in its text, not in its presence.",
+)
+
+
+# ── what nobody has seen yet ──────────────────────────────────────────
+
+#: NOT MEASURED, and deliberately left empty. ``add-cover-letter`` is the button
+#: that reveals the letter field; nobody clicked it during the 2026-09-06
+#: measurement, so no textarea appears anywhere in the dump and its selector is
+#: genuinely unknown. Guessing it is the exact failure this package exists to
+#: prevent. An application WITHOUT a letter is fully measured and works, so this
+#: is not in :data:`REQUIRED_FOR_APPLYING`: it blocks letters, not applying.
 LETTER_FIELD = Selector(
     name="letter_field",
     query="",
     scope=Scope.UNVERIFIED,
-    note="The cover letter textarea, wherever the response form puts it.",
+    note="The cover-letter textarea, revealed by add_cover_letter. Never seen.",
 )
 
-RESPONSE_FORM = Selector(
-    name="response_form",
-    query="",
-    scope=Scope.UNVERIFIED,
-    note="The form or modal the apply link opens; the anchor everything else is found inside.",
-)
-
+#: Employer test questions, to READ and show a human. Never answered here, and
+#: never needed either: a vacancy whose state says it carries a test is routed
+#: to the owner before its page is opened, so this is not required to apply.
 TEST_QUESTIONS = Selector(
     name="test_questions",
     query="",
@@ -156,22 +385,57 @@ TEST_QUESTIONS = Selector(
     note="Employer test questions, to READ and show a human. Never answered here.",
 )
 
-#: Everything the apply flow touches. Read-only paths (opening a vacancy,
-#: reading its state) are deliberately not in here: they need no selector at
-#: all, because the page's own JSON carries what they read.
+
+#: Everything the apply flow touches to send an application with no letter,
+#: which is the case that has actually been measured end to end. Read-only paths
+#: (opening a vacancy, reading its state) are deliberately not here: they need
+#: no selector at all, because the page's own JSON carries what they read.
+#:
+#: :data:`APPLY_LINK_AGAIN` joined this list on 2026-09-07, and the reason is
+#: worth writing down because the omission looked principled. It was left out on
+#: the grounds that a repeat application is not something this agent does — true,
+#: and about the wrong list. ``agent/submit.py`` clicks
+#: ``page.locator(any_apply_control()).first``, and :func:`any_apply_control`
+#: joins the two, so the flow could click a control that this check had never
+#: looked at. The rule this list encodes is "everything the flow can click", not
+#: "everything the flow intends to click": an unverified selector is dangerous
+#: because of what it might match, and intent does not narrow that. The
+#: statement it does NOT make is still the one in the module docstring —
+#: idempotency is decided from ``negotiations.total``, never from which of the
+#: two controls the page carries.
 REQUIRED_FOR_APPLYING: Final[tuple[Selector, ...]] = (
+    APPLY_LINK,
+    APPLY_LINK_AGAIN,
     RESPONSE_FORM,
     SUBMIT_BUTTON,
+)
+
+#: What a cover letter additionally needs. Split from the tuple above because
+#: the two cases have different evidence: sending without a letter was measured
+#: on 2026-09-06 and sending with one was not. Keeping them in one list would
+#: mean either blocking the measured case or claiming the unmeasured one, and
+#: both of those are worse than a vacancy that goes to the owner.
+REQUIRED_FOR_A_LETTER: Final[tuple[Selector, ...]] = (
+    ADD_COVER_LETTER,
     LETTER_FIELD,
 )
 
 
-@final
 class SelectorsNotVerifiedError(Exception):
     """The apply flow cannot start because stage 0 has not been done.
 
     Deliberately not a subclass of any per-vacancy error: nothing in the run
     loop may catch this and carry on to the next vacancy.
+    """
+
+
+@final
+class LetterFieldUnknownError(SelectorsNotVerifiedError):
+    """This application needs a letter and the letter field has never been seen.
+
+    A subclass, so a caller that wants to route one vacancy to the owner can
+    catch this narrowly while a bare :class:`SelectorsNotVerifiedError` still
+    stops the whole run.
     """
 
 
@@ -184,71 +448,114 @@ _DATA_QA_IN_QUERY: Final[re.Pattern[str]] = re.compile(r'\[data-qa(\^?)="([^"]+)
 def names_in(query: str) -> list[tuple[str, bool]]:
     """The ``data-qa`` names this query depends on, and whether each is a prefix.
 
-    A query naming none of them cannot be checked against a probe report, and
+    A query naming none of them cannot be checked against an evidence file, and
     :func:`assert_ready_to_apply` treats that as a selector that has not been
     verified rather than as one with nothing to verify.
     """
     return [(name, bool(caret)) for caret, name in _DATA_QA_IN_QUERY.findall(query)]
 
 
-def _recorded_names(report: dict[str, Any]) -> set[str]:
-    """Every ``data-qa`` the probe actually saw, from whichever stage wrote it.
+def redact(
+    seen: list[str], decoys: list[str], *, stage: str, authenticated: bool
+) -> dict[str, Any]:
+    """Turn one probe run into the committable half of its evidence.
 
-    Reads the report as JSON rather than as text. The previous version asked
-    whether the query string appeared anywhere in the file, which was wrong in
-    both directions at once: ``json.dumps`` escapes the quotes in
-    ``[data-qa="…"]`` so a correctly written selector could never match, while
-    any substring of the file could — a URL fragment, the JSON key
-    ``letterMaxLength``, or the single letter "a". The claim in this module's
-    docstring, that promoting a guess takes forging a probe run rather than
-    editing one line, was false until this was fixed.
+    ``Any`` because this is a JSON document with mixed value types; every field
+    is written here rather than copied from the report, which is what makes the
+    redaction a whitelist. Nothing about the vacancy, the owner or their
+    applications can reach the output, because nothing about them is an input.
+    """
+    return {
+        "schema": EVIDENCE_SCHEMA,
+        "stage": stage,
+        "authenticated": authenticated,
+        "data_qa_seen": sorted(seen),
+        "decoys_seen": sorted(decoys),
+        "produced_by": "agent/probe_apply.py",
+        "contains": (
+            "Только имена data-qa, этап прогона и измеренный признак авторизации. "
+            "Ни id вакансии, ни ссылок, ни откликов, ни данных владельца аккаунта."
+        ),
+    }
+
+
+def _recorded_names(evidence: dict[str, Any]) -> set[str]:
+    """Every ``data-qa`` the run actually saw, as the redacted file records them.
+
+    Reads JSON rather than text. An earlier version asked whether the query
+    string appeared anywhere in the file, which was wrong in both directions at
+    once: ``json.dumps`` escapes the quotes in ``[data-qa="…"]`` so a correctly
+    written selector could never match, while any substring of the file could —
+    a URL fragment, the JSON key ``letterMaxLength``, or the single letter "a".
     """
     names: set[str] = set()
-    for key in ("data_qa", "data_qa_after_click"):
-        section = report.get(key)
-        if isinstance(section, dict):
-            found = section.get("candidates")
-            if isinstance(found, list):
-                names.update(str(name) for name in found)
+    for key in ("data_qa_seen", "decoys_seen"):
+        section = evidence.get(key)
+        if isinstance(section, list):
+            names.update(str(name) for name in section)
     return names
 
 
-def _evidence_problems(selector: "Selector") -> list[str]:
+def _evidence_problems(selector: Selector) -> list[str]:
     """Everything wrong with one filled-in selector's evidence, in words."""
     path = selector.evidence_path()
     if path is None or not path.is_file():
         return [
-            f"  {selector.name}: ссылается на прогон {selector.evidence!r}, "
-            "а файла с результатами нет"
+            f"  {selector.name}: ссылается на доказательство {selector.evidence!r}, "
+            f"а файла {path} нет"
         ]
     try:
-        report = json.loads(path.read_text(encoding="utf-8"))
+        evidence = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as error:
         return [f"  {selector.name}: {path.name} — не JSON ({error.msg})"]
-    if not isinstance(report, dict):
-        return [f"  {selector.name}: {path.name} — не отчёт прогона"]
+    if not isinstance(evidence, dict):
+        return [f"  {selector.name}: {path.name} — не файл доказательства"]
 
     problems: list[str] = []
-    # The scope field is typed by hand; this is the probe's own measurement of
-    # whether it was logged in, so that "authenticated" cannot be a claim.
-    if report.get("authenticated") is not True:
+    if evidence.get("schema") != EVIDENCE_SCHEMA:
+        problems.append(
+            f"  {selector.name}: {path.name} — схема {evidence.get('schema')!r}, "
+            f"ожидается {EVIDENCE_SCHEMA!r}"
+        )
+    # Every evidence file has to say where it came from, and the one file in
+    # this repository that was not written by probe_apply.py says so here.
+    #
+    # Corrected 2026-09-07, because this comment used to claim that requiring
+    # the field means "a hand-made record can never look machine-made". It does
+    # not, and could not: the check is that the string is non-empty, and anybody
+    # typing a file by hand can type "agent/probe_apply.py" into it just as
+    # easily as the probe can. There is no cryptographic provenance here and
+    # this file should not imply one. What the field does buy is smaller and
+    # real — a record that does not say where it came from is refused instead of
+    # silently trusted, and a record that lies about it has to lie in writing,
+    # in a committed file, where a reviewer reads it next to the artefact it
+    # names. The load-bearing checks are the other four: a file must exist, its
+    # schema must match, its stage must be one that could see the control, its
+    # authenticated flag must have been measured, and every data-qa the query
+    # depends on must be in the names it recorded.
+    if not str(evidence.get("produced_by") or "").strip():
+        problems.append(f"  {selector.name}: {path.name} не говорит, чем он получен")
+    # The probe's own measurement of whether it was logged in, so that
+    # "authenticated" cannot be a claim typed next to a guess.
+    if evidence.get("authenticated") is not True:
         problems.append(
             f"  {selector.name}: прогон {selector.evidence!r} сделан без авторизации — "
             "форма отклика видна только под аккаунтом"
         )
-    if report.get("stage") != "open-form":
+    stage = evidence.get("stage")
+    if stage not in selector.seen_at_stages:
         problems.append(
-            f"  {selector.name}: прогон {selector.evidence!r} — этап "
-            f"{report.get('stage')!r}, а форму видит только open-form"
+            f"  {selector.name}: прогон {selector.evidence!r} — этап {stage!r}, "
+            f"а этот элемент виден на этапах {sorted(selector.seen_at_stages)}"
         )
     wanted = names_in(selector.query)
     if not wanted:
         return [
             *problems,
             f"  {selector.name}: в {selector.query!r} нет ни одного data-qa — "
-            "проверить такой селектор по отчёту нельзя",
+            "проверить такой селектор по доказательству нельзя",
         ]
-    seen = _recorded_names(report)
+    seen = _recorded_names(evidence)
     for name, is_prefix in wanted:
         matched = (
             any(candidate.startswith(name) for candidate in seen) if is_prefix else name in seen
@@ -261,17 +568,15 @@ def _evidence_problems(selector: "Selector") -> list[str]:
     return problems
 
 
-def assert_ready_to_apply() -> None:
-    """Refuse to start the apply flow unless every selector has evidence behind it.
+def problems_with(group: tuple[Selector, ...]) -> list[str]:
+    """Everything outstanding across a group of selectors, in words.
 
-    Four things per selector, because each has been the way a guess got promoted
-    somewhere: that it claims an authenticated scope, that the run directory it
-    names exists, that the report there was written by a logged-in ``open-form``
-    run, and that every ``data-qa`` the query depends on is one the probe
-    recorded seeing. The last one is what makes this more than a checkbox.
+    Shared by the two assertions below so that "unverified", "anonymous" and
+    "the evidence does not back this up" are judged the same way whichever
+    group is being checked.
     """
     problems: list[str] = []
-    for selector in REQUIRED_FOR_APPLYING:
+    for selector in group:
         if selector.scope is Scope.UNVERIFIED or not selector.query:
             problems.append(f"  {selector.name}: не заполнен — {selector.note}")
             continue
@@ -282,12 +587,59 @@ def assert_ready_to_apply() -> None:
             )
             continue
         problems.extend(_evidence_problems(selector))
+    return problems
+
+
+def assert_ready_to_apply() -> None:
+    """Refuse to start the apply flow unless every selector has evidence behind it.
+
+    Checked per selector, because each of these has been the way a guess got
+    promoted somewhere: that it claims an authenticated scope, that the evidence
+    file it names exists and says what produced it, that the run was measured as
+    logged in, that the stage could have seen this control, and that every
+    ``data-qa`` the query depends on is one that run recorded seeing. The last
+    one is what makes this more than a checkbox.
+
+    This covers an application WITHOUT a cover letter, which is the case that
+    was measured end to end. A letter needs :func:`assert_letter_field_known`.
+    """
+    problems = problems_with(REQUIRED_FOR_APPLYING)
     if problems:
         raise SelectorsNotVerifiedError(
             "Селекторы формы отклика не проверены на живой странице под аккаунтом.\n"
             + "\n".join(problems)
             + "\n\nСначала: python -m agent.login, затем python -m agent.probe_apply "
-            "на четырёх вакансиях (обычная, с обязательным письмом, с тестом, "
-            "и с уже отправленным откликом). Потом перенести значения сюда вместе "
-            "с именем каталога прогона."
+            "--stage open-form на живой вакансии. Потом перенести значения сюда "
+            "вместе с именем файла доказательства из agent/evidence/."
+        )
+
+
+def letter_field_is_known() -> bool:
+    """Whether a cover letter can be typed at all, without raising to find out.
+
+    For the caller that wants to route one vacancy to the owner rather than
+    stop the run.
+    """
+    return not problems_with(REQUIRED_FOR_A_LETTER)
+
+
+def assert_letter_field_known() -> None:
+    """Refuse to send an application that needs a letter, and say what would fix it.
+
+    The refusal names the one probe step that closes the gap, because "not
+    verified" without "here is how to verify it" is how a blocker becomes
+    permanent.
+    """
+    problems = problems_with(REQUIRED_FOR_A_LETTER)
+    if problems:
+        raise LetterFieldUnknownError(
+            "Поле сопроводительного письма никто не видел на живой странице.\n"
+            + "\n".join(problems)
+            + "\n\nОтклик БЕЗ письма измерен и работает — блокируется только письмо.\n"
+            "Закрывает пробел один шаг разведки, он уже встроен в пробу:\n"
+            "  uv run python -m agent.probe_apply --stage open-form --url <вакансия>\n"
+            "Проба открывает форму, нажимает «Добавить сопроводительное» и пишет\n"
+            "появившиеся элементы в раздел data_qa_after_letter_click отчёта и в\n"
+            "файл доказательства. Оттуда взять селектор textarea и вписать его в\n"
+            "LETTER_FIELD вместе с именем этого файла."
         )

@@ -24,15 +24,35 @@ satisfy is a flag.
 
 The word to type is Russian and specific rather than "y", so that it cannot be
 produced by a stray keypress or by a terminal replaying a buffer.
+
+**The card is reduced to the console's codepage before it is shown, and the
+digest is taken of the reduced text.** Added 2026-09-07, after a run was killed
+by its own confirmation prompt: this is hh.KZ, the Kazakh letters ә ғ қ ң ө ұ ү
+һ are ordinary in an employer's name and an emoji in a job title is not rare,
+and none of them exist in cp1251. Printing one raised ``UnicodeEncodeError`` out
+of :func:`confirm` — at the moment the owner was being asked to agree — and out
+of the dry run before a single candidate could be read. See :meth:`Candidate
+.render`, which also says why the digest binds the reduced text rather than the
+original.
+
+**One candidate per vacancy, checked here as well as upstream.** ``run.py``
+deduplicates the batch; this refuses to mint a second mandate for a vacancy that
+is already in the list, because :func:`mint` is the point where a duplicate
+stops being a list entry and becomes a second application. Two mandates for one
+vacancy are indistinguishable to ``agent.gate``, and correctly so — one
+confirmation is one window — so the last place to catch it is the place that
+mints them.
 """
 
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Final, TextIO, final
 
 from agent.letter import SafeLetter
 from agent.mandate import SendMandate, digest, mint
+from agent.state_page import printable
 
 #: Typed in full to proceed. Not "y": a single character is something a stuck
 #: key produces, and this is the last gate before something irreversible.
@@ -49,6 +69,10 @@ class Candidate:
     company: str | None
     url: str
     letter: SafeLetter | None
+    #: What hh itself has already said about applying to this vacancy, in hh's
+    #: own words, carried over from the last run that got as far as the response
+    #: form. Optional and last, so every existing call site keeps working.
+    hh_warning: str | None = None
 
     def render(self) -> str:
         """Exactly what the human is shown. The mandate is bound to this text.
@@ -70,23 +94,64 @@ class Candidate:
         an employer-facing message they did not write — the backend generates
         it. A long letter is a long prompt; that is the correct cost.
 
-        Everything printed here stays inside cp1251, which is what a Russian
-        Windows console encodes to. A box-drawing character in the letter's
-        margin raised ``UnicodeEncodeError`` out of the dry run before a single
-        candidate could be read.
+        **hh's own warning is printed too, when there is one.** The response
+        form is the first and only place hh says whether it will accept an
+        application from this account — «Такой отклик может получить отказ»
+        followed by the requirement that is unmet, or a refusal naming a setting
+        to change — and it only opens after this card has been answered. So the
+        warning shown here is the one hh gave last time, carried through the
+        journal. It is quoted rather than summarised: the measured refusal names
+        a setting by a name the owner can search for, and a paraphrase sends
+        them looking for one that does not exist. Being on the card also means
+        the mandate binds it, so a decision made while reading hh's objection
+        cannot be reused for a payload that no longer carries it.
+
+        **Everything printed here is reduced to cp1251, which is what a Russian
+        Windows console encodes to.** Not only hh's warnings, which arrive
+        already reduced from ``agent.state_page.read_form_warnings`` — the
+        title, the employer and the letter too, and that is the correction
+        (2026-09-07). Every one of those is text this program did not write:
+        the title and the employer are hh's, and this is hh.KZ, where the
+        Kazakh letters ә ғ қ ң ө ұ ү һ do not exist in cp1251 and are ordinary
+        in a company name; the letter is the backend's. One such character
+        raised ``UnicodeEncodeError`` out of :func:`confirm` itself — at the
+        moment the owner was being asked to agree — and out of the dry run
+        before a single candidate could be read.
+
+        **The reduction is announced when it changes anything.** Characters
+        outside the codepage become ``?``, and on the letter that is a
+        difference between the text on screen and the text that will be sent:
+        the mandate carries the letter unreduced, because an employer must
+        receive what the owner wrote and not what a codepage survived. A line
+        saying so is cheaper than a person wondering what the question marks
+        were, and far cheaper than a card that quietly misrepresents the
+        payload.
+
+        **The digest is taken of the reduced card**, because the digest is
+        supposed to bind what the human read, and what they read is what the
+        console could print.
         """
         lines = [
             f"{self.title} — {self.company or 'без компании'}",
             f"  вакансия {self.vacancy_id}",
             f"  {self.url}",
         ]
+        # Truthiness rather than ``is not None``: an empty string would print a
+        # heading with nothing under it, which reads as a warning nobody wrote.
+        if self.hh_warning:
+            lines.append("  hh уже предупреждал:")
+            lines.extend(f"  | {line}" for line in self.hh_warning.splitlines())
         if self.letter is None:
             lines.append("  без сопроводительного письма")
         else:
             body = "\n".join(f"  | {line}" for line in self.letter.text.splitlines())
             lines.append(f"  письмо ({len(self.letter)} симв.):")
             lines.append(body)
-        return "\n".join(lines)
+        card = "\n".join(lines)
+        shown = printable(card)
+        if shown != card:
+            shown = f"{shown}\n  (часть символов не в кодировке консоли, показаны как «?»)"
+        return shown
 
 
 @final
@@ -106,12 +171,30 @@ def confirm(
     terminal; in production they are stdin and stdout. A test that had to drive
     a real TTY would be a test nobody runs, and this is the function that must
     never regress.
+
+    A batch naming one vacancy twice is refused before anything is printed. It
+    is a defect in the caller rather than a decision of the human's, and it is
+    raised as a cancellation because that is what it must produce: nothing sent,
+    a sentence on the screen, no traceback over a run that has not opened a
+    browser yet. Nothing downstream can catch it — each copy would get its own
+    mandate, and the gate arms one window per mandate — so it stops here.
     """
     out = stream_out or sys.stdout
     src = stream_in or sys.stdin
 
     if not candidates:
         return []
+
+    repeated = sorted(
+        vacancy_id
+        for vacancy_id, times in Counter(c.vacancy_id for c in candidates).items()
+        if times > 1
+    )
+    if repeated:
+        raise CancelledError(
+            f"одна и та же вакансия в списке дважды: {', '.join(repeated)}. "
+            "Подтверждение не запрашивалось, ничего не отправлено."
+        )
 
     print(f"\nК отправке {len(candidates)} откликов:\n", file=out)
     for index, candidate in enumerate(candidates, start=1):

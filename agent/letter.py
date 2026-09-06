@@ -25,6 +25,15 @@ the other direction, a letter mentioning ``React.dev`` as a technology is
 flagged and goes to a human: that is a real domain, the guard cannot know it was
 meant as a name, and the cost of being wrong that way is one glance.
 
+**One class of false positive survives that rule**, and no amount of tightening
+removes it: ``ASP.NET`` and ``nurzhan.dev`` are both ``label.tld`` and nothing
+structural tells them apart. Verified by running this module: ``ASP.NET`` and
+``socket.io`` — ordinary technology names in a backend CV — were both read as
+links, so a letter that was fine went to a person for nothing. The remedy is a
+small closed list of names the market spells with a dot, matched
+case-insensitively against the whole token the pattern found; see
+:data:`TECHNOLOGY_SPELLINGS`.
+
 ``letterMaxLength`` is hh's own limit, measured at 10 000 characters in
 ``applicantVacancyResponseStatuses``. It is enforced here rather than by the
 textarea, because a letter silently cut at the field's maximum is a letter whose
@@ -67,6 +76,63 @@ LINK = re.compile(
 #: Both the ASCII at-sign and the full-width one, which arrives from phones.
 AT_SIGN = re.compile(r"[@＠]")
 
+#: Technology names whose own spelling ends in a top-level domain, and which are
+#: therefore not links however carefully the pattern is written. ``ASP.NET`` and
+#: ``nurzhan.dev`` have the same shape; only knowing the name tells them apart,
+#: so this is an explicit list rather than a cleverer regular expression.
+#:
+#: Why it is worth the exception here: this module never repairs a letter, it
+#: stops it, and the stop lands on the confirmation screen — a person is asked
+#: to look at their own perfectly ordinary sentence about ASP.NET and decide
+#: what to do about it. Do that a few times and the warning stops being read,
+#: which is a real cost paid for nothing.
+#:
+#: Deliberately small and closed. An entry belongs here only if it is a
+#: technology's own name, the market writes it with that dot, and it is not also
+#: somebody's site: ``React.dev`` and ``Kaspi.kz`` stay out, because they really
+#: are addresses and a letter carrying one really is filtered. Matched
+#: case-insensitively against the whole token the pattern found, so ``ASP.NET
+#: Core`` and ``Socket.IO`` are covered and ``socket.io/docs`` — a path, so an
+#: address — is not.
+#:
+#: The same set, character for character, is in ``backend/app/letters/guard.py``.
+#: The two packages may not import each other, so the copies are compared as
+#: source text by ``backend/tests/test_letter_guard_drift.py``: change one and
+#: that test fails rather than a letter being written by the backend and refused
+#: here, after the person has already read it.
+TECHNOLOGY_SPELLINGS = frozenset(
+    {
+        "asp.net",
+        "vb.net",
+        "ado.net",
+        "ml.net",
+        "socket.io",
+    }
+)
+
+#: What has to follow a match for it to be an address no matter how it is
+#: spelled. ``socket.io`` is a library; ``socket.io/docs`` is a link somebody
+#: typed on purpose. Only a slash: a colon reads as ordinary Russian punctuation
+#: ("использую socket.io: комнаты и подписки") far more often than as a port.
+_ADDRESS_TAIL = "/"
+
+
+def has_link(text: str) -> bool:
+    """Whether the text carries an address, as opposed to a technology's name.
+
+    Every match the pattern finds is an address except one the market spells
+    that way on purpose — see :data:`TECHNOLOGY_SPELLINGS`. The exception is
+    checked against the whole matched token, so a longer host that merely ends
+    in one (``asp.net.example.ru``) is still a link, and so is a technology name
+    that was given a path (``socket.io/docs``).
+    """
+    for match in LINK.finditer(text):
+        known = match.group(0).lower() in TECHNOLOGY_SPELLINGS
+        addressed = text[match.end() :].startswith(_ADDRESS_TAIL)
+        if addressed or not known:
+            return True
+    return False
+
 
 class LetterProblem(StrEnum):
     """Why a letter may not be sent as it stands."""
@@ -107,7 +173,7 @@ def inspect(text: str | None, *, max_length: int = DEFAULT_MAX_LENGTH) -> list[L
     if text is None or not text.strip():
         return []
     problems: list[LetterProblem] = []
-    if LINK.search(text):
+    if has_link(text):
         problems.append(LetterProblem.CONTAINS_LINK)
     if AT_SIGN.search(text):
         problems.append(LetterProblem.CONTAINS_AT_SIGN)

@@ -14,20 +14,38 @@ matters most and the easiest one to lose.
 """
 
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from agent import selectors, submit
 from agent.gate import SubmitGate, UnmandatedRequestError, vacancy_id_in, vacancy_ids_in
 from agent.journal import Entry, Journal
 from agent.letter import DEFAULT_MAX_LENGTH, LetterProblem, UnsafeLetterError, check, inspect
-from agent.mandate import digest, mint
-from agent.prefilter import Verdict, decide, decide_before_opening, read
+from agent.mandate import SendMandate, digest, mint, verify
+from agent.prefilter import (
+    Verdict,
+    decide,
+    decide_before_opening,
+    decide_on_form,
+    read,
+    read_status,
+)
 from agent.queue import CONTRACT_VERSION, FileQueue, QueueFormatError, QueueItem
 from agent.state import Actor, Status
-from agent.state_page import read_applied, read_state
+from agent.state_page import (
+    Application,
+    FormWarning,
+    FormWarnings,
+    Negotiations,
+    printable,
+    read_applied,
+    read_form_warnings,
+    read_negotiations,
+    read_state,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -585,3 +603,849 @@ def test_a_second_run_leaves_alone_what_only_a_person_can_move() -> None:
         # agent/run.py::_to_candidates now does.
         with pytest.raises(Exception, match="needs_manual to queued"):
             journal.record(Entry("1", Status.QUEUED), actor=Actor.AGENT)
+
+
+# ── technology names that are spelled like domains ────────────────────
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Пять лет на ASP.NET, сейчас перехожу на Python.",
+        "Реалтайм делал на socket.io.",
+        "Стек: ASP.NET Core, PostgreSQL, Redis.",
+        "Знаком с Socket.IO и с вебсокетами напрямую.",
+        "Использую socket.io: комнаты, подписки, реконнект.",
+    ],
+)
+def test_a_technology_that_is_spelled_like_a_domain_is_not_a_link(text: str) -> None:
+    """Verified by running the module: both of these were refused.
+
+    ``ASP.NET`` and ``socket.io`` end in a real top-level domain and are
+    therefore indistinguishable from ``nurzhan.dev`` by shape alone. They are
+    also ordinary words in a backend CV, so the guard was sending a perfectly
+    good letter to a person for nothing — and a warning that fires on nothing is
+    a warning that stops being read.
+    """
+    assert inspect(text) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Документация тут: socket.io/docs",
+        "Хост asp.net.example.ru",
+        "Смотрите vb.net.mysite.kz",
+    ],
+)
+def test_the_technology_exception_does_not_open_a_hole(text: str) -> None:
+    """A technology name with a path is an address, and so is a longer host.
+
+    The exception is matched against the whole token the pattern found, which is
+    what keeps ``socket.io`` a library and ``socket.io/docs`` a link.
+    """
+    assert inspect(text)
+
+
+# ── idempotency, which is a number ────────────────────────────────────
+
+#: The measured entry for a vacancy with no application: 2026-09-06, the owner's
+#: logged-in profile, vacancy 136962420.
+NO_APPLICATION: dict[str, Any] = {
+    "applicantVacancyResponseStatuses": {
+        "136962420": {
+            "test": {"hasTests": False},
+            "letterMaxLength": 10000,
+            "shortVacancy": {"@responseLetterRequired": False},
+            "negotiations": {
+                "topicList": [],
+                "total": 0,
+                "readOnlyInterval": 180,
+                "untrustedEmployerRestrictionsApplied": None,
+            },
+            "alreadyApplied": False,
+            "responseImpossible": False,
+        }
+    },
+}
+
+#: The measured entry for a vacancy that *has* an application: vacancy 133542745,
+#: same session. Note ``alreadyApplied`` — hh really does say ``false`` there.
+ONE_APPLICATION: dict[str, Any] = {
+    "applicantVacancyResponseStatuses": {
+        "133542745": {
+            "test": {"hasTests": False},
+            "letterMaxLength": 10000,
+            "shortVacancy": {"@responseLetterRequired": False},
+            "negotiations": {
+                "topicList": [
+                    {
+                        "id": 5347572809,
+                        "chatId": 5389562648,
+                        "initialState": "RESPONSE",
+                        "lastState": "DISCARD",
+                        "vacancyId": 133542745,
+                    }
+                ],
+                "total": 1,
+                "readOnlyInterval": 180,
+                "untrustedEmployerRestrictionsApplied": None,
+            },
+            "alreadyApplied": False,
+            "responseImpossible": False,
+        }
+    },
+}
+
+
+def test_no_application_reads_as_no_application() -> None:
+    """``total`` at 0 with an empty ``topicList``, which is what hh serves."""
+    assert read_applied(NO_APPLICATION, "136962420") is False
+
+
+def test_one_application_reads_as_applied() -> None:
+    """``total`` at 1. The count decides; nothing else is consulted."""
+    assert read_applied(ONE_APPLICATION, "133542745") is True
+
+
+def test_the_key_called_already_applied_is_not_the_answer() -> None:
+    """Measured: it was ``false`` on the vacancy that had an application.
+
+    This is the whole argument for reading a count instead of a flag, and it is
+    also why the apply *button* is not the answer either: hh permits a repeat
+    application, so an already-applied vacancy still renders an apply control.
+    """
+    entry = ONE_APPLICATION["applicantVacancyResponseStatuses"]["133542745"]
+
+    assert entry["alreadyApplied"] is False
+    assert read_applied(ONE_APPLICATION, "133542745") is True
+
+
+def test_the_outcome_of_the_application_comes_free_with_the_page() -> None:
+    """``lastState`` is what the site shows as «Вам отказали». Worth storing."""
+    negotiations = read_negotiations(ONE_APPLICATION, "133542745")
+
+    assert negotiations is not None
+    assert negotiations.total == 1
+    assert negotiations.exists is True
+    application = negotiations.applications[0]
+    assert (application.topic_id, application.chat_id) == (5347572809, 5389562648)
+    assert (application.initial_state, application.last_state) == ("RESPONSE", "DISCARD")
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        pytest.param(LIVE_STATE, id="no negotiations key at all"),
+        pytest.param({"applicantVacancyResponseStatuses": {}}, id="no entry for this vacancy"),
+        pytest.param(
+            {"applicantVacancyResponseStatuses": {"136962420": {"negotiations": {"total": "1"}}}},
+            id="total is a string",
+        ),
+        pytest.param(
+            {"applicantVacancyResponseStatuses": {"136962420": {"negotiations": {}}}},
+            id="negotiations without a total",
+        ),
+        pytest.param({}, id="not a vacancy page"),
+    ],
+)
+def test_a_shape_this_code_does_not_know_still_answers_none(state: dict[str, Any]) -> None:
+    """The three-valued contract, which is the thing that must never be lost.
+
+    None of these may read as ``False``. "I could not tell" turning into "not
+    applied yet" is the design that double-applies to the whole queue at once on
+    the day hh renames a key, and a second application is the one thing the
+    owner cannot take back.
+    """
+    assert read_applied(state, "136962420") is None
+
+
+# ── the response modal, classified by what it says ────────────────────
+
+#: hh writes a non-breaking space wherever a short word must not end a line.
+#: Spelled with :func:`chr` rather than as a literal, because the character
+#: is invisible in an editor and this fixture is worthless if it silently
+#: turns into an ordinary space.
+NBSP = chr(0xA0)
+
+#: The modal measured in full on vacancy 136131345, six seconds after the
+#: click, on the owner's logged-in profile.
+MEASURED_MODAL = (
+    "Отклик на вакансию\n"
+    "Python Backend Trainee\n"
+    f"Чтобы откликнуться на{NBSP}эту вакансию, поменяйте видимость резюме "
+    f"на{NBSP}«Видно компаниям-клиентам HeadHunter»\n"
+    "Python-разработчик\n"
+    "Такой отклик может получить отказ\n"
+    f"Английский язык в{NBSP}резюме{NBSP}«Python-разработчик» ниже обязательного "
+    "уровня, который указал работодатель.\n"
+    "Добавить сопроводительное\n"
+    "Откликнуться"
+)
+
+
+def test_the_visibility_demand_is_a_hard_stop_in_hh_s_own_words() -> None:
+    """Never send, and quote hh rather than paraphrasing.
+
+    A paraphrase sends the owner looking for a setting under a name hh does not
+    use. The non-breaking spaces are why this is matched on a normalised copy:
+    the string hh serves is not the string anybody would type.
+    """
+    warnings = read_form_warnings(MEASURED_MODAL)
+
+    assert warnings.verdict is FormWarning.BLOCKING
+    assert warnings.may_send is False
+    assert warnings.blocking is not None
+    assert "поменяйте видимость резюме" in warnings.blocking
+    assert "«Видно компаниям-клиентам HeadHunter»" in warnings.blocking
+
+
+def test_the_soft_warning_is_carried_but_never_blocks() -> None:
+    """hh naming the unmet requirement is worth more than any score computed here.
+
+    It arrived on the same card as the hard stop, which is why the verdict is
+    not a single value: a one-of-three answer would have thrown this away.
+    """
+    warnings = read_form_warnings(MEASURED_MODAL)
+
+    assert warnings.soft is not None
+    assert "может получить отказ" in warnings.soft
+    assert "ниже обязательного уровня" in warnings.soft
+    assert "Добавить сопроводительное" not in warnings.soft
+
+
+def test_a_soft_warning_on_its_own_lets_the_application_through() -> None:
+    """It is an opinion about the odds, not a refusal."""
+    warnings = read_form_warnings(
+        "Отклик на вакансию\nPython-разработчик\n"
+        "Такой отклик может получить отказ\n"
+        "Опыт работы меньше, чем указал работодатель.\n"
+        "Откликнуться"
+    )
+
+    assert warnings.verdict is FormWarning.SOFT
+    assert warnings.may_send is True
+    assert decide_on_form(warnings).verdict is Verdict.PROCEED
+    assert "меньше, чем указал работодатель" in decide_on_form(warnings).reason
+
+
+def test_a_warning_in_words_nobody_has_seen_is_not_invented_into_a_meaning() -> None:
+    """An unrecognised sentence is reported as neither warning, on purpose.
+
+    The two errors are not symmetric. Missing a stop costs one slot and is
+    caught afterwards, because hh refuses the application itself and
+    ``negotiations.total`` still reads 0. Treating every new sentence as a stop
+    sends the whole queue to a human the first time hh edits that card, and
+    nobody edits it back.
+    """
+    warnings = read_form_warnings(
+        "Отклик на вакансию\nPython-разработчик\n"
+        "Работодатель обычно отвечает в течение недели\n"
+        "Откликнуться"
+    )
+
+    assert warnings.verdict is FormWarning.NONE
+    assert (warnings.blocking, warnings.soft) == (None, None)
+    assert decide_on_form(warnings).verdict is Verdict.PROCEED
+
+
+def test_the_blocking_warning_reaches_the_person_through_the_decision() -> None:
+    """The reason a human reads carries hh's sentence, not a summary of it."""
+    decision = decide_on_form(read_form_warnings(MEASURED_MODAL))
+
+    assert decision.verdict is Verdict.MANUAL
+    assert decision.status is Status.NEEDS_MANUAL
+    assert "поменяйте видимость резюме" in decision.reason
+
+
+def test_everything_quoted_out_of_hh_survives_the_console_it_is_printed_on() -> None:
+    """A Russian Windows console encodes cp1251, and this text is not ours.
+
+    An employer can put anything in a warning or in a test question. One
+    character outside the codepage used to end the run at print time, in the
+    middle of a batch, with the browser already open.
+    """
+    decision = decide_on_form(read_form_warnings(MEASURED_MODAL))
+    decision.reason.encode("cp1251")
+
+    assert printable("Опыт ┌─ Python") == "Опыт ?? Python"
+    printable("вопрос 🙂").encode("cp1251")
+
+
+# ── the rest of the prefilter ─────────────────────────────────────────
+
+
+def test_an_employer_test_shows_its_questions_and_answers_none_of_them() -> None:
+    """The questions go on the card; nothing generates an answer, not even a blank."""
+    with_questions: dict[str, Any] = {
+        "applicantVacancyResponseStatuses": {
+            "1": {
+                "test": {
+                    "hasTests": True,
+                    "questions": [
+                        {"title": "Сколько лет вы писали на Python?"},
+                        "Опишите ваш опыт с асинхронностью.",
+                    ],
+                },
+                "letterMaxLength": 10000,
+                "shortVacancy": {"@responseLetterRequired": False},
+                "negotiations": {"topicList": [], "total": 0},
+            }
+        }
+    }
+
+    facts = read(with_questions, "1")
+    assert facts is not None
+    assert facts.test_questions == (
+        "Сколько лет вы писали на Python?",
+        "Опишите ваш опыт с асинхронностью.",
+    )
+
+    decision = decide(
+        facts=facts,
+        closed_for_applicants=False,
+        archived=False,
+        already_applied=False,
+        has_letter=True,
+    )
+    assert decision.verdict is Verdict.MANUAL
+    assert "Сколько лет вы писали на Python?" in decision.reason
+
+
+def test_a_test_whose_questions_are_not_on_the_page_says_so() -> None:
+    """«вопросов нет» over a test with five questions is how a card stops being read."""
+    facts = read(
+        {
+            "applicantVacancyResponseStatuses": {
+                "1": {
+                    "test": {"hasTests": True},
+                    "letterMaxLength": 10000,
+                    "shortVacancy": {"@responseLetterRequired": False},
+                    "negotiations": {"topicList": [], "total": 0},
+                }
+            }
+        },
+        "1",
+    )
+
+    assert facts is not None
+    assert facts.test_questions == ()
+    decision = decide(
+        facts=facts,
+        closed_for_applicants=False,
+        archived=False,
+        already_applied=False,
+        has_letter=True,
+    )
+    assert decision.verdict is Verdict.MANUAL
+    assert "не отдал" in decision.reason
+
+
+def test_a_letter_cannot_be_typed_into_a_field_nobody_has_seen() -> None:
+    """Sending without a letter was measured end to end; sending with one was not.
+
+    ``add-cover-letter`` is only the button that reveals the textarea, and
+    nobody clicked it during the 2026-09-06 measurement, so the field's selector
+    is genuinely unknown. A vacancy that demands a letter therefore goes to the
+    owner even when a letter is sitting right there — one vacancy out of the
+    batch, rather than a guessed selector typing somebody's letter into whatever
+    it happens to match.
+    """
+    needs_a_letter: dict[str, Any] = {
+        "applicantVacancyResponseStatuses": {
+            "1": {
+                "test": {"hasTests": False},
+                "letterMaxLength": 10000,
+                "shortVacancy": {"@responseLetterRequired": True},
+                "negotiations": {"topicList": [], "total": 0},
+            }
+        }
+    }
+    base: dict[str, Any] = {
+        "facts": read(needs_a_letter, "1"),
+        "closed_for_applicants": False,
+        "archived": False,
+        "already_applied": False,
+        "has_letter": True,
+    }
+
+    blocked = decide(**base, letter_field_known=False)
+    assert blocked.verdict is Verdict.MANUAL
+    assert "поле" in blocked.reason
+    # Once the field has been measured the same vacancy is ordinary again, and
+    # the default keeps the signature working for callers that predate this.
+    assert decide(**base, letter_field_known=True).verdict is Verdict.PROCEED
+    assert decide(**base).verdict is Verdict.PROCEED
+
+
+def test_a_vacancy_hh_marks_as_impossible_goes_to_a_person() -> None:
+    """A guess that can only refuse is a different guess from one that can send."""
+    facts = read(
+        {
+            "applicantVacancyResponseStatuses": {
+                "1": {
+                    "test": {"hasTests": False},
+                    "letterMaxLength": 10000,
+                    "shortVacancy": {"@responseLetterRequired": False},
+                    "negotiations": {"topicList": [], "total": 0},
+                    "responseImpossible": True,
+                }
+            }
+        },
+        "1",
+    )
+
+    assert facts is not None
+    assert facts.response_impossible is True
+    assert (
+        decide(
+            facts=facts,
+            closed_for_applicants=False,
+            archived=False,
+            already_applied=False,
+            has_letter=True,
+        ).verdict
+        is Verdict.MANUAL
+    )
+
+
+@pytest.mark.parametrize(
+    ("view", "expected"),
+    [
+        pytest.param({"status": {"archived": True}}, (True, False), id="nested status"),
+        pytest.param({"archived": True}, (True, False), id="flat archived"),
+        pytest.param({"closedForApplicants": True}, (False, True), id="closed for applicants"),
+        pytest.param({"closedForApplicants": False}, (False, False), id="open, as measured"),
+        pytest.param({}, (False, False), id="nothing said"),
+    ],
+)
+def test_whether_the_vacancy_is_still_open_is_read_off_the_page(
+    view: dict[str, Any], expected: tuple[bool, bool]
+) -> None:
+    """The page is the later witness: a vacancy can close between a crawl and a run.
+
+    An absent flag reads as "not archived" rather than as a stop, which is the
+    opposite of the idempotency rule on purpose — being wrong here costs a page
+    load and a refusal from hh, while treating every unreadable page as archived
+    would skip the whole queue in silence.
+    """
+    status = read_status({"vacancyView": view})
+
+    assert (status.archived, status.closed_for_applicants) == expected
+
+
+# ── the modal is classified once the modal is there ────────────────
+#
+# All of this follows from one measured fact: the response modal's frame and the
+# card inside it arrive separately, the card on
+# ``GET /applicant/vacancy_response/popup?vacancyId=…`` (recorded in
+# ``agent/probe/form_136131345.json``). A reader that classifies the frame reads
+# an empty card as "hh raised no objection", and that reading ends in an
+# application nobody agreed to send.
+
+#: The vacancy these fakes are about, and the id contained inside it. The
+#: digits matter once, in the substring test below.
+#:
+#: Deliberately not the number ``test_apply_flow.py`` uses. A mandate's signature
+#: is an HMAC over the vacancy, the URL, the letter and the form digest, and
+#: ``agent.mandate`` keeps live signatures in one process-wide set — so two test
+#: modules minting the same four values would be leaving each other consent.
+FAKE_VACANCY = "142598301"
+FAKE_SUBSTRING_OF_IT = "4259830"
+FAKE_HREF = f"/applicant/vacancy_response?vacancyId={FAKE_VACANCY}&employerId=99"
+
+#: The measured happy path: a card with nothing to warn about. It ends with the
+#: submit control's own label, which is what proves the card rendered at all.
+RENDERED_CARD = (
+    "Отклик на вакансию\nPython Backend Trainee\n"
+    "Python-разработчик\nДобавить сопроводительное\nОткликнуться"
+)
+
+#: What hh's submit button says, measured on both dumped modals
+#: (``agent/probe/_warn.json`` and ``agent/probe/send_136638256.json``).
+SUBMIT_LABEL = "Откликнуться"
+
+#: hh's demand in full, non-breaking spaces and all, as it was measured.
+RESUME_HIDDEN_DEMAND = (
+    f"Чтобы откликнуться на{NBSP}эту вакансию, поменяйте видимость резюме "
+    f"на{NBSP}«Видно компаниям-клиентам HeadHunter»"
+)
+
+
+def _the_whole_modal() -> set[str]:
+    """Frame and card together, which is how hh's modal usually finishes."""
+    return {selectors.RESPONSE_FORM.query, selectors.SUBMIT_BUTTON.query}
+
+
+@dataclass
+class _Element:
+    """One query resolved against a page that may or may not carry it."""
+
+    page: "_ModalPage"
+    query: str
+
+    @property
+    def first(self) -> "_Element":
+        """Playwright's ``.first``, recorded so its absence would be visible."""
+        self.page.took_first.append(self.query)
+        return self
+
+    def get_attribute(self, name: str) -> str | None:
+        """Only ``href`` is ever asked for."""
+        return self.page.href if name == "href" else None
+
+    def click(self) -> None:
+        """Following the apply link, which is what brings the modal up."""
+        self.page.clicked.append(self.query)
+        self.page.present |= self.page.reveals
+
+    def inner_text(self) -> str:
+        """What this element renders, and "" for anything not on screen.
+
+        Playwright answers the same way: ``inner_text`` on an element that is
+        attached but not rendered is empty, which is the state this whole
+        section is about.
+        """
+        if self.query == selectors.SUBMIT_BUTTON.query:
+            return self.page.submit_label
+        return self.page.card
+
+
+@dataclass
+class _ModalPage:
+    """A vacancy page whose modal arrives in two stages, the way hh's does.
+
+    Deliberately small: :func:`agent.submit._open_the_form` needs a locator and
+    a ``wait_for_selector`` and nothing else. The whole apply flow has a much
+    larger double of its own, in ``test_apply_flow.py``.
+    """
+
+    #: Which queries the page answers right now.
+    present: set[str] = field(default_factory=set)
+    #: What the apply click adds. Override with the frame alone to model the
+    #: measured race.
+    reveals: set[str] = field(default_factory=_the_whole_modal)
+    #: The modal's rendered text, as ``inner_text`` would return it.
+    card: str = RENDERED_CARD
+    #: The submit control's own rendered text.
+    submit_label: str = SUBMIT_LABEL
+    href: str | None = FAKE_HREF
+    clicked: list[str] = field(default_factory=list)
+    waited: list[str] = field(default_factory=list)
+    took_first: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        """A fresh vacancy: the apply control, and none of the modal yet."""
+        self.present.add(selectors.APPLY_LINK.query)
+
+    def locator(self, query: str) -> _Element:
+        """Every control the submitter touches goes through this."""
+        return _Element(self, query)
+
+    def wait_for_selector(self, query: str, timeout: int = 0) -> None:
+        """Present only once whatever reveals it has actually happened."""
+        self.waited.append(query)
+        if query not in self.present:
+            raise TimeoutError(f"{query} не появился")
+
+
+def a_fake_mandate(vacancy_id: str = FAKE_VACANCY) -> SendMandate:
+    """A mandate for these fakes, spent the moment it is made.
+
+    Nothing in this section can send anything: :func:`agent.submit._open_the_form`
+    reads the vacancy id off the mandate and never arms a gate with it. Spending
+    it here is housekeeping — ``mint`` records the signature in a set that lives
+    as long as the process, and a test module that mints without spending leaves
+    usable consent lying about for every module that runs after it.
+    """
+    mandate = mint(
+        vacancy_id=vacancy_id,
+        url=f"https://almaty.hh.kz/vacancy/{vacancy_id}",
+        letter=None,
+        form_digest="a card only this module has seen",
+    )
+    verify(mandate)
+    return mandate
+
+
+def test_the_frame_arriving_is_not_the_card_arriving() -> None:
+    """The measured race, and the reason this section exists.
+
+    hh fetches the card into an overlay that is already on the page. Waiting for
+    the overlay and classifying it straight away reads an application hh has
+    refused as one it has no objection to, and sends it. The submit control only
+    exists once the card has rendered, so it is waited for too —
+    ``agent/probe_apply.py`` waits for the same pair, on the same measurement.
+    """
+    page = _ModalPage(reveals={selectors.RESPONSE_FORM.query})
+
+    with pytest.raises(TimeoutError):
+        submit._open_the_form(page, a_fake_mandate())
+
+    assert page.waited == [selectors.RESPONSE_FORM.query, selectors.SUBMIT_BUTTON.query]
+
+
+@pytest.mark.parametrize(
+    ("card", "label"),
+    [
+        pytest.param("", SUBMIT_LABEL, id="the overlay renders nothing"),
+        pytest.param("", "", id="nothing renders at all"),
+        pytest.param("Мы используем куки\nПринять", SUBMIT_LABEL, id="some other overlay"),
+    ],
+)
+def test_a_card_that_cannot_be_read_is_never_read_as_permission(card: str, label: str) -> None:
+    """ "No warning" and "no text" are the same value, and only one of them may send.
+
+    The second half of the race: the submit control is attached, the card is not
+    on screen, and ``inner_text`` gives "" — which classifies exactly like hh's
+    quiet modal. The classifier cannot tell those apart, so the distinction is
+    made here, from the page: the control's own label has to be inside the text
+    being classified. The third case is the same test doing a second job — an
+    overlay that is not this modal is not read as this modal.
+    """
+    page = _ModalPage(card=card, submit_label=label)
+
+    with pytest.raises(submit.FormUnreadableError) as excinfo:
+        submit._open_the_form(page, a_fake_mandate())
+
+    assert FAKE_VACANCY in str(excinfo.value)
+    assert "Ничего не отправлено" in str(excinfo.value)
+    # It runs on a Russian Windows console, and this sentence is printed there.
+    str(excinfo.value).encode("cp1251")
+
+
+def test_the_modal_and_its_button_are_both_taken_by_first() -> None:
+    """Playwright's strict mode raises when a query matches twice.
+
+    Without ``.first`` a second element answering either query turns the read
+    into an exception in the middle of the flow. With it, the choice is
+    deliberate — and the reading is then checked against the control it is
+    supposed to contain, which is the test above.
+    """
+    page = _ModalPage()
+
+    submit._open_the_form(page, a_fake_mandate())
+
+    assert selectors.RESPONSE_FORM.query in page.took_first
+    assert selectors.SUBMIT_BUTTON.query in page.took_first
+
+
+def test_a_card_that_did_render_is_read_and_believed() -> None:
+    """The happy path still works, which is the other half of not sending blind."""
+    page = _ModalPage()
+
+    warnings = submit._open_the_form(page, a_fake_mandate())
+
+    assert (warnings.blocking, warnings.soft) == (None, None)
+    assert page.clicked == [selectors.any_apply_control()]
+
+
+def test_the_refusal_is_still_a_refusal_when_the_card_is_readable() -> None:
+    """The measured blocking card, down the same path, still stops the send."""
+    page = _ModalPage(
+        card=(f"Отклик на вакансию\n{RESUME_HIDDEN_DEMAND}\nPython-разработчик\nОткликнуться")
+    )
+
+    with pytest.raises(submit.RefusedByHHError) as excinfo:
+        submit._open_the_form(page, a_fake_mandate())
+
+    assert "видимость резюме" in excinfo.value.said
+
+
+def test_the_apply_link_must_name_this_vacancy_and_no_other() -> None:
+    """A substring is not an id.
+
+    ``142598301`` contains ``4259830``, so the old check — ``vacancy_id not in
+    href`` — accepted a link to the first as a link to the second. The ids are
+    parsed with the gate's own reader, so this and the gate that will see the
+    same URL a moment later cannot hold different opinions about what it names.
+    """
+    page = _ModalPage()
+
+    with pytest.raises(submit.WrongVacancyError, match=FAKE_SUBSTRING_OF_IT):
+        submit._open_the_form(page, a_fake_mandate(FAKE_SUBSTRING_OF_IT))
+
+    assert page.clicked == []
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        pytest.param(f"/vacancy/999999999/apply?vacancyId={FAKE_VACANCY}", id="two vacancies"),
+        pytest.param("/applicant/vacancy_response", id="no vacancy at all"),
+        pytest.param(None, id="no href at all"),
+    ],
+)
+def test_an_apply_link_that_does_not_name_exactly_this_vacancy_is_refused(
+    href: str | None,
+) -> None:
+    """Consent is for one job. A link naming two names one nobody agreed to.
+
+    A link naming none is refused too: it cannot be checked, and an apply control
+    that stopped being a link is a change to hh worth a person's attention.
+    """
+    page = _ModalPage(href=href)
+
+    with pytest.raises(submit.WrongVacancyError):
+        submit._open_the_form(page, a_fake_mandate())
+
+    assert page.clicked == []
+
+
+def test_what_hh_said_at_any_point_in_the_open_form_is_kept() -> None:
+    """The card is classified before the letter is typed, and the send is after it.
+
+    hh can answer the letter — a length it will not take, a policy on the text —
+    and the first reading cannot have seen that. Both readings are kept: a stop
+    from either stops, and a warning from either reaches the journal.
+    """
+    before = FormWarnings(blocking=None, soft="Такой отклик может получить отказ")
+    after = FormWarnings(blocking="Письмо слишком длинное", soft=None)
+
+    both = submit._everything_hh_said(before, after)
+
+    assert both.blocking == "Письмо слишком длинное"
+    assert both.soft == "Такой отклик может получить отказ"
+    assert both.may_send is False
+    assert decide_on_form(both).verdict is Verdict.MANUAL
+
+
+# ── the hard stop survives hh rewording it ───────────────────
+
+#: Zero-width space: invisible, not whitespace to :meth:`str.split`, and a thing
+#: web typography really does insert. Spelled with :func:`chr` for the same
+#: reason as :data:`NBSP` — a fixture nobody can see is worthless.
+ZWSP = chr(0x200B)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(RESUME_HIDDEN_DEMAND, id="the measured sentence"),
+        pytest.param("Поменяйте видимость вашего резюме", id="one word in between"),
+        pytest.param("Измените настройки видимости резюме", id="another case ending"),
+        pytest.param("Резюме скрыто — поменяйте видимость", id="the other order"),
+        pytest.param(f"Поменяйте видимость рез{ZWSP}юме", id="a zero-width space inside a word"),
+    ],
+)
+def test_the_hard_stop_survives_hh_rewording_its_own_sentence(line: str) -> None:
+    """The docstring promised "any mention of resume visibility". Now it is true.
+
+    It used to be an exact two-word bigram inside a single line, so
+    «видимость вашего резюме» — one word wider — was not a hard stop at
+    all, and neither was any other case ending. The asymmetry decides how wide
+    to cast the net: a false positive hands one vacancy to the owner, a false
+    negative sends an application hh will not show to the employer.
+    """
+    warnings = read_form_warnings(f"Отклик на вакансию\n{line}\nОткликнуться")
+
+    assert warnings.verdict is FormWarning.BLOCKING
+    assert warnings.may_send is False
+    assert decide_on_form(warnings).verdict is Verdict.MANUAL
+
+
+def test_a_demand_hh_has_split_over_two_lines_is_still_a_demand() -> None:
+    """No single line carries it, so every line that mentions it is quoted."""
+    warnings = read_form_warnings(
+        "Отклик на вакансию\nРезюме скрыто.\nПоменяйте видимость в настройках.\nОткликнуться"
+    )
+
+    assert warnings.may_send is False
+    assert warnings.blocking is not None
+    assert "Резюме скрыто." in warnings.blocking
+    assert "Поменяйте видимость" in warnings.blocking
+
+
+@pytest.mark.parametrize(
+    "modal",
+    [
+        pytest.param(RENDERED_CARD, id="the quiet card"),
+        pytest.param(
+            "Отклик на вакансию\nТакой отклик может получить отказ\n"
+            "Английский язык в резюме «Python-разработчик» ниже уровня.\nОткликнуться",
+            id="the soft warning, which itself names a resume",
+        ),
+    ],
+)
+def test_the_wider_net_does_not_catch_the_cards_that_may_be_sent(modal: str) -> None:
+    """Casting wider costs false stops, so the cards that must not stop are checked.
+
+    The soft warning is the one that matters: hh's own «может получить отказ»
+    reason names «резюме», so half of the demand sits on a perfectly sendable
+    card and only the other half keeps it sendable.
+    """
+    warnings = read_form_warnings(modal)
+
+    assert warnings.blocking is None
+    assert warnings.may_send is True
+    assert decide_on_form(warnings).verdict is Verdict.PROCEED
+
+
+# ── when the count and the list disagree ─────────────────────
+
+#: A shape nobody has measured: hh's count says nothing was sent and hh's own
+#: list of conversations for this vacancy says something was. Built from the
+#: entry measured on vacancy 133542745 with the count put back to zero.
+COUNT_DISAGREES_WITH_LIST: dict[str, Any] = {
+    "applicantVacancyResponseStatuses": {
+        "133542745": {
+            "test": {"hasTests": False},
+            "letterMaxLength": 10000,
+            "shortVacancy": {"@responseLetterRequired": False},
+            "negotiations": {
+                "topicList": [
+                    {
+                        "id": 5347572809,
+                        "chatId": 5389562648,
+                        "initialState": "RESPONSE",
+                        "lastState": None,
+                        "vacancyId": 133542745,
+                    }
+                ],
+                "total": 0,
+            },
+            "alreadyApplied": False,
+        }
+    },
+}
+
+
+def test_a_conversation_hh_remembers_is_an_application_even_at_zero() -> None:
+    """The one disagreement in this reader that used to resolve toward sending.
+
+    Every other unfamiliar shape here stops. This one — ``total == 0`` beside a
+    non-empty ``topicList`` — read as "no application exists", and the agent
+    applied again, which is the mistake the owner cannot undo.
+    """
+    negotiations = read_negotiations(COUNT_DISAGREES_WITH_LIST, "133542745")
+
+    assert negotiations is not None
+    assert negotiations.total == 0
+    assert len(negotiations.applications) == 1
+    assert negotiations.exists is True
+    assert read_applied(COUNT_DISAGREES_WITH_LIST, "133542745") is True
+    assert (
+        decide(
+            facts=read(COUNT_DISAGREES_WITH_LIST, "133542745"),
+            closed_for_applicants=False,
+            archived=False,
+            already_applied=read_applied(COUNT_DISAGREES_WITH_LIST, "133542745"),
+            has_letter=False,
+        ).verdict
+        is Verdict.SKIP
+    )
+
+
+def test_the_list_can_only_add_an_application_never_remove_one() -> None:
+    """The direction is what makes the wider reading safe rather than just stricter.
+
+    A count of 1 with an empty list still says an application exists: hh trims
+    that list, and a trimmed list is not an application that stopped existing.
+    """
+    an_application = Application(
+        topic_id=1, chat_id=2, initial_state="RESPONSE", last_state="DISCARD"
+    )
+
+    assert Negotiations(total=1, applications=()).exists is True
+    assert Negotiations(total=0, applications=()).exists is False
+    assert Negotiations(total=0, applications=(an_application,)).exists is True

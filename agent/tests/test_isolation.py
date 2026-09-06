@@ -36,8 +36,28 @@ AGENT_ROOT = REPO_ROOT / "agent"
 BACKEND_ROOT = REPO_ROOT / "backend" / "app"
 
 
+#: Functions that fetch a module named by a string rather than by syntax. An
+#: import statement is what ``ast.Import`` models, and it is not the only way to
+#: get a module: ``importlib.import_module("app.core.config")`` crosses this
+#: boundary without producing one. That matters more here than anywhere else in
+#: the package, because this is the boundary CLAUDE.md draws around blast radius —
+#: what keeps a database URL and an Anthropic key out of a process driving a
+#: browser under somebody's login.
+DYNAMIC_IMPORTERS = frozenset({"import_module", "__import__", "load_module"})
+
+
 def _imported_modules(path: Path) -> set[str]:
-    """Every module name this file imports, at any depth."""
+    """Every module name this file imports, by statement or by name.
+
+    Covers ``import x``, ``from x import y``, and a call to one of
+    :data:`DYNAMIC_IMPORTERS` with a literal string argument.
+
+    What it does not cover, and cannot: a module name assembled at runtime, read
+    from a file, or reached by poking ``sys.modules``. That is the honest limit
+    of a static scan and it is written down rather than implied, so the next
+    person knows what this test promises. It stops the crossing that actually
+    happens — an import added because it was convenient — not a determined one.
+    """
     names: set[str] = set()
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -45,6 +65,15 @@ def _imported_modules(path: Path) -> set[str]:
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
+        elif isinstance(node, ast.Call):
+            called = node.func
+            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+            if name in DYNAMIC_IMPORTERS:
+                names.update(
+                    argument.value
+                    for argument in node.args
+                    if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                )
     return names
 
 
@@ -167,3 +196,36 @@ def test_nothing_the_agent_writes_is_tracked_right_now() -> None:
     ]
 
     assert not leaked, f"an artefact of the owner's session is committed: {leaked}"
+
+
+def test_the_import_scan_sees_a_module_fetched_by_name(tmp_path: Path) -> None:
+    """An import statement is not the only way to get a module.
+
+    ``importlib.import_module("app.core.config")`` produces no ``ast.Import``
+    node, so this scan used to walk straight past the one crossing its own
+    docstring says it prevents. Driven over a source file written here rather
+    than over the production tree, so it keeps testing the scanner even after
+    the tree changes.
+    """
+    sneaky = tmp_path / "sneaky.py"
+    sneaky.write_text(
+        'import importlib\nsettings = importlib.import_module("app.core.config").settings\n',
+        encoding="utf-8",
+    )
+
+    assert "app.core.config" in _imported_modules(sneaky)
+
+
+def test_the_import_scan_says_what_it_cannot_see(tmp_path: Path) -> None:
+    """A name assembled at runtime is beyond a static scan, and that is documented.
+
+    Pinning the limit rather than leaving it implied: whoever relies on this
+    file should know it stops the convenient import, not a determined one.
+    """
+    assembled = tmp_path / "assembled.py"
+    assembled.write_text(
+        'import importlib\nsettings = importlib.import_module("ap" + "p.core.config")\n',
+        encoding="utf-8",
+    )
+
+    assert "app.core.config" not in _imported_modules(assembled)
