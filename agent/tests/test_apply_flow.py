@@ -778,3 +778,20 @@ def test_the_probe_refuses_a_fresh_vacancy_outright() -> None:
     """The refusal that carries the safety, not the interceptor."""
     with pytest.raises(SystemExit, match="already-applied"):
         probe_apply.open_form(PAGE_URL, already_applied=False)
+
+
+def test_the_card_prints_on_the_console_this_actually_runs_on() -> None:
+    """A Russian Windows console encodes cp1251, and the card is the first thing shown.
+
+    A box-drawing character in the letter's margin raised UnicodeEncodeError out
+    of the dry run before a single candidate could be read.
+    """
+    candidate = Candidate(
+        vacancy_id=VACANCY,
+        title="Python-разработчик",
+        company="Inspire",
+        url=PAGE_URL,
+        letter=check_letter("Здравствуйте!\nОпыт — Python, FastAPI…", required=False),
+    )
+
+    candidate.render().encode("cp1251")

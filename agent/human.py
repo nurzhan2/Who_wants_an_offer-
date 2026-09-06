@@ -69,6 +69,11 @@ class Candidate:
         which meant the human was asked to approve text they had not read, in
         an employer-facing message they did not write — the backend generates
         it. A long letter is a long prompt; that is the correct cost.
+
+        Everything printed here stays inside cp1251, which is what a Russian
+        Windows console encodes to. A box-drawing character in the letter's
+        margin raised ``UnicodeEncodeError`` out of the dry run before a single
+        candidate could be read.
         """
         lines = [
             f"{self.title} — {self.company or 'без компании'}",
@@ -78,7 +83,7 @@ class Candidate:
         if self.letter is None:
             lines.append("  без сопроводительного письма")
         else:
-            body = "\n".join(f"  │ {line}" for line in self.letter.text.splitlines())
+            body = "\n".join(f"  | {line}" for line in self.letter.text.splitlines())
             lines.append(f"  письмо ({len(self.letter)} симв.):")
             lines.append(body)
         return "\n".join(lines)
