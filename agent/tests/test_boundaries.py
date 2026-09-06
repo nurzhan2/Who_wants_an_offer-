@@ -26,7 +26,7 @@ from agent import selectors
 from agent.human import CONFIRM_WORD, CancelledError, Candidate, confirm
 from agent.letter import SafeLetter
 from agent.mandate import ForgedMandateError, SendMandate, SpentMandateError, mint, verify
-from agent.state import Actor, IllegalTransitionError, Status, check
+from agent.state import TERMINAL, TRANSITIONS, Actor, IllegalTransitionError, Status, check
 
 pytestmark = pytest.mark.unit
 
@@ -36,7 +36,12 @@ PRODUCTION_FILES = [path for path in AGENT_ROOT.glob("*.py") if path.name not in
 
 def a_mandate(vacancy_id: str = "136773120", letter: str | None = "письмо") -> SendMandate:
     """A legitimately minted mandate, as the confirmation would produce."""
-    return mint(vacancy_id=vacancy_id, letter=letter, form_digest="digest-of-what-was-shown")
+    return mint(
+        vacancy_id=vacancy_id,
+        url=f"https://almaty.hh.kz/vacancy/{vacancy_id}",
+        letter=letter,
+        form_digest="digest-of-what-was-shown",
+    )
 
 
 # ── 3. never send without a human's confirmation ──────────────────────
@@ -70,6 +75,7 @@ def test_a_mandate_conjured_past_its_constructor_is_refused_at_the_point_of_use(
     forged = SendMandate.__new__(SendMandate)
     for field, value in (
         ("vacancy_id", "000"),
+        ("url", "https://almaty.hh.kz/vacancy/000"),
         ("letter", "never shown to anybody"),
         ("form_digest", "whatever"),
         ("signature", honest.signature),
@@ -79,6 +85,20 @@ def test_a_mandate_conjured_past_its_constructor_is_refused_at_the_point_of_use(
 
     with pytest.raises(ForgedMandateError):
         verify(forged)
+
+
+def test_a_mandate_missing_a_field_is_a_forgery_and_not_an_attribute_error() -> None:
+    """The same vector, half-built. Every refusal here must be a MandateError.
+
+    An object past ``__new__`` need not have every field, and reading a missing
+    one raises ``AttributeError`` — which no caller catches, so it would escape
+    the run loop as a traceback rather than as a refusal.
+    """
+    half_built = SendMandate.__new__(SendMandate)
+    object.__setattr__(half_built, "vacancy_id", "136773120")
+
+    with pytest.raises(ForgedMandateError):
+        verify(half_built)
 
 
 def test_a_mandate_cannot_be_stored_and_replayed_tomorrow() -> None:
@@ -150,15 +170,48 @@ def test_only_the_confirmation_module_mints_a_mandate() -> None:
     this fails and somebody has to explain why.
     """
     callers = {
-        path.name
-        for path in PRODUCTION_FILES
-        if "mint(" in path.read_text(encoding="utf-8") and path.name != "mandate.py"
+        path.name for path in PRODUCTION_FILES if path.name != "mandate.py" and _imports_mint(path)
     }
 
     assert callers == {"human.py"}, (
         f"mandate.mint() is called from {sorted(callers)}; consent is minted where a "
         "person answers a prompt and nowhere else"
     )
+
+
+def _keyword_values(function: ast.FunctionDef, name: str) -> list[object]:
+    """Every literal passed as ``name=`` by a call inside this function.
+
+    Reading the argument rather than searching the file is the whole point:
+    a source-text assertion is satisfied by the same characters in a comment,
+    and the two arguments checked with it are the ones every consent guarantee
+    in this package rests on.
+    """
+    found: list[object] = []
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call):
+            continue
+        for keyword in node.keywords:
+            if keyword.arg == name and isinstance(keyword.value, ast.Constant):
+                found.append(keyword.value.value)
+    return found
+
+
+def _imports_mint(path: Path) -> bool:
+    """Whether this module imports ``mint``, under any name.
+
+    ``from agent.mandate import mint as _consent`` walks past a search for
+    "mint(" — and a module that can mint consent can mint it for a whole batch
+    with nobody asked. Parsing catches the alias; the substring did not.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("mandate"):
+            if any(alias.name == "mint" for alias in node.names):
+                return True
+        if isinstance(node, ast.Attribute) and node.attr == "mint":
+            return True
+    return False
 
 
 # ── 1. never solve a captcha ──────────────────────────────────────────
@@ -193,14 +246,20 @@ def test_the_browser_is_launched_visible_and_headless_is_not_a_parameter() -> No
     to a file with the reason next to it, not a flag in a command line.
     """
     source = (AGENT_ROOT / "browser.py").read_text(encoding="utf-8")
-
-    assert "headless=False" in source
     tree = ast.parse(source)
     launcher = next(
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.FunctionDef) and node.name == "open_browser"
     )
+
+    # The value actually passed, not the presence of the characters
+    # "headless=False" somewhere in the file. Flipping the call site and leaving
+    # the literal in a comment — or quoting it in the module docstring — used to
+    # pass this test with a headless browser behind it.
+    passed = _keyword_values(launcher, "headless")
+    assert passed == [False], f"open_browser passes headless={passed}, and it must pass False"
+
     names = {arg.arg for arg in launcher.args.args + launcher.args.kwonlyargs}
     assert "headless" not in names
 
@@ -214,9 +273,15 @@ def test_service_workers_are_blocked_so_the_gate_can_see_everything() -> None:
     every consent guarantee in the package is conditional on a fact nobody
     checked.
     """
-    source = (AGENT_ROOT / "browser.py").read_text(encoding="utf-8")
+    tree = ast.parse((AGENT_ROOT / "browser.py").read_text(encoding="utf-8"))
+    launcher = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "open_browser"
+    )
 
-    assert 'service_workers="block"' in source
+    passed = _keyword_values(launcher, "service_workers")
+    assert passed == ["block"], f"open_browser passes service_workers={passed}"
 
 
 # ── 5. never touch the password or the session ────────────────────────
@@ -313,3 +378,59 @@ def test_the_gate_matches_the_url_and_not_the_method() -> None:
 
     assert gate_module.looks_like_an_application(apply_url)
     assert not gate_module.looks_like_an_application("https://hh.kz/vacancy/136773120")
+
+
+def test_no_move_out_of_a_terminal_state_is_expressible() -> None:
+    """``TERMINAL`` used to be a declaration nothing read.
+
+    A single line added to ``TRANSITIONS`` — ``(SENT, QUEUED): AGENT`` — made an
+    application retryable and left the whole suite green. ``check`` now consults
+    the set before the table, so the table cannot disagree with it.
+    """
+    for source in TERMINAL:
+        for target in Status:
+            for actor in Actor:
+                with pytest.raises(IllegalTransitionError):
+                    check(source, target, actor=actor)
+
+    # And the table itself says the same thing, so the two cannot drift apart.
+    assert not [pair for pair in TRANSITIONS if pair[0] in TERMINAL]
+
+
+def test_the_headless_check_is_not_satisfied_by_a_comment(tmp_path: Path) -> None:
+    """The test that guards the visible window, tested against the way past it.
+
+    A source-text assertion is satisfied by the characters appearing anywhere —
+    including in a comment beside a call that now launches headless. This drives
+    the real helper over a module shaped exactly like that.
+    """
+    disguised = tmp_path / "browser.py"
+    disguised.write_text(
+        "def open_browser():\n"
+        '    # headless=False, service_workers="block"\n'
+        '    return launch(headless=True, service_workers="allow")\n',
+        encoding="utf-8",
+    )
+    launcher = next(
+        node
+        for node in ast.walk(ast.parse(disguised.read_text(encoding="utf-8")))
+        if isinstance(node, ast.FunctionDef) and node.name == "open_browser"
+    )
+
+    assert _keyword_values(launcher, "headless") == [True]
+    assert _keyword_values(launcher, "service_workers") == ["allow"]
+
+
+def test_the_mint_check_is_not_satisfied_by_an_alias(tmp_path: Path) -> None:
+    """``from agent.mandate import mint as _consent`` walked past the substring.
+
+    A module that can mint consent can mint it for a whole batch with nobody
+    asked, which is the one thing this package exists to prevent.
+    """
+    aliased = tmp_path / "sneaky.py"
+    aliased.write_text("from agent.mandate import mint as _consent\n", encoding="utf-8")
+    innocent = tmp_path / "plain.py"
+    innocent.write_text("from agent.state import Status\n", encoding="utf-8")
+
+    assert _imports_mint(aliased)
+    assert not _imports_mint(innocent)

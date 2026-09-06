@@ -14,10 +14,18 @@ believed.
 **Why the evidence and not a date.** The obvious version of this file is a
 constant with ``# checked 2026-09-06`` beside it. That reduces the whole
 guarantee to "somebody typed a date", and a date is the easiest thing in the
-world to type next to a guess. :func:`assert_ready_to_apply` instead requires
-that the probe's own output file exists on disk and that it contains the query
-string verbatim. "Verified" then means a file recorded seeing it, and promoting
-a guess takes forging a probe run rather than editing one line.
+world to type next to a guess. :func:`assert_ready_to_apply` instead parses the
+probe's own report and requires that every ``data-qa`` the query depends on is
+one the probe recorded seeing, on the stage that can see the form, in a session
+it measured as logged in.
+
+The first version of that check asked whether the query string appeared anywhere
+in the file as text, and it was wrong in both directions at once. ``json.dumps``
+escapes the quotes inside ``[data-qa="…"]``, so a correctly written selector
+could never match — the documented unblocking procedure could not be completed.
+And any substring of the file could match, so a URL fragment, the JSON key
+``letterMaxLength`` and the single letter "a" all passed, as did a one-line file
+that is not even valid JSON. Both halves are now tested.
 
 **Why scope matters.** ``APPLY_LINK`` below was measured — but measured
 *logged out*, by fetching three public vacancy pages. That is genuinely useful
@@ -35,11 +43,13 @@ outstanding at once, so the message is "you have not run the probe yet" and the
 answer is one command.
 """
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, final
+from typing import Any, Final, final
 
 #: Where ``probe_apply.py`` writes what it saw. One directory per run; the file
 #: inside is what :func:`assert_ready_to_apply` reads back.
@@ -165,14 +175,100 @@ class SelectorsNotVerifiedError(Exception):
     """
 
 
+#: The ``data-qa`` names inside a Playwright query. ``[data-qa="x"]`` and
+#: ``[data-qa^="x"]`` are the only two forms this package writes, and the second
+#: one matches by prefix, which is how it is checked below.
+_DATA_QA_IN_QUERY: Final[re.Pattern[str]] = re.compile(r'\[data-qa(\^?)="([^"]+)"\]')
+
+
+def names_in(query: str) -> list[tuple[str, bool]]:
+    """The ``data-qa`` names this query depends on, and whether each is a prefix.
+
+    A query naming none of them cannot be checked against a probe report, and
+    :func:`assert_ready_to_apply` treats that as a selector that has not been
+    verified rather than as one with nothing to verify.
+    """
+    return [(name, bool(caret)) for caret, name in _DATA_QA_IN_QUERY.findall(query)]
+
+
+def _recorded_names(report: dict[str, Any]) -> set[str]:
+    """Every ``data-qa`` the probe actually saw, from whichever stage wrote it.
+
+    Reads the report as JSON rather than as text. The previous version asked
+    whether the query string appeared anywhere in the file, which was wrong in
+    both directions at once: ``json.dumps`` escapes the quotes in
+    ``[data-qa="…"]`` so a correctly written selector could never match, while
+    any substring of the file could — a URL fragment, the JSON key
+    ``letterMaxLength``, or the single letter "a". The claim in this module's
+    docstring, that promoting a guess takes forging a probe run rather than
+    editing one line, was false until this was fixed.
+    """
+    names: set[str] = set()
+    for key in ("data_qa", "data_qa_after_click"):
+        section = report.get(key)
+        if isinstance(section, dict):
+            found = section.get("candidates")
+            if isinstance(found, list):
+                names.update(str(name) for name in found)
+    return names
+
+
+def _evidence_problems(selector: "Selector") -> list[str]:
+    """Everything wrong with one filled-in selector's evidence, in words."""
+    path = selector.evidence_path()
+    if path is None or not path.is_file():
+        return [
+            f"  {selector.name}: ссылается на прогон {selector.evidence!r}, "
+            "а файла с результатами нет"
+        ]
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        return [f"  {selector.name}: {path.name} — не JSON ({error.msg})"]
+    if not isinstance(report, dict):
+        return [f"  {selector.name}: {path.name} — не отчёт прогона"]
+
+    problems: list[str] = []
+    # The scope field is typed by hand; this is the probe's own measurement of
+    # whether it was logged in, so that "authenticated" cannot be a claim.
+    if report.get("authenticated") is not True:
+        problems.append(
+            f"  {selector.name}: прогон {selector.evidence!r} сделан без авторизации — "
+            "форма отклика видна только под аккаунтом"
+        )
+    if report.get("stage") != "open-form":
+        problems.append(
+            f"  {selector.name}: прогон {selector.evidence!r} — этап "
+            f"{report.get('stage')!r}, а форму видит только open-form"
+        )
+    wanted = names_in(selector.query)
+    if not wanted:
+        return [
+            *problems,
+            f"  {selector.name}: в {selector.query!r} нет ни одного data-qa — "
+            "проверить такой селектор по отчёту нельзя",
+        ]
+    seen = _recorded_names(report)
+    for name, is_prefix in wanted:
+        matched = (
+            any(candidate.startswith(name) for candidate in seen) if is_prefix else name in seen
+        )
+        if not matched:
+            problems.append(
+                f"  {selector.name}: data-qa {name!r} нет среди увиденных в "
+                f"{path.name} — селектор не из этого прогона"
+            )
+    return problems
+
+
 def assert_ready_to_apply() -> None:
     """Refuse to start the apply flow unless every selector has evidence behind it.
 
-    Checks three things per selector, because each has been the way a guess got
-    promoted somewhere: that it claims an authenticated scope, that the run
-    directory it names exists, and that the report inside actually contains the
-    query. The last one is what makes this more than a checkbox — the string has
-    to appear in something the probe wrote.
+    Four things per selector, because each has been the way a guess got promoted
+    somewhere: that it claims an authenticated scope, that the run directory it
+    names exists, that the report there was written by a logged-in ``open-form``
+    run, and that every ``data-qa`` the query depends on is one the probe
+    recorded seeing. The last one is what makes this more than a checkbox.
     """
     problems: list[str] = []
     for selector in REQUIRED_FOR_APPLYING:
@@ -185,18 +281,7 @@ def assert_ready_to_apply() -> None:
                 "видна лишь под аккаунтом"
             )
             continue
-        path = selector.evidence_path()
-        if path is None or not path.is_file():
-            problems.append(
-                f"  {selector.name}: ссылается на прогон {selector.evidence!r}, "
-                "а файла с результатами нет"
-            )
-            continue
-        if selector.query not in path.read_text(encoding="utf-8"):
-            problems.append(
-                f"  {selector.name}: строки {selector.query!r} нет в {path.name} — "
-                "селектор не из этого прогона"
-            )
+        problems.extend(_evidence_problems(selector))
     if problems:
         raise SelectorsNotVerifiedError(
             "Селекторы формы отклика не проверены на живой странице под аккаунтом.\n"

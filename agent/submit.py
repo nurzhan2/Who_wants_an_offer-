@@ -10,22 +10,29 @@ turn this on without anyone re-designing it.
 
 The order below is the safety property, and every line of it earns its place:
 
-1. **Open the vacancy and read its state again.** The queue is a snapshot from a
-   crawl that may be hours old. A vacancy can close, be archived, or be applied
-   to from the phone in between.
-2. **Ask hh whether we have already applied**, and treat "cannot tell" as a
-   stop. This is the brief's pre-click idempotency check, and it is done against
-   the site rather than against the local journal because the journal is allowed
-   to be behind and the site is not.
-3. **Check the control belongs to this vacancy.** The apply link carries the
+1. **Open the page the human was shown.** The URL comes from the mandate, so it
+   is the regional host the confirmation card displayed. Rebuilding it from the
+   id against a hardcoded ``hh.kz``, as this used to, navigates somewhere else
+   and leans on a redirect nobody measured.
+2. **Read its state again and re-decide.** The queue is a snapshot from a crawl
+   that may be hours old: a vacancy can close, be archived, grow an employer
+   test, or be applied to from the phone in between. Everything the queue stage
+   could only guess at — the letter requirement, the test, the idempotency
+   reading — is decided here, by ``prefilter.decide``, against the page.
+3. **Treat "cannot tell" as a stop.** This is the brief's pre-click idempotency
+   check, done against the site rather than against the local journal because
+   the journal is allowed to be behind and the site is not.
+4. **Arm the gate, then open the form.** The armed window covers the whole
+   flow. It has to: the apply control is a link to an application-shaped URL, so
+   arming only around the final click — as this did — meant the gate aborted the
+   navigation that reveals the form, and nothing could ever be sent.
+5. **Check the control belongs to this vacancy.** The apply link carries the
    vacancy id in its href; comparing it against the mandate costs nothing and
    catches a stale tab, a mis-scrolled list, or a "similar vacancies" card.
-4. **Type the letter from the mandate**, never from the queue item. There is no
+6. **Type the letter from the mandate**, never from the queue item. There is no
    other string in scope, which is the point of the mandate carrying it.
-5. **Arm the gate and click.** Everything irreversible is inside that context
-   manager, it allows exactly one application-shaped request for exactly this
-   vacancy, and the mandate is spent on entry so a retry cannot reuse it.
-6. **Confirm from the page that it went**, and only then write ``sent``.
+7. **Confirm from the page that it went**, and only then write ``sent``. The
+   gate can say a request left; only hh can say an application exists.
 
 A captcha anywhere in this sequence is not an error to retry. It raises, the
 window is brought to the front, and a person deals with it — the brief's first
@@ -34,9 +41,10 @@ boundary, and the one place where the right behaviour is to stop and wait.
 
 from typing import Any, final
 
-from agent import selectors
+from agent import prefilter, selectors
 from agent.gate import SubmitGate
 from agent.mandate import SendMandate
+from agent.prefilter import Verdict
 from agent.state_page import read_applied, read_state
 
 
@@ -81,7 +89,7 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> None:
     """
     selectors.assert_ready_to_apply()
 
-    page.goto(f"https://hh.kz/vacancy/{mandate.vacancy_id}", wait_until="domcontentloaded")
+    page.goto(mandate.url, wait_until="domcontentloaded")
     content = page.content()
     if looks_like_a_captcha(content):
         page.bring_to_front()
@@ -93,29 +101,50 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> None:
     state = read_state(content)
     if state is None:
         raise IdempotencyUnknownError("не удалось прочитать состояние страницы")
-    applied = read_applied(state, mandate.vacancy_id)
-    if applied is None:
-        raise IdempotencyUnknownError("hh не сообщил, отправляли ли мы уже отклик на эту вакансию")
-    if applied:
-        raise AlreadyAppliedError(f"на вакансию {mandate.vacancy_id} отклик уже есть")
 
-    link = page.locator(selectors.APPLY_LINK.query)
-    href = link.get_attribute("href") or ""
-    if mandate.vacancy_id not in href:
-        raise WrongVacancyError(f"кнопка отклика ведёт не на вакансию {mandate.vacancy_id}: {href}")
+    # The page stage of the prefilter, which is where it was always meant to
+    # run: `decide` takes the letter requirement, the employer test and the
+    # idempotency reading, and none of the three is knowable from the queue.
+    # Until this call existed the module's own docstring described checks that
+    # no code performed, and an employer test was never detected at all.
+    view = state.get("vacancyView") or {}
+    decision = prefilter.decide(
+        facts=prefilter.read(state, mandate.vacancy_id),
+        closed_for_applicants=bool(view.get("closedForApplicants")),
+        archived=bool(view.get("archived")),
+        already_applied=read_applied(state, mandate.vacancy_id),
+        has_letter=mandate.letter is not None,
+    )
+    if decision.verdict is Verdict.SKIP:
+        raise AlreadyAppliedError(decision.reason)
+    if decision.verdict is not Verdict.PROCEED:
+        raise IdempotencyUnknownError(decision.reason)
 
-    link.click()
-    page.wait_for_selector(selectors.RESPONSE_FORM.query, timeout=15_000)
-
-    if mandate.letter is not None:
-        page.fill(selectors.LETTER_FIELD.query, mandate.letter)
-
-    # The one irreversible step, and the only place it can happen. Outside this
-    # block the gate aborts every application-shaped request.
+    # Everything from here on is inside the window the human opened. It has to
+    # cover the apply link too: following it is a request to an application URL,
+    # and a gate armed only around the final click aborts it.
     with gate.armed(mandate):
+        link = page.locator(selectors.APPLY_LINK.query)
+        href = link.get_attribute("href") or ""
+        if mandate.vacancy_id not in href:
+            raise WrongVacancyError(
+                f"кнопка отклика ведёт не на вакансию {mandate.vacancy_id}: {href}"
+            )
+
+        link.click()
+        page.wait_for_selector(selectors.RESPONSE_FORM.query, timeout=15_000)
+
+        if mandate.letter is not None:
+            page.fill(selectors.LETTER_FIELD.query, mandate.letter)
+
+        # The irreversible step. Counting the window before and after says
+        # whether this click put anything on the wire — the previous version
+        # asked whether the gate had ever allowed anything, which was true
+        # already from the navigation above.
+        before = gate.requests_in_window()
         page.click(selectors.SUBMIT_BUTTON.query)
         page.wait_for_timeout(2_000)
-        gate.require_sent(mandate)
+        gate.require_progress(mandate, since=before)
 
     # Believe the site, not the click: re-read and confirm hh agrees.
     after = read_state(page.content())

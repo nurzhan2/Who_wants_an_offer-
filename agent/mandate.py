@@ -85,9 +85,9 @@ def digest(text: str | None) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
-def _sign(vacancy_id: str, letter: str | None, form_digest: str) -> str:
+def _sign(vacancy_id: str, url: str, letter: str | None, form_digest: str) -> str:
     """The signature binding one mandate to one exact payload."""
-    material = f"{vacancy_id}\x00{digest(letter)}\x00{form_digest}".encode()
+    material = f"{vacancy_id}\x00{url}\x00{digest(letter)}\x00{form_digest}".encode()
     return hmac.new(_SECRET, material, hashlib.sha256).hexdigest()
 
 
@@ -105,6 +105,11 @@ class SendMandate:
     #: The vacancy this consent is for. Compared against the page before the
     #: click, so a stale or mis-scrolled page cannot borrow it.
     vacancy_id: str
+    #: The page the human was shown, and the page the submitter opens. Signed
+    #: like everything else here: the agent used to rebuild a URL from the id
+    #: against a hardcoded ``hh.kz``, which is a different page from the
+    #: regional ``almaty.hh.kz`` link the confirmation card displayed.
+    url: str
     #: Exactly the letter the human saw. The submitter types this and has no
     #: other string in scope to type.
     letter: str | None
@@ -118,7 +123,7 @@ class SendMandate:
     def __post_init__(self) -> None:
         """Refuse to exist if the signature does not match the contents."""
         if not hmac.compare_digest(
-            self.signature, _sign(self.vacancy_id, self.letter, self.form_digest)
+            self.signature, _sign(self.vacancy_id, self.url, self.letter, self.form_digest)
         ):
             raise ForgedMandateError("mandate does not match the payload it carries")
 
@@ -133,17 +138,18 @@ class SendMandate:
         raise TypeError("a SendMandate must not cross a process boundary")
 
 
-def mint(*, vacancy_id: str, letter: str | None, form_digest: str) -> SendMandate:
+def mint(*, vacancy_id: str, url: str, letter: str | None, form_digest: str) -> SendMandate:
     """Create consent for one application. Call this from the confirmation only.
 
     Deliberately not named ``create``: every call site is a place where a human
     said yes, and the word should look wrong anywhere else. ``test_boundaries``
     asserts that this module's only production caller is ``agent/human.py``.
     """
-    signature = _sign(vacancy_id, letter, form_digest)
+    signature = _sign(vacancy_id, url, letter, form_digest)
     _LIVE.add(signature)
     return SendMandate(
         vacancy_id=vacancy_id,
+        url=url,
         letter=letter,
         form_digest=form_digest,
         signature=signature,
@@ -159,8 +165,18 @@ def verify(mandate: SendMandate) -> None:
     that catches it. Spending is part of the same call so that no caller can
     verify without consuming — a check that leaves the mandate usable is a check
     a retry loop walks straight past.
+
+    An object that skipped its constructor may also be missing fields outright,
+    and reading one raises ``AttributeError`` rather than anything a caller
+    catches. That is still a refusal, but of the wrong kind, in the one function
+    whose failures must all be ``MandateError`` — so it is converted here.
     """
-    expected = _sign(mandate.vacancy_id, mandate.letter, mandate.form_digest)
+    try:
+        expected = _sign(mandate.vacancy_id, mandate.url, mandate.letter, mandate.form_digest)
+    except AttributeError as error:
+        raise ForgedMandateError(
+            "mandate is missing fields its constructor would have set"
+        ) from error
     if not hmac.compare_digest(mandate.signature, expected):
         raise ForgedMandateError("mandate does not match the payload it carries")
     if mandate.signature not in _LIVE:

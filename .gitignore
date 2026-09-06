@@ -46,6 +46,13 @@ agent/screenshots/
 agent/*.sqlite3
 agent/queue.json
 agent/answers/
+# The probe's reports and the session signal are measurements of a logged-in
+# session: a report carries the owner's own application state for a vacancy and
+# the top-level keys of their authenticated page. Evidence for the selectors,
+# not something to publish.
+agent/probe/
+agent/queue-results.json
+agent/session_signal.json
 
 # OS / IDE
 .DS_Store

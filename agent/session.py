@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Any, final
 
-from agent.login import SIGNAL_PATH
+from agent.login import PROBE_URL, SIGNAL_PATH
 
 
 @final
@@ -60,10 +60,53 @@ def check(state: dict[str, Any], *, signal: list[str]) -> None:
     filled, and a check that accepts one surviving key out of eight will pass
     for months after the session has actually gone.
     """
-    missing = [key for key in signal if not state.get(key)]
+    missing = missing_signal_keys(state, signal=signal)
     if missing:
         raise SessionExpiredError(
             "Сессия hh больше не активна — пропали признаки входа: "
             f"{', '.join(missing[:5])}.\n"
             "Войдите заново: uv run python -m agent.login"
         )
+
+
+def missing_signal_keys(state: dict[str, Any], *, signal: list[str]) -> list[str]:
+    """Which recorded signs of an account are absent from this page state.
+
+    The measuring half of :func:`check`, split out because two callers need the
+    answer without the exception: the probe records whether its run was
+    authenticated, and ``agent/selectors.py`` refuses evidence from a run that
+    was not.
+    """
+    return [key for key in signal if not state.get(key)]
+
+
+def looks_authenticated(state: dict[str, Any], path: Path = SIGNAL_PATH) -> bool:
+    """Whether this page state carries every recorded sign of the owner's account.
+
+    False when the signal has never been measured, which is the honest answer:
+    without ``session_signal.json`` nothing here knows what a logged-in page
+    looks like, and "I cannot tell" must not be recorded as "yes".
+    """
+    try:
+        signal = load_signal(path)
+    except (SignalUnknownError, json.JSONDecodeError):
+        return False
+    return not missing_signal_keys(state, signal=signal)
+
+
+def signal_source(path: Path = SIGNAL_PATH) -> str:
+    """The page the signal was measured on, so the check can use the same one.
+
+    The keys ``login.py`` records are the ones that appear on a *vacancy* page
+    after signing in. Asserting them somewhere else compares two different
+    documents: a run used to check them against hh's front page, where several
+    of those keys simply do not exist, so a live session could read as expired
+    forever. Falling back to ``login.PROBE_URL`` keeps an older signal file
+    working.
+    """
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return PROBE_URL
+    recorded = payload.get("probe_url")
+    return recorded if isinstance(recorded, str) and recorded.startswith("https://") else PROBE_URL

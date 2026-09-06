@@ -55,18 +55,32 @@ class Candidate:
 
         Everything that affects what gets sent appears here: if a field is not
         rendered, a change to it cannot invalidate the confirmation, so anything
-        added to this class belongs in this method too.
+        added to this class belongs in this method too. That rule is the reason
+        for both of the things below that look like clutter.
+
+        **The vacancy id is printed.** It is the key everything downstream acts
+        on — the journal row, the gate's comparison, the page the submitter
+        opens — and it was the one field the card did not show. A queue item
+        whose url and id disagree would have been confirmed on the strength of a
+        title and a link that had nothing to do with the application actually
+        sent.
+
+        **The letter is printed whole.** It used to be cut at 200 characters,
+        which meant the human was asked to approve text they had not read, in
+        an employer-facing message they did not write — the backend generates
+        it. A long letter is a long prompt; that is the correct cost.
         """
         lines = [
             f"{self.title} — {self.company or 'без компании'}",
+            f"  вакансия {self.vacancy_id}",
             f"  {self.url}",
         ]
         if self.letter is None:
             lines.append("  без сопроводительного письма")
         else:
-            preview = " ".join(self.letter.text.split())
-            head = preview[:200] + ("…" if len(preview) > 200 else "")
-            lines.append(f"  письмо ({len(self.letter)} симв.): {head}")
+            body = "\n".join(f"  │ {line}" for line in self.letter.text.splitlines())
+            lines.append(f"  письмо ({len(self.letter)} симв.):")
+            lines.append(body)
         return "\n".join(lines)
 
 
@@ -120,6 +134,7 @@ def confirm(
     return [
         mint(
             vacancy_id=candidate.vacancy_id,
+            url=candidate.url,
             letter=None if candidate.letter is None else candidate.letter.text,
             form_digest=digest(candidate.render()),
         )
@@ -148,6 +163,10 @@ def _read_drops(src: TextIO, out: TextIO, count: int) -> set[int]:
         if not raw:
             return set()
         parts = raw.replace(",", " ").split()
-        if all(part.isdigit() and 1 <= int(part) <= count for part in parts):
+        # ASCII digits only. `str.isdigit()` is True for superscripts like «²»,
+        # which `int()` then refuses — and the ValueError escaped this loop, the
+        # confirmation and main(), so a typo in the drop line ended the run in a
+        # traceback instead of the re-ask this function promises.
+        if all(part.isascii() and part.isdigit() and 1 <= int(part) <= count for part in parts):
             return {int(part) for part in parts}
         print(f"Нужны номера от 1 до {count}, через пробел.", file=out)

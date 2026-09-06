@@ -48,7 +48,7 @@ from agent.prefilter import Verdict, decide_before_opening
 from agent.queue import FileQueue, QueueItem, Result
 from agent.selectors import SelectorsNotVerifiedError, assert_ready_to_apply
 from agent.session import check as session_check
-from agent.session import load_signal
+from agent.session import load_signal, signal_source
 from agent.state import Actor, Status
 from agent.state_page import APPLIED_MARKERS, read_state
 from agent.submit import (
@@ -58,9 +58,6 @@ from agent.submit import (
     WrongVacancyError,
     submit,
 )
-
-#: hh's front page: somewhere harmless to land while the session is checked.
-HH_HOME: Final[str] = "https://hh.kz/"
 
 #: How many queue items one run will even look at. Well under the daily cap so a
 #: single run cannot exhaust the day's budget by itself.
@@ -112,7 +109,8 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
             continue
         # The queue stage, which knows only what the crawler stored. The
         # letter requirement, the employer test and whether we have already
-        # applied all live on the page and are decided there, in submit().
+        # applied all live on the page, and submit() decides them there against
+        # prefilter.decide before it touches anything.
         decision = decide_before_opening(
             closed_for_applicants=item.closed_for_applicants,
             archived=item.archived,
@@ -226,6 +224,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Ничего не отправлено: {exc}")
         return 0
 
+    # The human has now said yes to each of these, so the journal says so too —
+    # before anything opens. Without this write the run went from `queued`
+    # straight at `sent`, a pair the state machine does not have, and the
+    # IllegalTransitionError landed *after* the application had left: no `sent`
+    # row, no results file, no escape check, and the next run offering the same
+    # vacancy again because its row still read `queued`.
+    for mandate in mandates:
+        journal.record(Entry(mandate.vacancy_id, Status.CONFIRMED), actor=Actor.HUMAN)
+
     gate = SubmitGate()
     rng = random.Random()
     results: list[Result] = []
@@ -236,7 +243,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         context.route("**/*", gate.handle)
         page.on("request", gate.observe)
         signal = load_signal()
-        page.goto(HH_HOME, wait_until="domcontentloaded")
+        # Checked on the same kind of page the signal was measured on. login.py
+        # records the keys that appear on a *vacancy* page after signing in, and
+        # asserting them against the home page compared two different documents:
+        # keys that are simply absent from the front page read as an expired
+        # session, and a run could refuse forever on a perfectly good login.
+        page.goto(signal_source(), wait_until="domcontentloaded")
         # The health check reads the page rather than the navigation result: a
         # session that has expired still serves a perfectly good 200.
         session_check(read_state(page.content()) or {}, signal=signal)
@@ -265,7 +277,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Entry(mandate.vacancy_id, status, reason=str(exc)), actor=Actor.AGENT
                 )
                 results.append(Result(mandate.vacancy_id, status.value, str(exc)))
-                consecutive_failures = 0 if status is Status.SKIPPED else consecutive_failures
+                # A skip is a normal outcome; the other three are not. A captcha
+                # in particular is the case the brief calls stop-and-wait, and
+                # this used to be a no-op assignment on that branch — so hh could
+                # challenge every vacancy in the batch, the window would be
+                # raised twenty times, and the run would exit 0 saying nothing
+                # was sent.
+                consecutive_failures = 0 if status is Status.SKIPPED else consecutive_failures + 1
                 continue
             except Exception as exc:
                 screenshot_on_error(page, f"fail-{mandate.vacancy_id}")

@@ -33,7 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Final, final
 
-from agent.state import Actor, Status, check
+from agent.state import Actor, Status, check, check_initial
 
 SCHEMA: Final[str] = """
 CREATE TABLE IF NOT EXISTS application (
@@ -120,7 +120,12 @@ class Journal:
         """
         now = datetime.now(UTC).isoformat()
         previous = self.get(entry.vacancy_id)
-        if previous is not None and previous.status is not entry.status:
+        if previous is None:
+            # A first sighting has no source status to look up, which used to
+            # mean no check at all — and that let one call create a row already
+            # at ``sent`` or at ``confirmed``.
+            check_initial(entry.status, actor=actor)
+        elif previous.status is not entry.status:
             check(previous.status, entry.status, actor=actor)
         with self._connect() as connection:
             connection.execute(

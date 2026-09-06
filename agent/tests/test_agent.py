@@ -20,10 +20,10 @@ from typing import Any
 
 import pytest
 
-from agent.gate import SubmitGate, UnmandatedRequestError, vacancy_id_in
+from agent.gate import SubmitGate, UnmandatedRequestError, vacancy_id_in, vacancy_ids_in
 from agent.journal import Entry, Journal
 from agent.letter import DEFAULT_MAX_LENGTH, LetterProblem, UnsafeLetterError, check, inspect
-from agent.mandate import mint
+from agent.mandate import digest, mint
 from agent.prefilter import Verdict, decide, decide_before_opening, read
 from agent.queue import CONTRACT_VERSION, FileQueue, QueueFormatError, QueueItem
 from agent.state import Actor, Status
@@ -205,17 +205,27 @@ def test_not_knowing_whether_we_applied_is_never_treated_as_not_having_applied()
 
 @dataclass
 class FakeRequest:
-    """The two attributes the gate reads."""
+    """The three attributes the gate reads, and one way for the third to fail."""
 
     url: str
     method: str = "GET"
+    _post_data: str | None = None
+    #: Playwright raises on some request bodies instead of returning None.
+    explode_on_body: bool = False
+
+    @property
+    def post_data(self) -> str | None:
+        """The body, or an exception the gate has to survive."""
+        if self.explode_on_body:
+            raise RuntimeError("playwright declines to produce this body")
+        return self._post_data
 
 
 class FakeRoute:
     """A Playwright route, without Playwright."""
 
-    def __init__(self, url: str, method: str = "GET") -> None:
-        self.request = FakeRequest(url, method)
+    def __init__(self, url: str, method: str = "GET", post_data: str | None = None) -> None:
+        self.request = FakeRequest(url, method, post_data)
         self.action: str | None = None
 
     def abort(self, error_code: str = "failed") -> None:
@@ -229,7 +239,10 @@ class FakeRoute:
 
 APPLY_URL = "https://hh.kz/applicant/vacancy_response?vacancyId=136773120&employerId=99"
 OTHER_URL = "https://hh.kz/applicant/vacancy_response?vacancyId=999999999"
-READ_URL = "https://hh.kz/vacancy/136773120"
+READ_URL = "https://almaty.hh.kz/vacancy/136773120"
+#: What the form itself sends, once it is open. A second application-shaped URL
+#: for the same job - which is why one arming has to allow more than one request.
+SEND_URL = "https://hh.kz/applicant/vacancy_response?vacancyId=136773120&lux=true"
 
 
 def test_an_application_request_with_no_consent_armed_is_refused() -> None:
@@ -243,30 +256,108 @@ def test_an_application_request_with_no_consent_armed_is_refused() -> None:
     assert gate.blocked == [APPLY_URL]
 
 
-def test_consent_allows_exactly_one_request_for_exactly_one_vacancy() -> None:
-    """A second request under the same arming is a second application."""
+def test_consent_covers_this_vacancy_and_nothing_repeats_inside_it() -> None:
+    """The window is the flow, so the form-opening request and the send both pass.
+
+    What is refused inside it: the same URL twice (a retry of an application is
+    a second application) and any URL naming another vacancy. What is refused
+    outside it: everything.
+    """
     gate = SubmitGate()
-    mandate = mint(vacancy_id="136773120", letter=None, form_digest="d")
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
 
     with gate.armed(mandate):
-        first, again, elsewhere = (
+        opening, sending, again, elsewhere = (
             FakeRoute(APPLY_URL),
+            FakeRoute(SEND_URL),
             FakeRoute(APPLY_URL),
             FakeRoute(OTHER_URL),
         )
-        gate.handle(first)
+        gate.handle(opening)
+        gate.handle(sending)
         gate.handle(again)
         gate.handle(elsewhere)
 
     after = FakeRoute(APPLY_URL)
     gate.handle(after)
 
-    assert [first.action, again.action, elsewhere.action, after.action] == [
+    assert [opening.action, sending.action, again.action, elsewhere.action, after.action] == [
+        "continue",
         "continue",
         "abort",
         "abort",
         "abort",
     ]
+
+
+def test_a_repeat_is_refused_even_with_something_else_in_between() -> None:
+    """The old guard compared only the previously allowed URL, so A, B, A passed."""
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+
+    with gate.armed(mandate):
+        first, other, repeat = FakeRoute(APPLY_URL), FakeRoute(SEND_URL), FakeRoute(APPLY_URL)
+        gate.handle(first)
+        gate.handle(other)
+        gate.handle(repeat)
+
+    assert [first.action, other.action, repeat.action] == ["continue", "continue", "abort"]
+
+
+@pytest.mark.parametrize(
+    "url,body",
+    [
+        # The four spellings of "this request is about vacancy 999999999".
+        ("https://hh.kz/applicant/vacancy_response?vacancyId=999999999", None),
+        ("https://hh.kz/applicant/vacancy_response?vacancyId%3D999999999", None),
+        ("https://hh.kz/applicant/vacancy_response/999999999?vacancyId=136773120", None),
+        (
+            "https://hh.kz/applicant/vacancy_response?vacancyId=136773120",
+            '{"vacancyId": "999999999", "letter": ""}',
+        ),
+    ],
+)
+def test_a_cross_vacancy_request_is_refused_however_it_names_the_other_job(
+    url: str, body: str | None
+) -> None:
+    """Three of these four walked through the query-string-only version."""
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+    route = FakeRoute(url, post_data=body)
+
+    with gate.armed(mandate):
+        gate.handle(route)
+
+    assert route.action == "abort"
+    assert "999999999" in gate.refused_because[-1]
+
+
+def test_the_gate_survives_a_request_whose_body_cannot_be_read() -> None:
+    """Playwright raises on some bodies, and a gate that dies while deciding fails open."""
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+    route = FakeRoute(APPLY_URL)
+    route.request.explode_on_body = True
+
+    with gate.armed(mandate):
+        gate.handle(route)
+
+    assert route.action == "continue"
+
+
+def test_playwright_can_actually_register_the_gate_as_a_route_handler() -> None:
+    """The gate must not be a slots dataclass, and only playwright can say so.
+
+    ``wrap_handler`` caches its wrapper with ``setattr`` on the bound method's
+    owner. Against a slots instance that raises AttributeError - on the first
+    line after the browser opens, which is right after the human confirmed.
+    Every other test here uses hand-written fakes and cannot see it.
+    """
+    mapping = pytest.importorskip("playwright._impl._impl_to_api_mapping")
+    gate = SubmitGate()
+
+    mapping.ImplToApiMapping().wrap_handler(gate.handle)
+    mapping.ImplToApiMapping().wrap_handler(gate.observe)
 
 
 def test_reading_a_vacancy_page_is_not_an_application() -> None:
@@ -288,19 +379,37 @@ def test_a_request_that_never_reached_the_interceptor_is_reported() -> None:
         gate.assert_no_escapes()
 
 
-def test_the_gate_notices_when_nothing_was_actually_sent() -> None:
+def test_the_gate_notices_when_the_submit_click_sent_nothing() -> None:
     """A click that silently did nothing must not be recorded as an application."""
     gate = SubmitGate()
-    mandate = mint(vacancy_id="1", letter=None, form_digest="d")
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
 
-    with pytest.raises(UnmandatedRequestError):
-        gate.require_sent(mandate)
+    with gate.armed(mandate):
+        gate.handle(FakeRoute(APPLY_URL))
+        before = gate.requests_in_window()
+        # ...and the submit click produces nothing at all.
+        with pytest.raises(UnmandatedRequestError):
+            gate.require_progress(mandate, since=before)
 
 
-def test_the_vacancy_is_read_out_of_the_url_the_way_hh_writes_it() -> None:
-    """Measured shape: ?vacancyId=<digits>&employerId=…&hhtmFrom=…"""
+def test_progress_is_measured_from_the_click_not_from_the_whole_window() -> None:
+    """The form-opening request must not be mistaken for the application."""
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+
+    with gate.armed(mandate):
+        gate.handle(FakeRoute(APPLY_URL))
+        before = gate.requests_in_window()
+        gate.handle(FakeRoute(SEND_URL))
+        gate.require_progress(mandate, since=before)
+
+
+def test_the_vacancy_is_read_out_of_the_url_however_it_is_written() -> None:
+    """Measured shape, plus the path form a page URL uses."""
     assert vacancy_id_in(APPLY_URL) == "136773120"
-    assert vacancy_id_in(READ_URL) is None
+    assert vacancy_id_in(READ_URL) == "136773120"
+    assert vacancy_ids_in(SEND_URL, '{"vacancyId": "999999999"}') == {"136773120", "999999999"}
+    assert vacancy_id_in("https://hh.kz/search/vacancy?text=python") is None
 
 
 # ── the journal and the queue ─────────────────────────────────────────
@@ -331,16 +440,26 @@ def test_one_vacancy_is_one_row_however_often_it_is_seen() -> None:
 
 
 def test_the_letter_itself_never_reaches_the_journal() -> None:
-    """A file of somebody's cover letters is a thing to leak, and the digest proves as much."""
+    """A file of somebody's cover letters is a thing to leak.
+
+    The assertion that matters is the *absence* of the text. This test used to
+    check that the digest was present, which is the opposite direction: writing
+    the whole letter into that column left it green.
+    """
+    letter = "Здравствуйте! Меня зовут Нуржан, и я хотел бы работать у вас."
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "agent.sqlite3"
         journal = Journal(path)
         journal.record(
-            Entry("1", Status.QUEUED, letter_digest="abc123"),
+            Entry("1", Status.QUEUED, letter_digest=digest(letter)),
             actor=Actor.AGENT,
         )
 
-        assert "abc123" in path.read_bytes().decode("utf-8", "ignore")
+        written = path.read_bytes().decode("utf-8", "ignore")
+        assert letter not in written, "the cover letter is stored verbatim on disk"
+        for fragment in ("Нуржан", "Здравствуйте"):
+            assert fragment not in written
+        assert digest(letter) in written
 
 
 def test_a_queue_entry_without_a_usable_id_or_url_is_refused() -> None:

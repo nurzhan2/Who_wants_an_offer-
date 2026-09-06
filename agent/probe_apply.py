@@ -40,10 +40,18 @@ about the fresh one, the honest answer is in the report: this design cannot
 learn the submit selector without risking one unconfirmed application, and that
 is the owner's decision to make, not this program's.
 
-Belt and braces on top of the refusal, never instead of it: every request whose
-URL looks like an application is aborted regardless of method, and a separate
-``page.on("request")`` recorder shouts if anything reached such a URL without
-passing the interceptor — which is what a service worker would look like.
+**The interceptor here refuses other vacancies, not this one.** The first
+version aborted every application-shaped request, and that included the
+navigation the apply link itself performs: the click landed on a Chromium error
+page, ``data_qa_after_click`` came back empty, and the procedure the README
+documents for unblocking the package could not be completed by anyone. It read
+like a second safety net and was in fact a hole in the floor.
+
+So the refusal above is the safety, and this is what it leaves: requests naming
+this one vacancy proceed, requests naming any other are aborted and reported,
+and a separate ``page.on("request")`` recorder shouts if anything reached an
+application URL without passing the interceptor at all — which is what a service
+worker would look like.
 
     uv run python -m agent.probe_apply --stage inspect  --url https://hh.kz/vacancy/123
     uv run python -m agent.probe_apply --stage open-form --url ... --already-applied
@@ -58,8 +66,9 @@ from pathlib import Path
 from typing import Any, final
 
 from agent.browser import open_browser, screenshot_on_error
-from agent.gate import looks_like_an_application
+from agent.gate import looks_like_an_application, post_body, vacancy_ids_in
 from agent.selectors import PROBE_DIR, PROBE_FILENAME
+from agent.session import looks_authenticated
 from agent.state_page import read_state, vacancy_id_from_url
 
 #: Attributes worth reporting. Broad on purpose — a probe that only looked for
@@ -79,12 +88,15 @@ DATA_QA = re.compile(r'data-qa="([^"]+)"')
 class RequestLog:
     """Every application-shaped request, and whether the interceptor saw it."""
 
+    #: Application-shaped requests that were refused: another vacancy's.
     intercepted: list[str] = field(default_factory=list)
+    #: This vacancy's own, which were let through. See ``open_form``'s guard.
+    allowed: list[str] = field(default_factory=list)
     observed: list[str] = field(default_factory=list)
 
     def escapes(self) -> list[str]:
         """URLs the page reported that the route handler never got."""
-        seen = set(self.intercepted)
+        seen = set(self.intercepted) | set(self.allowed)
         return [url for url in self.observed if url not in seen]
 
 
@@ -138,7 +150,11 @@ def inspect(url: str, *, already_applied: bool) -> dict[str, Any]:
         "vacancy_id": vacancy_id,
         "labelled_already_applied": already_applied,
         "stage": "inspect",
+        "authenticated": looks_authenticated(state),
         "data_qa": _collect_data_qa(content),
+        "selectors_ready_to_paste": [
+            f'[data-qa="{name}"]' for name in _collect_data_qa(content)["candidates"]
+        ],
         "applicant_vacancy_response_status": _response_status(state, vacancy_id),
         "vacancy_view_null_fields": {
             key: (state.get("vacancyView") or {}).get(key)
@@ -184,12 +200,31 @@ def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
     with open_browser() as context:
 
         def guard(route: Any) -> None:
-            """Abort anything application-shaped, by URL and never by method."""
+            """Let this vacancy's own response flow through; refuse every other.
+
+            The first version of this aborted *every* application-shaped
+            request, which included the navigation the apply link itself
+            performs — so the click landed on a Chromium error page, the report
+            came back with no candidates at all, and stage 0 could not be
+            completed. The whole package was unblockable by its own documented
+            procedure.
+
+            What carries the safety here is the ``--already-applied`` refusal
+            above, not this interceptor. The owner has said this vacancy already
+            has an application, so hh completing one on the navigation changes
+            nothing. Requests naming any *other* vacancy are still refused, and
+            everything is still recorded.
+            """
             request_url = route.request.url
-            if looks_like_an_application(request_url):
+            if not looks_like_an_application(request_url):
+                route.continue_()
+                return
+            strangers = vacancy_ids_in(request_url, post_body(route.request)) - {vacancy_id}
+            if strangers:
                 log.intercepted.append(request_url)
                 route.abort()
                 return
+            log.allowed.append(request_url)
             route.continue_()
 
         context.route("**/*", guard)
@@ -210,7 +245,9 @@ def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
                 "url": url,
                 "vacancy_id": vacancy_id,
                 "stage": "open-form",
+                "authenticated": False,
                 "error": f"{type(exc).__name__}: {exc}",
+                "requests_allowed": log.allowed,
                 "requests_blocked": log.intercepted,
                 "requests_escaped_interception": log.escapes(),
             }
@@ -221,9 +258,19 @@ def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
         "vacancy_id": vacancy_id,
         "labelled_already_applied": True,
         "stage": "open-form",
+        # Measured, not claimed. agent/selectors.py refuses evidence from a run
+        # this came back false for, because the response form is only visible
+        # under an account and a hand-typed scope proves nothing.
+        "authenticated": looks_authenticated(read_state(content) or {}),
         "data_qa_after_click": _collect_data_qa(content),
-        # Blocked, not sent: if this list is non-empty the response really is a
-        # request we can recognise, which is what agent/gate.py relies on.
+        "selectors_ready_to_paste": [
+            f'[data-qa="{name}"]' for name in _collect_data_qa(content)["candidates"]
+        ],
+        # This vacancy's own response requests, which were allowed through. If
+        # the list is non-empty the response really is a request we can
+        # recognise, which is what agent/gate.py relies on.
+        "requests_allowed": log.allowed,
+        # Requests naming some other vacancy. Should be empty.
         "requests_blocked": log.intercepted,
         # If this is non-empty the interception is not total and nothing this
         # package claims about consent holds. It is the loudest line in the report.

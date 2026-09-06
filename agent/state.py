@@ -79,6 +79,15 @@ TRANSITIONS: Final[dict[tuple[Status, Status], Actor]] = {
 #: back; ``SKIPPED`` because re-examining it is what the next run is for.
 TERMINAL: Final[frozenset[Status]] = frozenset({Status.SENT, Status.SKIPPED})
 
+#: States a vacancy may first appear in. The transition table above only governs
+#: rows that already exist, and a journal that skipped the check on a first
+#: write let the agent create a row directly at ``sent`` — which spends the daily
+#: cap — or at ``confirmed``, which is the one status only a human may produce.
+#: Both are absent here, so the choke point can reject them.
+INITIAL: Final[frozenset[Status]] = frozenset(
+    {Status.QUEUED, Status.SKIPPED, Status.NEEDS_MANUAL, Status.FAILED}
+)
+
 
 @final
 class IllegalTransitionError(Exception):
@@ -98,6 +107,37 @@ def check(source: Status, target: Status, *, actor: Actor) -> None:
     Raising means the only way to skip the check is to not call the function
     that performs the move, which a reader notices.
     """
+    if source in TERMINAL:
+        # Checked before the table rather than trusting the table to agree with
+        # it. ``TERMINAL`` was declared and never read, so adding a move out of
+        # ``sent`` was one line in a dict away from being legal — and the world
+        # does not take an application back.
+        raise IllegalTransitionError(source, target, actor)
     allowed = TRANSITIONS.get((source, target))
     if allowed is None or allowed is not actor:
         raise IllegalTransitionError(source, target, actor)
+
+
+@final
+class IllegalInitialStatusError(Exception):
+    """A vacancy was recorded for the first time in a status nothing reaches."""
+
+    def __init__(self, status: Status, actor: Actor) -> None:
+        self.status, self.actor = status, actor
+        super().__init__(
+            f"{actor.value} may not record a new application directly as {status.value}"
+        )
+
+
+def check_initial(status: Status, *, actor: Actor) -> None:
+    """Raise unless a vacancy may enter the journal in this status.
+
+    The transition table cannot answer this, because there is no source status
+    to look up — and that gap was a real hole rather than a theoretical one:
+    ``Journal.record`` ran no check at all when the row did not exist yet, so a
+    single call could create a row already at ``sent`` (counted against the day's
+    cap, indistinguishable from a real one) or at ``confirmed`` (the status
+    ``TRANSITIONS`` reserves for a human).
+    """
+    if status not in INITIAL:
+        raise IllegalInitialStatusError(status, actor)

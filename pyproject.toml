@@ -162,6 +162,11 @@ addopts = [
     "--strict-config",
     "-ra",
     "--cov=app",
+    # The agent's tests run in this session (see testpaths), so its code has to
+    # be inside the same gate. It was not: --cov=app with source=["backend/app"]
+    # produced a coverage.xml with zero agent files, and CI's --cov-fail-under
+    # therefore said nothing at all about the package this repository added last.
+    "--cov=agent",
     "--cov-report=term-missing",
     # Deselected, not skipped. conftest.py makes a skip fatal in CI so that a
     # green build means everything ran, and a test that deliberately talks to a
@@ -184,9 +189,9 @@ markers = [
 filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
 
 [tool.coverage.run]
-source = ["backend/app"]
+source = ["backend/app", "agent"]
 branch = true
-omit = ["backend/app/__init__.py"]
+omit = ["backend/app/__init__.py", "agent/__init__.py"]
 
 [tool.coverage.report]
 show_missing = true

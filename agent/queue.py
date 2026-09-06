@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol, final, runtime_checkable
 
+from agent.state_page import vacancy_id_from_url
+
 #: The contract's version, carried in the payload. A queue produced by an older
 #: backend than this agent expects is a thing to notice rather than to guess at.
 CONTRACT_VERSION: Final[int] = 1
@@ -69,6 +71,16 @@ class QueueItem:
             raise QueueFormatError(f"vacancy_id должен быть числовой строкой: {vacancy_id!r}")
         if not isinstance(url, str) or not url.startswith("https://"):
             raise QueueFormatError(f"url должен быть https-ссылкой: {url!r}")
+        # The two must agree. Everything downstream acts on the id — the journal
+        # row, the gate's comparison, the page the submitter opens — while the
+        # human reads the url on the confirmation card. Validating them
+        # separately, as this did, let one item send an application to a vacancy
+        # nobody had looked at.
+        in_url = vacancy_id_from_url(url)
+        if in_url is not None and in_url != vacancy_id:
+            raise QueueFormatError(
+                f"vacancy_id {vacancy_id!r} не совпадает с вакансией в ссылке: {url!r}"
+            )
         title = payload.get("title")
         return cls(
             vacancy_id=vacancy_id,
