@@ -191,6 +191,20 @@ class Settings(BaseSettings):
     #: used by tests and by anyone who does not want 3.8 GB on disk.
     embedding_provider: Literal["bge-m3", "fake"] = "bge-m3"
     embedding_batch_size: Annotated[int, Field(ge=1, le=256)] = 16
+    #: Vectors one run may compute. Measured on a CPU-only machine bge-m3 costs
+    #: about seven seconds a posting, so this is really the wall clock the
+    #: operator is willing to spend, expressed in rows. It replaces a hardcoded
+    #: 500 and is deliberately higher than it: the step now commits every batch,
+    #: so a long run is no longer all-or-nothing and a bigger cap risks nothing.
+    #: Checked between batches, so a run may overshoot it by at most one batch —
+    #: stopping inside a batch would discard vectors already computed, which is
+    #: the exact loss the step was rewritten to prevent.
+    embedding_max_per_run: Annotated[int, Field(ge=1)] = 2000
+    #: Wall clock one run may spend embedding, checked between batches so a batch
+    #: is never abandoned half-computed. Needed alongside the count because
+    #: neither bounds the other: a row served from the disk cache costs
+    #: microseconds and a cold one costs seconds.
+    embedding_time_budget_seconds: Annotated[float, Field(gt=0)] = 3600.0
     #: Vectors are cached on disk by sha256(text + model). Without it a full
     #: pipeline run re-encodes thousands of unchanged vacancies.
     embedding_cache_dir: Path | None = Path(".cache/embeddings")

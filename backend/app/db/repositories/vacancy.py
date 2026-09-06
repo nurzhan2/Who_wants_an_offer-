@@ -138,6 +138,37 @@ class BulkUpsertResult:
         return self.created + self.updated
 
 
+def _never_embedded() -> ColumnElement[bool]:
+    """Rows that have no vector at all, as opposed to one that may be stale.
+
+    The narrower half of :func:`_needs_embedding`, and the only half whose
+    answer does not depend on the text. A row matching this needs work whatever
+    its hash turns out to be, so counting these is how the step tells "the
+    window is hiding rows that genuinely have no vector" from "a re-crawl
+    touched a lot of rows and every one of them is already up to date" — two
+    situations the wider predicate reports identically.
+
+    This is exactly the partial index ``ix_pg_vacancy_needs_embedding`` covers,
+    so the count is an index-only scan rather than a table sweep.
+    """
+    return or_(Vacancy.embedding.is_(None), Vacancy.embedded_at.is_(None))
+
+
+def _needs_embedding() -> ColumnElement[bool]:
+    """The one definition of "this row's vector is suspect".
+
+    A vector is suspect when there is none, when nothing recorded computing one,
+    or when the row has been written since the vector was computed. Shared by
+    the windowed selection and the count so the two can never disagree about
+    which rows they are talking about.
+    """
+    return or_(
+        Vacancy.embedding.is_(None),
+        Vacancy.embedded_at.is_(None),
+        Vacancy.updated_at > Vacancy.embedded_at,
+    )
+
+
 class VacancyRepository:
     """All vacancy reads and writes."""
 
@@ -266,6 +297,35 @@ class VacancyRepository:
             vacancy_ids=tuple(row.id for row in vacancy_rows),
         )
 
+    async def count_needing_embedding(self) -> int:
+        """How many rows :meth:`needs_embedding` would offer if it had no window.
+
+        The windowed selection cannot answer "how much is left": it stops at its
+        limit, so a full window means "at least this many" and nothing more. The
+        embedding step reports a remainder to the operator, and a remainder that
+        is really a page size is worse than no number at all — it is the reason
+        a database holding 466 vacancies and no vectors looked healthy.
+
+        Same predicate as :meth:`needs_embedding`, deliberately shared rather
+        than retyped: two copies of it would drift, and the drift would show up
+        as a count that never reaches zero while the selection is empty.
+        """
+        stmt = select(func.count()).select_from(Vacancy).where(_needs_embedding())
+        return int((await self.session.execute(stmt)).scalar_one())
+
+    async def count_never_embedded(self) -> int:
+        """How many rows have no vector at all.
+
+        Answers the one question the wider count cannot: whether a window full
+        of already-current rows is hiding real work behind it. A row with no
+        vector needs one no matter what its text hash says, so a non-zero answer
+        here — after a pass that hashed a full window and found nothing to do —
+        means the selection's ordering really is starving the backlog. A zero
+        means the remainder is re-crawl churn and there is nothing to warn about.
+        """
+        stmt = select(func.count()).select_from(Vacancy).where(_never_embedded())
+        return int((await self.session.execute(stmt)).scalar_one())
+
     async def needs_embedding(self, *, limit: int = 500) -> list[EmbeddingCandidate]:
         """Rows whose vector may be missing or out of date.
 
@@ -288,13 +348,7 @@ class VacancyRepository:
                 Vacancy.description_raw,
                 Vacancy.embedding_text_hash,
             )
-            .where(
-                or_(
-                    Vacancy.embedding.is_(None),
-                    Vacancy.embedded_at.is_(None),
-                    Vacancy.updated_at > Vacancy.embedded_at,
-                )
-            )
+            .where(_needs_embedding())
             .order_by(Vacancy.last_seen_at.desc())
             .limit(limit)
         )

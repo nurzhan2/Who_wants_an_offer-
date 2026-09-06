@@ -3,7 +3,7 @@ UV ?= uv
 COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-embeddings dev test test-fast verify-embeddings parse-resume bench-ollama lint fmt typecheck check migrate revision up down logs seed fixtures
+.PHONY: help install install-embeddings dev test test-fast verify-embeddings embed-backlog parse-resume bench-ollama lint fmt typecheck check migrate revision up down logs seed fixtures
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -50,6 +50,12 @@ agent-run: ## Dry run by default; add s=--send to reach the confirmation
 
 verify-embeddings: ## Load the real bge-m3 model and prove it works
 	$(UV) run --extra embeddings python scripts/verify_embeddings.py
+
+embed-backlog: ## Compute the vectors the database is missing, without crawling
+	# Safe to interrupt: every batch is committed before the next is encoded, so
+	# whatever it has written stays written and the next run resumes behind it.
+	# Add a="--until-drained" to keep starting passes while one still has work.
+	$(UV) run --extra embeddings python scripts/embed_backlog.py $(a)
 
 parse-resume: ## Parse a resume end to end: make parse-resume f=path/to/cv.pdf
 	$(UV) run python scripts/parse_resume.py "$(f)"

@@ -15,6 +15,13 @@ This script is what closes that hole:
 It loads the model for real, encodes three texts in three languages, and prints
 the dimension, the time per document and whether the disk cache is working. It
 exits non-zero if anything is off, so CI can gate on it.
+
+It also turns the per-document cost into the number that actually decides how
+the pipeline behaves: how long a full embedding pass would take at this
+machine's speed. That projection is printed rather than asserted — a slow CPU is
+not a broken model — but it is printed loudly, because measuring seven seconds a
+document and only noticing an hour later that a run never finished is how the
+backlog got stuck in the first place.
 """
 
 import asyncio
@@ -41,6 +48,28 @@ def cosine(left: list[float], right: list[float]) -> float:
     norm_left = sum(a * a for a in left) ** 0.5
     norm_right = sum(b * b for b in right) ** 0.5
     return dot / (norm_left * norm_right)
+
+
+def project(per_document: float) -> None:
+    """Say what this machine's speed means for a full embedding pass.
+
+    The two budgets are independent caps and the step stops at whichever it
+    reaches first, so the useful question is which one bites here. On a machine
+    where a document costs seconds rather than milliseconds it is the clock, and
+    a pass then finishes far short of its row cap — which is fine, because every
+    batch is committed, but only if somebody knows to run it again.
+    """
+    rows = settings.embedding_max_per_run
+    budget = settings.embedding_time_budget_seconds
+    needed = per_document * rows
+    print(f"full pass         {rows} rows would take about {needed / 60:.0f} min at this speed")
+    if needed <= budget:
+        print(f"                  within the {budget / 60:.0f} min budget; the row cap binds first")
+        return
+    print(
+        f"                  the {budget / 60:.0f} min budget binds first: expect about "
+        f"{int(budget / per_document)} rows a pass, then run it again"
+    )
 
 
 async def main() -> int:
@@ -74,7 +103,9 @@ async def main() -> int:
     warm_started = time.perf_counter()
     vectors = await embeddings.encode_texts(SAMPLES[1:])
     warm_seconds = time.perf_counter() - warm_started
-    print(f"per document      {warm_seconds / len(SAMPLES[1:]) * 1000:.0f} ms (model warm)")
+    per_document = warm_seconds / len(SAMPLES[1:])
+    print(f"per document      {per_document * 1000:.0f} ms (model warm)")
+    project(per_document)
 
     cached_started = time.perf_counter()
     again = await embeddings.encode_texts(SAMPLES[1:])

@@ -27,7 +27,7 @@ from app.db.session import session_factory
 from app.pipeline.runner import RunReport, run_pipeline
 from app.sources.registry import all_sources
 
-RULE = "─" * 78
+RULE = "-" * 78  # ASCII: this report is printed to a cp1251 console
 
 
 def parse_args() -> argparse.Namespace:
@@ -99,6 +99,16 @@ def show(report: RunReport, quota: dict[str, tuple[int, int | None]]) -> None:
             f"  рассмотрено {step.considered}, "
             f"не изменилось {step.unchanged}, посчитано {step.embedded}"
         )
+        # The number the whole backlog work exists to produce. Without it a run
+        # that stopped on the row cap with eleven thousand rows outstanding
+        # printed exactly what a run that finished the corpus printed, which is
+        # how a corpus source came to look drained while it was not.
+        if step.backlog_known:
+            print(f"  осталось посчитать: {step.backlog}")
+        else:
+            print("  сколько осталось — неизвестно, см. scripts/embed_backlog.py")
+        if step.stopped:
+            print(f"  остановлено: {step.stopped}")
 
     print()
     print(RULE)
