@@ -77,6 +77,23 @@ was ``null`` on 20 and ``{"driverLicenseType": ["B"]}`` on 2; ``languages`` was
 absent entirely. Hence one :func:`unwrap` applied to every collection rather
 than a rule per field.
 
+Two consequences of this source's size land outside it, and are recorded here
+rather than fixed quietly in somebody else's module.
+
+``pipeline/runner.py`` hashes a vacancy from its company, its title and no city,
+deliberately, because most sources report a place as free text and a guessed
+city produces a wrong key. hh does not guess — the page carries one, and it
+reaches ``_derived.city`` — but the fingerprint is a UNIQUE column shared with
+every row already written under the old rule, so populating it is a
+``FINGERPRINT_VERSION`` bump and a backfill, not a parameter. Until then two hh
+postings from one employer with the same title collapse into one vacancy row,
+which is a real loss on a corpus with chain employers in it.
+
+``pipeline/embedding.py`` embeds at most 500 rows a run, newest first. A city
+slice writes more than that, so on a first crawl a share of the corpus keeps no
+vector until the whole thing is walked again. Semantic ranking sees the rows it
+has, and that is fewer than the dashboard shows.
+
 *Salary has more shapes than any list of them.* Six distinct key sets in 22
 pages, including ``perModeFrom`` as well as ``perModeTo``, so
 :class:`HHCompensation` declares optional fields instead of enumerating forms.
@@ -200,6 +217,16 @@ WATERMARK_LAG = 200
 #: would be a database round trip per page; never would mean a run killed near
 #: its budget re-walked everything next time.
 WATERMARK_SAVE_EVERY = 50
+
+#: The sitemaps are never cached. ``cache_ttl`` is thirty days because a
+#: vacancy page carries its own ``lastmod`` as a cache salt, so an edited
+#: posting misses and an untouched one hits. The sitemaps have no such salt —
+#: their whole job is to tell us what changed — so inheriting that TTL would
+#: pin the index and every file on disk for a month, and the connector would
+#: discover nothing hh published after its first run. Measured: with
+#: ``HTTP_CACHE_DIR`` set, run two of a two-vacancy fixture yields nothing at
+#: all when the sitemaps are cached.
+SITEMAP_CACHE_TTL = timedelta(0)
 
 #: Freshest entries fetched before the resumable ascending walk begins.
 #:
@@ -998,7 +1025,7 @@ class HHSource(BaseSource):
         index shows up in a run log instead of nowhere.
         """
         index_url = f"https://{site.host}{SITEMAP_INDEX_PATH}"
-        body = await self.http.get_text(index_url)
+        body = await self.http.get_text(index_url, cache_ttl=SITEMAP_CACHE_TTL)
         listed = SITEMAP_LOC.findall(body)
         # The host is checked here for the reason ``_entry`` checks it on the
         # vacancy URLs: a sitemap is a document somebody else writes, and every
@@ -1035,7 +1062,7 @@ class HHSource(BaseSource):
         which none can be read is a different thing and says so; a file listing
         nothing at all is simply empty, which a small city legitimately is.
         """
-        body = await self.http.get_text(url)
+        body = await self.http.get_text(url, cache_ttl=SITEMAP_CACHE_TTL)
         entries: list[SitemapEntry] = []
         dropped = 0
         for loc, lastmod in SITEMAP_ENTRY.findall(body):
@@ -1127,9 +1154,16 @@ class HHSource(BaseSource):
         try:
             view = HHVacancyView.model_validate(raw_view)
         except ValidationError as exc:
+            # include_input=False is load-bearing, not tidiness: Pydantic puts the
+            # whole validated object into every error entry, and this string is
+            # committed to pipeline_run.errors and served by the API. With the
+            # input left in, one renamed key ships the recruiter's contacts, the
+            # employer's billing block and the manager's id — measured at 6.8 kB
+            # per error on a real page — into a JSONB column and an HTTP
+            # response. The location and the message are what a person needs.
             raise HHMarkupError(
                 f"hh: vacancyView на {entry.url} не соответствует ожидаемой форме: "
-                f"{exc.errors()[:3]}",
+                f"{exc.errors(include_input=False, include_url=False)[:3]}",
                 url=entry.url,
                 status_code=200,
                 body_bytes=len(body),
@@ -1163,12 +1197,32 @@ class HHSource(BaseSource):
         if not status.is_live:
             logger.debug("sources.hh.not_live", url=entry.url, external_id=entry.external_id)
             return None
-        title = " ".join(view.name.split())[:MAX_TITLE]
+        full_title = " ".join(view.name.split())
+        title = full_title[:MAX_TITLE]
         if not title:
             logger.warning("sources.hh.skipped", reason="title", external_id=entry.external_id)
             return None
+        if len(full_title) > MAX_TITLE:
+            # Every other thing this connector drops is counted. A cut title is
+            # the one loss that reaches the dashboard, the fingerprint and the
+            # embedding without appearing anywhere, and two long titles sharing
+            # a prefix then hash to one vacancy.
+            logger.warning(
+                "sources.hh.truncated",
+                field="title",
+                external_id=entry.external_id,
+                length=len(full_title),
+                limit=MAX_TITLE,
+            )
         display = view.company.display_name if view.company else None
         company = " ".join(display.split())[:MAX_COMPANY] if display else None
+        if display and len(" ".join(display.split())) > MAX_COMPANY:
+            logger.warning(
+                "sources.hh.truncated",
+                field="company",
+                external_id=entry.external_id,
+                limit=MAX_COMPANY,
+            )
 
         return RawPosting(
             source_slug=self.slug,
@@ -1254,7 +1308,7 @@ class HHSource(BaseSource):
                 "sources.hh.position_unreadable",
                 host=site.host,
                 file=name,
-                errors=exc.errors()[:2],
+                errors=exc.errors(include_input=False, include_url=False)[:2],
             )
             return FileWatermark()
 
@@ -1326,7 +1380,10 @@ def _salary(compensation: dict[str, Any] | None) -> HHSalary | None:
     try:
         parsed = HHCompensation.model_validate(compensation)
     except ValidationError as exc:
-        logger.warning("sources.hh.compensation_unparsed", errors=exc.errors()[:2])
+        logger.warning(
+            "sources.hh.compensation_unparsed",
+            errors=exc.errors(include_input=False, include_url=False)[:2],
+        )
         return None
     if parsed.amount_from is None and parsed.amount_to is None:
         return None

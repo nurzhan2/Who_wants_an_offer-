@@ -28,11 +28,18 @@ async def run(
 ) -> RunResponse:
     """Run the pipeline and answer with what it did.
 
-    Synchronous rather than a background task, and that is the right shape for
-    now: a run is bounded by the query cap and the per-source rate limits, the
-    caller is a person who wants to see the counters, and the alternative —
-    scheduling it and polling — is phase 9's problem, when there is a scheduler
-    to hang it on.
+    Synchronous rather than a background task, which was the right shape while
+    every source was a bounded feed: the caller is a person who wants to see the
+    counters, and scheduling plus polling is phase 9's problem, when there is a
+    scheduler to hang it on.
+
+    That premise no longer holds for ``hh``. It walks a corpus rather than a
+    feed — some fourteen thousand pages a city — so it takes a slice per run,
+    and a slice at its own polite rate is roughly twenty minutes. A run that
+    includes it is not an HTTP request anybody should wait on. Until this
+    endpoint enqueues instead of awaiting, drive that crawl from
+    ``scripts/run_pipeline.py``, or name the sources you want here with
+    ``?source=``.
 
     ``dry_run`` decides everything and fetches nothing, which is how you check a
     plan before it spends a metered request. ``force`` skips only a short

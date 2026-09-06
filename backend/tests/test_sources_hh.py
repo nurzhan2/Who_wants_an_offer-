@@ -65,7 +65,7 @@ from app.sources.hh import (
     strip_html,
     unwrap,
 )
-from app.sources.http import SourceClient
+from app.sources.http import ResponseCache, SourceClient
 
 pytestmark = pytest.mark.unit
 
@@ -1397,3 +1397,80 @@ async def test_language_requirements_do_not_pretend_to_be_skills(
 
     assert block["key_skills"] == ["Python", "SQL"]
     assert block["language_requirements"] == ["Русский — C1 — Продвинутый"]
+
+
+async def test_the_sitemaps_are_never_served_from_the_disk_cache(
+    client: SourceClient,
+    http: respx.MockRouter,
+    store: StateStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The thirty-day cache is for pages, and it must not reach the index.
+
+    A vacancy page carries its own lastmod as a cache salt, so an edited posting
+    misses and an untouched one hits — which is the whole reason the TTL can be
+    a month. The sitemaps have no such salt and their entire job is to say what
+    changed, so inheriting that TTL freezes them: with the dev cache on, the
+    second run reads a month-old index and finds no vacancy hh published since.
+    """
+    monkeypatch.setattr(settings, "http_cache_dir", tmp_path)
+    cached = SourceClient(cache=ResponseCache(tmp_path), sleep=_instant)
+    try:
+        http.get(ROBOTS_URL).mock(return_value=httpx.Response(200, text=HH_ROBOTS))
+        http.get(INDEX_URL).mock(
+            return_value=httpx.Response(
+                200, text=(FIXTURES / "hh_sitemap_index.xml").read_text(encoding="utf-8")
+            )
+        )
+        http.get(VACANCY1_URL).mock(return_value=httpx.Response(200, text=sitemap([])))
+        http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+        for vacancy_id in (FULL, NULL_COLLECTIONS):
+            http.get(vacancy_url(vacancy_id)).mock(
+                return_value=httpx.Response(200, text=page(state(vacancy_id)))
+            )
+        source = HHSource()
+        source.bind(cached.bind(source)).with_state(store.load, store.save)
+
+        first = [posting async for posting in source.search_batch([SearchQuery()])]
+        assert [posting.external_id for posting in first] == [FULL]
+
+        # hh publishes another vacancy; the live sitemap now lists both.
+        http.get(VACANCY0_URL).mock(
+            return_value=httpx.Response(200, text=sitemap(dated([FULL, NULL_COLLECTIONS])))
+        )
+        second = [posting async for posting in source.search_batch([SearchQuery()])]
+
+        assert [posting.external_id for posting in second] == [NULL_COLLECTIONS]
+    finally:
+        await cached.aclose()
+
+
+async def test_a_shape_change_reports_the_field_and_not_the_page(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The error a person reads must not carry the payload it was reading.
+
+    This string is committed to ``pipeline_run.errors`` and served by the API.
+    Pydantic puts the whole validated object into every error entry, so with the
+    input left in, one renamed key ships the recruiter's contacts, the
+    employer's billing block and the manager's id into a JSONB column and an
+    HTTP response — 6.8 kB of it, measured on a real page.
+    """
+    # Three, because one odd page is tolerated: the raise is what happens when
+    # it is a pattern, and the raise is what reaches the API.
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    for vacancy_id in ids:
+        broken = state(vacancy_id)
+        del broken["vacancyView"]["name"]
+        http.get(vacancy_url(vacancy_id)).mock(return_value=httpx.Response(200, text=page(broken)))
+
+    with pytest.raises(HHMarkupError) as excinfo:
+        await collect(hh)
+
+    detail = excinfo.value.detail
+    assert "'loc': ('name',)" in detail or "'loc': ['name']" in detail
+    for leaked in ("contactInfo", "managerId", "HH_AUTO_RENEWAL", "vacancyProperties"):
+        assert leaked not in detail
+    assert len(detail) < 500
