@@ -1,0 +1,42 @@
+name: canary
+
+# Asks the sources we parse rather than call whether they still look the way
+# this repository believes they do. Separate from CI on purpose: it depends on a
+# third party being up, so it must never be able to fail a pull request, and it
+# has to run when nobody is pushing — that is the whole point of a canary.
+#
+# hh is the only source in it today. It is the only one whose payload is an
+# internal frontend state rather than a documented response, so it is the only
+# one that can change under us without anybody publishing a note.
+on:
+  schedule:
+    # 06:00 UTC, which is mid-morning in the market this reads.
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.12.9"
+
+jobs:
+  hh:
+    name: hh still serves the state we parse
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      # -m network selects exactly what pyproject deselects by default. CI is
+      # deliberately NOT set here: the skip-is-fatal rule exists so a green
+      # build means every test ran, and these tests answer to a site we do not
+      # control.
+      - name: Ask hh
+        run: uv run pytest -m network --no-cov -p no:cacheprovider

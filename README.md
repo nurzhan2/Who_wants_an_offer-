@@ -85,7 +85,8 @@ masked unless you pass `--show-pii`.
 | Type check | `uv run mypy backend/app` |
 | Tests + coverage | `uv run pytest` |
 | Frontend gates | `npm --prefix frontend run typecheck && npm --prefix frontend run lint` |
-| Fast tests (no DB, no model) | `uv run pytest -m "not db and not slow"` |
+| Fast tests (no DB, no model) | `uv run pytest -m "not db and not slow and not network"` |
+| Canary against live sources | `uv run pytest -m network` (deselected by default) |
 | Real embedding model | `make verify-embeddings` (needs `uv sync --extra embeddings`) |
 | Local inference speed | `make bench-ollama` |
 

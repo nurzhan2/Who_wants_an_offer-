@@ -104,6 +104,11 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/sources/http.py" = ["RUF001", "RUF002"]
 "backend/app/sources/registry.py" = ["RUF001", "RUF002"]
 "backend/app/sources/jsearch.py" = ["RUF001", "RUF002"]
+# Its docstrings quote hh's own field dictionary, which is Russian, and its
+# failure messages are the ones the dashboard shows.
+"backend/app/sources/hh.py" = ["RUF001", "RUF002"]
+"backend/tests/test_sources_hh.py" = ["RUF001", "RUF002"]
+"backend/tests/test_hh_canary.py" = ["RUF001", "RUF002"]
 "backend/app/sources/query_planner.py" = ["RUF001", "RUF002"]
 "backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
 "backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]
@@ -140,6 +145,13 @@ addopts = [
     "-ra",
     "--cov=app",
     "--cov-report=term-missing",
+    # Deselected, not skipped. conftest.py makes a skip fatal in CI so that a
+    # green build means everything ran, and a test that deliberately talks to a
+    # live third party can never be part of that promise — it fails when the
+    # network is down, which says nothing about this code. `-m network` on the
+    # command line overrides this and is how the canary is actually run.
+    "-m",
+    "not network",
 ]
 # An xfail that starts passing is a failure: the bug it documented is gone
 # and the marker is now lying. Combined with the CI skip guard in
@@ -149,6 +161,7 @@ markers = [
     "db: test requires a live PostgreSQL database with the pgvector extension",
     "slow: test loads a real model or otherwise takes seconds, not milliseconds",
     "unit: pure test, no database, no model, no network",
+    "network: real request to a third party; deselected by default, run as a canary",
 ]
 filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
 

@@ -300,7 +300,14 @@ class ResponseCache:
         self._now = now or (lambda: datetime.now(UTC))
 
     @staticmethod
-    def key(method: str, url: httpx.URL, *, slug: str, body: bytes | None = None) -> str:
+    def key(
+        method: str,
+        url: httpx.URL,
+        *,
+        slug: str,
+        body: bytes | None = None,
+        salt: str | None = None,
+    ) -> str:
         """Digest of everything that changes the answer.
 
         The slug is in the key so two sources hitting one public URL cannot
@@ -308,6 +315,14 @@ class ResponseCache:
         are one entry. Credentials in headers are deliberately *not* included:
         the same request returns the same body whoever signs it, and keying on
         them would throw the whole cache away on a key rotation.
+
+        ``salt`` is a version the caller knows and the URL does not carry. It
+        exists for a source whose pages have a stable address and changing
+        content, where a TTL is the wrong question: hh publishes a ``lastmod``
+        per vacancy in its sitemap, and passing that here makes an edited
+        posting a cache miss and an untouched one a hit for as long as the entry
+        survives — which is what "invalidate on change, not on a clock" means
+        when the cache is keyed rather than validated.
         """
         params = "&".join(sorted(f"{name}={value}" for name, value in url.params.multi_items()))
         material = "\x00".join(
@@ -318,6 +333,7 @@ class ResponseCache:
                 f"{url.scheme}://{url.netloc.decode()}{url.path}",
                 params,
                 (body or b"").hex(),
+                salt or "",
             ]
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -494,10 +510,16 @@ class SourceHTTP:
         params: Mapping[str, Any] | None = None,
         headers: Mapping[str, str] | None = None,
         cache_ttl: timedelta | None = None,
+        cache_salt: str | None = None,
     ) -> str:
         """A GET whose body is text."""
         response = await self.request(
-            "GET", url, params=params, headers=headers, cache_ttl=cache_ttl
+            "GET",
+            url,
+            params=params,
+            headers=headers,
+            cache_ttl=cache_ttl,
+            cache_salt=cache_salt,
         )
         return response.text
 
@@ -510,6 +532,7 @@ class SourceHTTP:
         headers: Mapping[str, str] | None = None,
         json_body: Any = None,
         cache_ttl: timedelta | None = None,
+        cache_salt: str | None = None,
     ) -> httpx.Response:
         """One request, with every guard the connector contract promises."""
         return await self._client.send(
@@ -521,6 +544,7 @@ class SourceHTTP:
             headers=headers,
             json_body=json_body,
             cache_ttl=cache_ttl if cache_ttl is not None else self._source.cache_ttl,
+            cache_salt=cache_salt,
             on_request=self._on_request,
         )
 
@@ -581,6 +605,7 @@ class SourceClient:
         headers: Mapping[str, str] | None = None,
         json_body: Any = None,
         cache_ttl: timedelta | None = None,
+        cache_salt: str | None = None,
         on_request: RequestHook | None = None,
     ) -> httpx.Response:
         """The whole request path, in the order the guards have to run."""
@@ -592,7 +617,7 @@ class SourceClient:
         if source.access_mode is AccessMode.CRAWL:
             await self._check_robots(source, target, bucket)
 
-        cached = self._read_cache(source, method, target, cache_ttl)
+        cached = self._read_cache(source, method, target, cache_ttl, cache_salt)
         if cached is not None:
             return cached
 
@@ -608,7 +633,7 @@ class SourceClient:
             and method.upper() == "GET"
             and cache_ttl
         ):
-            key = ResponseCache.key(method, target, slug=source.slug)
+            key = ResponseCache.key(method, target, slug=source.slug, salt=cache_salt)
             self._cache.write(key, response, slug=source.slug)
         return response
 
@@ -667,10 +692,11 @@ class SourceClient:
         method: str,
         url: httpx.URL,
         cache_ttl: timedelta | None,
+        cache_salt: str | None = None,
     ) -> httpx.Response | None:
         if self._cache is None or method.upper() != "GET" or not cache_ttl:
             return None
-        key = ResponseCache.key(method, url, slug=source.slug)
+        key = ResponseCache.key(method, url, slug=source.slug, salt=cache_salt)
         entry = self._cache.read(key, slug=source.slug, ttl=cache_ttl)
         if entry is None:
             return None

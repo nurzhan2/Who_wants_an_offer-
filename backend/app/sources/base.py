@@ -42,6 +42,13 @@ if TYPE_CHECKING:  # pragma: no cover - the runtime import would be a cycle
 #: Installed by the pipeline; see :meth:`BaseSource.with_known_ids`.
 type KnownIds = Callable[[Sequence[str]], Awaitable[set[str]]]
 
+#: Reads back what this source last stored under a key of its own choosing.
+#: Installed by the pipeline; see :meth:`BaseSource.with_state`.
+type StateLoad = Callable[[str], Awaitable[dict[str, Any] | None]]
+#: Stores it. Called at a point the connector chooses, which is the whole
+#: design: only the connector knows when its position is safe to advance.
+type StateSave = Callable[[str, dict[str, Any]], Awaitable[None]]
+
 
 class AccessMode(StrEnum):
     """How a source is reached, which decides whether robots.txt applies to it."""
@@ -209,6 +216,8 @@ class BaseSource(ABC):
     def __init__(self, *, http: "SourceHTTP | None" = None) -> None:
         self._http = http
         self._known_ids: KnownIds | None = None
+        self._state_load: StateLoad | None = None
+        self._state_save: StateSave | None = None
 
     @property
     def http(self) -> "SourceHTTP":
@@ -239,6 +248,37 @@ class BaseSource(ABC):
         if self._known_ids is None or not external_ids:
             return set()
         return await self._known_ids(list(external_ids))
+
+    def with_state(self, load: "StateLoad | None", save: "StateSave | None") -> Self:
+        """Install the hooks that remember where a crawl got to.
+
+        Same seam as :meth:`with_known_ids`, for the same reason: the answer
+        lives in the database, a connector must not reach for it, so the
+        pipeline passes closures instead. Absent — in a unit test, or in a
+        connector that has no position to remember — a source simply starts
+        from the beginning every time, which is correct for every source that
+        fetches one bounded feed.
+
+        A source large enough to need slicing cannot work that way. hh's corpus
+        is roughly fourteen thousand pages per city and its sitemap dates every
+        entry, so a run covers the slice that changed and has to record, per
+        sitemap file, how far it actually got.
+        """
+        self._state_load = load
+        self._state_save = save
+        return self
+
+    async def state_get(self, key: str) -> dict[str, Any] | None:
+        """What this source stored under ``key`` last time, or None."""
+        if self._state_load is None:
+            return None
+        return await self._state_load(key)
+
+    async def state_set(self, key: str, value: dict[str, Any]) -> None:
+        """Store this source's position. A no-op when no store is installed."""
+        if self._state_save is None:
+            return
+        await self._state_save(key, value)
 
     # ── availability ──────────────────────────────────────────────────
 

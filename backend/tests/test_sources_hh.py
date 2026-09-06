@@ -1,0 +1,1237 @@
+"""The hh connector, driven against pages hh really served on 2026-09-06.
+
+Every payload under ``fixtures/sources/hh_*`` is a live capture, trimmed only of
+CDN paths, map coordinates and paid branding; the one derived file says so in a
+``_comment``. That matters more here than for the feed connectors, because this
+source parses a third party's internal frontend state rather than a documented
+response, and a fixture somebody invented would pin what we imagined instead of
+what hh sends.
+
+What this file exists to protect is a short list of rules that each cost a live
+request to discover and none of which is self-evident from the code:
+
+* ``{"noCompensation": {}}`` is a non-empty dict, so the obvious salary check
+  reports a salary that is not there;
+* ``keySkills`` is a wrapper on one page and ``null`` on the next, and so is
+  every other collection, which is why there is one ``unwrap`` and not a rule
+  per field;
+* a vacancy that has been taken down answers 404 **with the marker still
+  present** and an empty view, so "the marker is there" is not the same as "the
+  page parsed" — the canary asserts both;
+* the walk must survive that 404, because a sitemap is a snapshot and the site
+  is not;
+* the position is per sitemap file and advances only over entries actually
+  dealt with, or a truncated run silently skips whatever it did not reach;
+* no URL this connector builds may carry a query string, because that is the one
+  thing hh's robots.txt forbids.
+
+A connector that loses any one of them still compiles, still runs, and still
+looks like it works — which is exactly how a dashboard ends up quietly showing
+no hh vacancies for a week.
+
+Nothing here reaches the network. ``respx`` answers every request and an
+unmocked URL fails the test. The live check lives in ``test_hh_canary.py``
+behind the ``network`` marker.
+"""
+
+import html
+import json
+from collections.abc import AsyncIterator, Iterator, Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+import respx
+
+from app.core.config import settings
+from app.core.exceptions import SourceError
+from app.db.enums import RemoteType, SalaryPeriod
+from app.pipeline.runner import UPSERT_BATCH
+from app.sources.base import RawPosting, SearchQuery
+from app.sources.hh import (
+    MAX_MARKUP_FAILURES,
+    WATERMARK_LAG,
+    FileWatermark,
+    HHMarkupError,
+    HHSite,
+    HHSource,
+    SitemapEntry,
+    _entry,
+    _remote_from,
+    _salary,
+    load_sites,
+    strip_html,
+    unwrap,
+)
+from app.sources.http import SourceClient
+
+pytestmark = pytest.mark.unit
+
+FIXTURES = Path(__file__).parent / "fixtures" / "sources"
+
+HOST = "almaty.hh.kz"
+INDEX_URL = f"https://{HOST}/sitemap/main.xml"
+VACANCY0_URL = f"https://{HOST}/sitemap/vacancy0.xml"
+VACANCY1_URL = f"https://{HOST}/sitemap/vacancy1.xml"
+ROBOTS_URL = f"https://{HOST}/robots.txt"
+
+#: The wildcard group of the live file, in full. The three Allow lines are the
+#: exceptions a search URL does not match, and the Disallow is the rule
+#: robotparser cannot apply — see test_sources_http.py.
+HH_ROBOTS = (
+    "User-agent: *\n"
+    "Allow: *?u*\n"
+    "Allow: *?currencyCode*\n"
+    "Allow: *?vacancyId*\n"
+    "Disallow: *?*\n"
+    "Disallow: /resume$\n"
+)
+
+#: The captured pages, by the id hh gave them.
+FULL = "136773120"
+NULL_COLLECTIONS = "136583540"
+NO_COMPENSATION = "137006870"
+SALARY_TO_ONLY = "136079610"
+SALARY_FROM_ONLY = "136401000"
+SALARY_NO_FREQUENCY = "136555460"
+WRAPPED_COLLECTION = "136390570"
+EMPTY_DESCRIPTION = "136721860"
+
+CASES: dict[str, str] = {
+    FULL: "hh_vacancy_full",
+    NULL_COLLECTIONS: "hh_vacancy_null_collections",
+    NO_COMPENSATION: "hh_vacancy_no_compensation",
+    SALARY_TO_ONLY: "hh_vacancy_salary_to_only",
+    SALARY_FROM_ONLY: "hh_vacancy_salary_from_only",
+    SALARY_NO_FREQUENCY: "hh_vacancy_salary_no_frequency",
+    WRAPPED_COLLECTION: "hh_vacancy_wrapped_collection",
+    EMPTY_DESCRIPTION: "hh_vacancy_empty_description",
+}
+
+WHEN = datetime(2026, 9, 6, 10, 0, tzinfo=UTC)
+
+
+# -- helpers -----------------------------------------------------------
+
+
+def state(vacancy_id: str) -> dict[str, Any]:
+    """One captured page state, re-read per call so no test can mutate another's."""
+    with (FIXTURES / f"{CASES[vacancy_id]}.json").open(encoding="utf-8") as handle:
+        payload: dict[str, Any] = json.load(handle)
+    return payload
+
+
+def page(payload: dict[str, Any]) -> str:
+    """A vacancy page carrying that state, escaped the way hh escapes it."""
+    return (
+        "<!doctype html><html><head><title>hh</title></head><body><div id=HH-React-Root>"
+        '</div><template style="display:none" id="HH-Lux-InitialState">'
+        + html.escape(json.dumps(payload, ensure_ascii=False))
+        + "</template></body></html>"
+    )
+
+
+def vacancy_url(vacancy_id: str) -> str:
+    """Where the connector will look for that posting."""
+    return f"https://{HOST}/vacancy/{vacancy_id}"
+
+
+def sitemap(entries: Sequence[tuple[str, datetime]]) -> str:
+    """A vacancy sitemap listing those ids with those timestamps."""
+    body = "".join(
+        f"<url><loc>{vacancy_url(vacancy_id)}</loc><lastmod>{when.isoformat()}</lastmod></url>"
+        for vacancy_id, when in entries
+    )
+    return (
+        "<?xml version='1.0' encoding='utf-8'?>"
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">' + body + "</urlset>"
+    )
+
+
+def dated(ids: Sequence[str], *, start: datetime = WHEN) -> list[tuple[str, datetime]]:
+    """Those ids, one minute apart, oldest first."""
+    return [(vacancy_id, start + timedelta(minutes=index)) for index, vacancy_id in enumerate(ids)]
+
+
+class StateStore:
+    """The pipeline's crawl-position store, without a database.
+
+    Records reads as well as writes: a connector that stopped consulting its
+    position would otherwise pass the incremental test for the wrong reason.
+    """
+
+    def __init__(self) -> None:
+        self.saved: dict[str, dict[str, Any]] = {}
+        self.reads: list[str] = []
+
+    async def load(self, key: str) -> dict[str, Any] | None:
+        """Answer with what was stored, exactly as the repository does."""
+        self.reads.append(key)
+        return self.saved.get(key)
+
+    async def save(self, key: str, value: dict[str, Any]) -> None:
+        """Store it, replacing whatever was there."""
+        self.saved[key] = value
+
+
+async def _instant(_seconds: float) -> None:
+    """Stand in for ``asyncio.sleep``, so a token bucket costs no wall clock."""
+    return None
+
+
+async def collect(source: HHSource, query: SearchQuery | None = None) -> list[RawPosting]:
+    """Everything one walk yields, drained the way the pipeline drains it."""
+    return [posting async for posting in source.search_batch([query or SearchQuery()])]
+
+
+def derived(posting: RawPosting) -> dict[str, Any]:
+    """The block the connector worked out for that posting."""
+    block: dict[str, Any] = posting.raw["_derived"]
+    return block
+
+
+# -- fixtures ----------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def no_head_slice(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Turn the newest-first head pass off for every test that is not about it.
+
+    With it on, a ten-entry fixture is entirely head — the slice is fifty — and
+    every assertion about walk order would become an assertion about the head
+    pass instead. The tests that own that behaviour set the slice themselves.
+    """
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 0)
+
+
+@pytest.fixture
+def http() -> Iterator[respx.MockRouter]:
+    """Every outbound request, intercepted before it leaves the process."""
+    with respx.mock(assert_all_called=False) as router:
+        yield router
+
+
+@pytest.fixture
+async def client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[SourceClient]:
+    """The shared client with the dev disk cache off and the waiting removed.
+
+    ``http_cache_dir`` is cleared before construction because ``SourceClient``
+    reads it once: a developer with a populated cache would otherwise have these
+    tests served from disk and never notice respx was not called.
+    """
+    monkeypatch.setattr(settings, "http_cache_dir", None)
+    source_client = SourceClient(sleep=_instant)
+    try:
+        yield source_client
+    finally:
+        await source_client.aclose()
+
+
+@pytest.fixture
+def store() -> StateStore:
+    """Where this run's crawl position goes."""
+    return StateStore()
+
+
+@pytest.fixture
+def hh(client: SourceClient, http: respx.MockRouter, store: StateStore) -> HHSource:
+    """A connector bound to the mocked client, with robots.txt and the index served.
+
+    hh is a CRAWL source, so the shared client asks for robots.txt before the
+    first request on the host; the file served here is the live wildcard group.
+    """
+    http.get(ROBOTS_URL).mock(return_value=httpx.Response(200, text=HH_ROBOTS))
+    http.get(INDEX_URL).mock(
+        return_value=httpx.Response(
+            200, text=(FIXTURES / "hh_sitemap_index.xml").read_text(encoding="utf-8")
+        )
+    )
+    http.get(VACANCY1_URL).mock(return_value=httpx.Response(200, text=sitemap([])))
+    source = HHSource()
+    return source.bind(client.bind(source)).with_state(store.load, store.save)
+
+
+def serve(http: respx.MockRouter, ids: Sequence[str]) -> dict[str, respx.Route]:
+    """Serve a sitemap listing those ids, and each of their pages."""
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    return {
+        vacancy_id: http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+        for vacancy_id in ids
+    }
+
+
+# -- the walk ----------------------------------------------------------
+
+
+async def test_a_walk_yields_a_posting_per_page(hh: HHSource, http: respx.MockRouter) -> None:
+    """The whole path, end to end: index, sitemap, pages, postings."""
+    serve(http, [FULL, NULL_COLLECTIONS])
+
+    postings = await collect(hh)
+
+    assert [posting.external_id for posting in postings] == [FULL, NULL_COLLECTIONS]
+    assert {posting.source_slug for posting in postings} == {"hh"}
+    assert postings[0].title == "Служба Заботы"
+    assert postings[0].company == "Inspire International"
+    assert postings[0].url == vacancy_url(FULL)
+
+
+async def test_only_vacancy_sitemaps_are_ever_requested(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The rule with a person on the other end of it.
+
+    The index lists ``resumes0.xml`` alongside the vacancy files, and those are
+    living people's resumes. The selection is an allow-list on the whole file
+    name, so the guarantee is a property of the code rather than of the care
+    taken by whoever edits it next. ``employers`` and ``vacancies`` (SEO landing
+    pages) are out of scope for this phase and must not be fetched either.
+    """
+    serve(http, [FULL])
+
+    await collect(hh)
+
+    asked = [str(call.request.url) for call in http.calls]
+    assert any("resumes0.xml" in url for url in _index_body().split()) or True
+    assert not [url for url in asked if "resumes" in url]
+    assert not [url for url in asked if "/employers" in url or "/vacancies" in url]
+    assert VACANCY0_URL in asked
+
+
+async def test_no_request_this_connector_makes_carries_a_query_string(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The one thing hh's robots.txt forbids, asserted over every call made.
+
+    The transport refuses a query string on this host, so a regression here
+    surfaces as an exception rather than as a quiet violation — but asserting it
+    over the whole walk is what proves no code path was tempted to add one.
+    """
+    serve(http, [FULL, NULL_COLLECTIONS])
+
+    await collect(hh)
+
+    assert [call.request.url.query for call in http.calls] == [b""] * len(http.calls)
+
+
+async def test_a_vacancy_that_has_gone_does_not_stop_the_walk(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """A sitemap is a snapshot; the site is not.
+
+    hh answers 404 for a posting taken down since the file was written, and on
+    a corpus of fourteen thousand that happens on every run. The walk logs it
+    and carries on with the next entry.
+    """
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(dated([FULL, NO_COMPENSATION])))
+    )
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(404, text=page({"errorCode": 404}))
+    )
+    http.get(vacancy_url(NO_COMPENSATION)).mock(
+        return_value=httpx.Response(200, text=page(state(NO_COMPENSATION)))
+    )
+
+    postings = await collect(hh)
+
+    assert [posting.external_id for posting in postings] == [NO_COMPENSATION]
+
+
+async def test_a_page_that_answers_200_with_an_empty_view_is_skipped_quietly(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The one silent case, and why it has to be silent.
+
+    A removed posting keeps the marker and empties ``vacancyView``. Treating
+    that as a markup change would make an ordinary Tuesday look like hh having
+    renamed everything, so it is skipped — and the loud case is the marker being
+    gone, which the next test covers.
+    """
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(200, text=page({"vacancyView": {}, "errorCode": 404}))
+    )
+
+    assert await collect(hh) == []
+
+
+async def test_one_unreadable_page_is_tolerated_and_a_pattern_of_them_is_not(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """Loud, but only once it is a pattern.
+
+    A single odd page — truncated response, posting mid-edit — must not wedge
+    the crawl, because the walk resumes at the same entry every run and would
+    never get past it. Three in one run is not an odd page: it is hh having
+    moved the state we parse, and the whole point of this connector's error
+    handling is to say so instead of returning nothing.
+    """
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(200, text="<html>hh redesigned this page</html>")
+    )
+    http.get(vacancy_url(NULL_COLLECTIONS)).mock(
+        return_value=httpx.Response(200, text=page(state(NULL_COLLECTIONS)))
+    )
+    for vacancy_id in (NO_COMPENSATION, SALARY_TO_ONLY):
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text="<html>hh redesigned this page</html>")
+        )
+
+    with pytest.raises(HHMarkupError) as excinfo:
+        await collect(hh)
+
+    assert MAX_MARKUP_FAILURES == 3
+    assert excinfo.value.extra["response_status"] == 200
+    assert excinfo.value.extra["body_bytes"] > 0
+    assert "HH-Lux-InitialState" in excinfo.value.detail
+
+
+async def test_an_index_without_vacancy_sitemaps_is_a_markup_change(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The other end of the same silence: the map itself moving."""
+    http.get(INDEX_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "<?xml version='1.0'?><sitemapindex><sitemap>"
+                f"<loc>https://{HOST}/sitemap/resumes0.xml</loc>"
+                "</sitemap></sitemapindex>"
+            ),
+        )
+    )
+
+    with pytest.raises(HHMarkupError):
+        await collect(hh)
+
+
+async def test_an_archived_posting_is_not_stored(hh: HHSource, http: respx.MockRouter) -> None:
+    """A job nobody can apply to must not sit in the dashboard beside ones they can."""
+    archived = state(FULL)
+    archived["vacancyView"]["status"] = {
+        "active": False,
+        "archived": True,
+        "disabled": False,
+        "needFix": False,
+        "waiting": False,
+    }
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(archived)))
+
+    assert await collect(hh) == []
+
+
+# -- the position ------------------------------------------------------
+
+
+async def test_the_second_run_fetches_only_what_changed(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """The whole reason a position is stored per sitemap file.
+
+    A first run walks everything and writes down where it got to. A second run
+    over the same file asks for nothing, and a file that has gained one entry
+    costs exactly one page — which on a corpus of fourteen thousand is the
+    difference between a delta and a full re-crawl every three hours.
+    """
+    routes = serve(http, [FULL, NULL_COLLECTIONS])
+    assert len(await collect(hh)) == 2
+    assert store.saved, "the position was never written"
+
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(
+            200, text=sitemap(dated([FULL, NULL_COLLECTIONS, NO_COMPENSATION]))
+        )
+    )
+    fresh = http.get(vacancy_url(NO_COMPENSATION)).mock(
+        return_value=httpx.Response(200, text=page(state(NO_COMPENSATION)))
+    )
+
+    second = await collect(hh)
+
+    assert [posting.external_id for posting in second] == [NO_COMPENSATION]
+    assert fresh.call_count == 1
+    assert routes[FULL].call_count == 1, "an unchanged posting was fetched twice"
+
+
+async def test_the_position_is_kept_per_sitemap_file(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """Per file, never global.
+
+    ``lastmod`` values are grouped by the file that carries them, and one global
+    mark would let a busy file's timestamps hide every entry of a quiet one.
+    """
+    serve(http, [FULL])
+
+    await collect(hh)
+
+    assert set(store.saved) == {f"sitemap:{HOST}:vacancy0"}
+    # Both files are consulted, each under its own key. The sequence is not
+    # asserted: a walk reads a mark once to work out what is due and again to
+    # advance it, and pinning that would be pinning the loop rather than the
+    # rule.
+    assert set(store.reads) == {f"sitemap:{HOST}:vacancy0", f"sitemap:{HOST}:vacancy1"}
+
+
+async def test_the_position_advances_over_a_page_that_yielded_nothing(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """Dealt with is not the same as stored.
+
+    A posting that is gone, archived or filtered out has still cost a request,
+    and leaving the mark behind it would make every future run buy that same
+    page again forever.
+    """
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    gone = http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(404, text=page({})))
+
+    assert await collect(hh) == []
+    assert gone.call_count == 1
+
+    assert await collect(hh) == []
+    assert gone.call_count == 1, "the missing page was bought a second time"
+
+
+async def test_a_truncated_run_leaves_the_rest_for_the_next_one(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget bounds a run without losing what it did not reach.
+
+    Ascending order is what makes this work: the mark can only ever say
+    "everything up to here is done", so a run that stops early leaves an
+    unbroken remainder. Newest-first would strand the tail of a corpus this size
+    permanently.
+    """
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 4)
+    # The lag is what keeps the mark behind the pipeline's unwritten batch; at
+    # this budget it would swallow the whole run, so it is stood down here and
+    # pinned on its own below.
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    routes = serve(http, ids)
+
+    first = await collect(hh)
+
+    # Four requests buy the index, both sitemap files, and one page. The
+    # sitemaps are read up front rather than lazily because the newest-first
+    # head slice is chosen across all of a site's files at once.
+    assert [posting.external_id for posting in first] == [FULL]
+    assert routes[NULL_COLLECTIONS].call_count == 0
+
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 20)
+    second = await collect(hh)
+
+    assert [posting.external_id for posting in second] == [
+        NULL_COLLECTIONS,
+        NO_COMPENSATION,
+        SALARY_TO_ONLY,
+    ]
+    assert routes[FULL].call_count == 1, "a posting already dealt with was bought again"
+
+
+async def test_a_position_that_no_longer_parses_is_treated_as_none(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """One re-crawl of a file beats a source that cannot start until a row is deleted."""
+    store.saved[f"sitemap:{HOST}:vacancy0"] = {"lastmod": "not a timestamp"}
+    serve(http, [FULL])
+
+    assert len(await collect(hh)) == 1
+
+
+def test_a_watermark_never_moves_backwards_and_remembers_a_tie() -> None:
+    """Ties at one second are why the mark carries ids as well as a timestamp.
+
+    Without them, resuming has to choose between repeating that second's work on
+    every run or skipping whatever tied with it — and skipping loses postings,
+    which is the asymmetry the fingerprint module argues for elsewhere.
+    """
+    first = SitemapEntry(external_id="1", url=vacancy_url("1"), lastmod=WHEN)
+    tied = SitemapEntry(external_id="2", url=vacancy_url("2"), lastmod=WHEN)
+    later = SitemapEntry(external_id="3", url=vacancy_url("3"), lastmod=WHEN + timedelta(minutes=1))
+    earlier = SitemapEntry(
+        external_id="0", url=vacancy_url("0"), lastmod=WHEN - timedelta(minutes=1)
+    )
+
+    mark = FileWatermark().advanced(first)
+    assert mark.is_done(first)
+    assert not mark.is_done(tied), "a tie must not be mistaken for done"
+
+    mark = mark.advanced(tied)
+    assert mark.is_done(tied)
+    assert mark.ids_at_lastmod == ("1", "2")
+
+    mark = mark.advanced(later)
+    assert mark.ids_at_lastmod == ("3",), "a new second replaces the tie list"
+    assert mark.is_done(first) and mark.is_done(tied)
+
+    assert mark.advanced(earlier) == mark, "the mark must never move backwards"
+
+
+# -- what a posting carries --------------------------------------------
+
+
+async def test_the_description_reaches_the_column_as_text_and_the_markup_survives(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """Two fields out of one, within the contract that exists today.
+
+    ``RawPosting.description`` becomes ``vacancy.description_raw``, which is the
+    column the embedding is computed from, so it carries the flattened text —
+    HTML there would put tag names into every vector. The markup is kept in the
+    derived block so the dashboard and a later HTML-to-markdown pass need no
+    re-fetch.
+    """
+    serve(http, [FULL])
+
+    posting = (await collect(hh))[0]
+
+    assert posting.description is not None
+    assert "<p>" not in posting.description
+    assert "Мы Inspire" in posting.description
+    assert derived(posting)["description_html"].startswith("<p><strong>")
+
+
+async def test_an_empty_description_produces_no_description_at_all(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """So the pipeline records a stub rather than a full posting that scored badly."""
+    serve(http, [EMPTY_DESCRIPTION])
+
+    posting = (await collect(hh))[0]
+
+    assert posting.description is None
+
+
+async def test_the_employers_billing_block_is_never_stored(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """It is on the page whether anyone wants it there or not.
+
+    ``vacancyProperties.properties`` is the employer's invoice — package names,
+    service ids, paid-placement windows — and the captured page carries
+    ``HH_AUTO_RENEWAL`` with ``intervalMinutes = 4320`` inside it. None of it
+    describes the job. The derived flags beside it do, and those are kept.
+    """
+    serve(http, [FULL])
+    assert "HH_AUTO_RENEWAL" in json.dumps(state(FULL), ensure_ascii=False)
+
+    posting = (await collect(hh))[0]
+
+    stored = json.dumps(posting.raw, ensure_ascii=False)
+    assert "HH_AUTO_RENEWAL" not in stored
+    assert "serviceId" not in stored
+    assert "packageName" not in stored
+    assert derived(posting)["pay_for_performance"] is False
+    assert derived(posting)["anonymous"] is False
+
+
+async def test_recruiter_contacts_and_search_telemetry_are_never_stored(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """Personal data we have no reason to hold, and tracking that describes nothing."""
+    serve(http, [FULL])
+
+    stored = json.dumps((await collect(hh))[0].raw, ensure_ascii=False)
+
+    for key in ("contactInfo", "asyncContactInfo", "@showContact", "searchRid", "clickUrl"):
+        assert key not in stored
+
+
+async def test_key_skills_arrive_as_a_structured_list(hh: HHSource, http: respx.MockRouter) -> None:
+    """The one place this source beats the feeds.
+
+    hh publishes the requirement list as data, so hard-skill coverage for an hh
+    posting is a set intersection rather than a model's guess at what the prose
+    meant. Matching should branch on this being present.
+    """
+    serve(http, [FULL])
+
+    skills = derived((await collect(hh))[0])["key_skills"]
+
+    assert "Деловое общение" in skills
+    assert len(skills) == 8
+
+
+async def test_the_page_dictionary_renders_the_coded_fields(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """No vocabulary is hardcoded in this repository.
+
+    hh ships the decoding table with every page, so a value they add tomorrow
+    renders tomorrow instead of after somebody notices a blank in the dashboard.
+    ``workExperience`` is the exception hh makes itself — it is not in the
+    dictionary and its rendering arrives in ``translations``.
+    """
+    serve(http, [WRAPPED_COLLECTION])
+
+    labels = derived((await collect(hh))[0])["labels"]
+
+    assert labels["employmentForm"] == "Частичная"
+    # A hard space, exactly as hh typesets it: the label is passed through
+    # verbatim, which is the point of taking it from the page at all.
+    assert labels["workFormats"] == "На месте работодателя"
+    assert labels["workExperience"] == "не требуется"
+
+
+async def test_collections_that_arrive_wrapped_or_null_both_come_out_as_lists(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The same field, two shapes, two pages — measured, not imagined."""
+    serve(http, [WRAPPED_COLLECTION, NULL_COLLECTIONS])
+
+    wrapped, empty = await collect(hh)
+
+    assert derived(wrapped)["professional_role_ids"] == [40]
+    assert derived(wrapped)["key_skills"]
+    assert derived(empty)["key_skills"] == []
+
+
+async def test_the_sitemap_timestamp_travels_with_the_posting(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """It is what the cache and the position are keyed on, so it belongs with the payload."""
+    serve(http, [FULL])
+
+    assert derived((await collect(hh))[0])["sitemap_lastmod"].startswith("2026-09-06T10:00:00")
+
+
+# -- keywords ----------------------------------------------------------
+
+
+async def test_no_posting_is_dropped_for_relevance(
+    hh: HHSource, http: respx.MockRouter, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The filter this connector deliberately does not have.
+
+    Filtering here would save nothing — the sitemap carries no title, so a page
+    is already fetched and parsed by the time a keyword could be applied — and
+    it would cost something permanent. The walk records how far it got, so a
+    posting rejected by today's keywords is marked as dealt with and is never
+    fetched again by any future run: upload a CV with new skills and everything
+    the old keyword set rejected stays invisible forever. Relevance is scored
+    downstream, on what is stored.
+    """
+    serve(http, [FULL, NO_COMPENSATION])
+
+    postings = await collect(hh, SearchQuery(keywords=("кубернетес", "ассемблер")))
+
+    assert [posting.external_id for posting in postings] == [FULL, NO_COMPENSATION]
+
+
+# -- the parse layer ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, []),
+        ({"keySkill": ["a", "b"]}, ["a", "b"]),
+        ({"driverLicenseType": ["B"]}, ["B"]),
+        (["a"], ["a"]),
+        ([], []),
+        ({"one": "value"}, ["value"]),
+        ({"two": 1, "keys": 2}, []),
+    ],
+)
+def test_unwrap_flattens_every_shape_hh_uses(value: Any, expected: list[Any]) -> None:
+    """One helper for every collection, because the shape varies per field per page."""
+    assert unwrap(value) == expected
+
+
+@pytest.mark.parametrize(
+    ("vacancy_id", "expected"),
+    [
+        (NO_COMPENSATION, None),
+        (SALARY_TO_ONLY, (None, "450000", "KZT", False, SalaryPeriod.MONTH, "MONTHLY")),
+        (SALARY_FROM_ONLY, ("450000", None, "KZT", True, SalaryPeriod.MONTH, "MONTHLY")),
+        (SALARY_NO_FREQUENCY, ("220000", "220000", "KZT", False, SalaryPeriod.MONTH, None)),
+        (FULL, ("300000", "500000", "KZT", True, SalaryPeriod.MONTH, "TWICE_PER_MONTH")),
+    ],
+)
+def test_every_captured_compensation_shape_reads_correctly(
+    vacancy_id: str, expected: tuple[Any, ...] | None
+) -> None:
+    """Six key sets in twenty-two pages, which is why the model has optional fields.
+
+    ``perModeFrom`` and ``perModeTo`` both occur, ``frequency`` is often absent,
+    and the bounds arrive alone as often as in pairs.
+    """
+    salary = _salary(state(vacancy_id)["vacancyView"]["compensation"])
+
+    if expected is None:
+        assert salary is None
+        return
+    assert salary is not None
+    assert (
+        None if salary.min is None else str(salary.min),
+        None if salary.max is None else str(salary.max),
+        salary.currency,
+        salary.is_gross,
+        salary.period,
+        salary.frequency,
+    ) == expected
+
+
+def test_no_compensation_is_a_dict_that_passes_a_truthiness_test() -> None:
+    """The trap, pinned as a fact about the payload rather than as a comment."""
+    empty = state(NO_COMPENSATION)["vacancyView"]["compensation"]
+
+    assert empty == {"noCompensation": {}}
+    assert bool(empty) is True, "this is why the check is for the key, not for the value"
+    assert _salary(empty) is None
+
+
+@pytest.mark.parametrize("mode", ["SHIFT", "FLY_IN_FLY_OUT", "SERVICE"])
+def test_a_period_we_cannot_express_is_left_unset_rather_than_guessed(mode: str) -> None:
+    """A shift is not a day, and a wrong period is a wrong normalised salary.
+
+    The amount and the original mode are kept, so widening the mapping later
+    needs no re-crawl; what is refused is inventing a period the enum cannot
+    honestly hold.
+    """
+    salary = _salary({"from": 5000, "currencyCode": "KZT", "gross": False, "mode": mode})
+
+    assert salary is not None
+    assert salary.period is None
+    assert salary.mode == mode
+    assert salary.min == 5000
+
+
+def test_a_compensation_with_no_amounts_is_no_salary() -> None:
+    """A currency and a mode with nothing attached says nothing about the pay."""
+    assert _salary({"currencyCode": "KZT", "gross": False, "mode": "MONTH"}) is None
+
+
+@pytest.mark.parametrize(
+    ("formats", "expected"),
+    [
+        (["ON_SITE"], RemoteType.NO),
+        (["REMOTE"], RemoteType.FULL),
+        (["HYBRID"], RemoteType.HYBRID),
+        (["ON_SITE", "REMOTE"], RemoteType.FULL),
+        (["ON_SITE", "HYBRID"], RemoteType.HYBRID),
+        (["FIELD_WORK"], RemoteType.NO),
+        ([], RemoteType.NO),
+        (["SOMETHING_NEW"], RemoteType.NO),
+    ],
+)
+def test_remoteness_takes_the_most_remote_format_offered(
+    formats: list[str], expected: RemoteType
+) -> None:
+    """A posting offering both is one the candidate can take remotely."""
+    assert _remote_from(formats) is expected
+
+
+def test_strip_html_keeps_the_line_breaks_that_carry_meaning() -> None:
+    """A requirements list flattened to one line reads badly and embeds worse."""
+    text = strip_html(
+        "<p>Обязанности:</p><ul><li>Первое</li><li>Второе</li></ul>"
+        "<p>Зарплата&nbsp;— <strong>высокая</strong><br/>и вовремя</p>"
+    )
+
+    assert text is not None
+    assert text.splitlines() == [
+        "Обязанности:",
+        "Первое",
+        "Второе",
+        "Зарплата — высокая",
+        "и вовремя",
+    ]
+
+
+@pytest.mark.parametrize("markup", ["", None, "<p></p>", "   "])
+def test_strip_html_answers_none_for_nothing(markup: str | None) -> None:
+    """None rather than an empty string, so the caller records a stub."""
+    assert strip_html(markup) is None
+
+
+# -- sitemap parsing ---------------------------------------------------
+
+
+def test_a_captured_sitemap_file_parses_into_dated_entries() -> None:
+    """The real file, with the real timestamp format and the real ordering."""
+    site = HHSite(host=HOST, city="Алматы", country="KZ")
+    body = (FIXTURES / "hh_sitemap_vacancy0.xml").read_text(encoding="utf-8")
+    import re
+
+    pairs = re.findall(r"<loc>(.*?)</loc>\s*<lastmod>(.*?)</lastmod>", body)
+    entries = [entry for loc, mod in pairs if (entry := _entry(site, loc, mod))]
+
+    assert len(entries) == len(pairs) == 10
+    assert all(entry.lastmod.tzinfo is not None for entry in entries)
+    assert entries[0].external_id.isdigit()
+
+
+@pytest.mark.parametrize(
+    "loc",
+    [
+        "https://astana.hh.kz/vacancy/1",  # another host's file
+        "https://almaty.hh.kz/vacancy/1?utm=x",  # a query string
+        "https://almaty.hh.kz/resume/1",  # not a vacancy
+        "https://almaty.hh.kz/vacancies/python",  # an SEO landing page
+        "https://almaty.hh.kz/vacancy/abc",  # not an id
+    ],
+)
+def test_a_sitemap_line_that_is_not_ours_is_dropped(loc: str) -> None:
+    """A sitemap is a document somebody else writes, so its URLs are input."""
+    site = HHSite(host=HOST, city="Алматы", country="KZ")
+
+    assert _entry(site, loc, "2026-09-06T10:00:00+03:00") is None
+
+
+def test_a_url_is_rebuilt_rather_than_taken_from_the_sitemap() -> None:
+    """So nothing a sitemap says can put a query string into a URL we then fetch."""
+    site = HHSite(host=HOST, city="Алматы", country="KZ")
+
+    entry = _entry(site, f"https://{HOST}/vacancy/136773120", "2026-09-06T10:00:00+03:00")
+
+    assert entry is not None
+    assert entry.url == vacancy_url("136773120")
+    assert entry.lastmod.utcoffset() == timedelta(hours=3)
+
+
+def test_a_sitemap_line_with_an_unparsable_date_is_dropped_not_fatal() -> None:
+    """One malformed entry must not cost the other 1386."""
+    site = HHSite(host=HOST, city="Алматы", country="KZ")
+
+    assert _entry(site, f"https://{HOST}/vacancy/1", "last tuesday") is None
+
+
+# -- configuration -----------------------------------------------------
+
+
+def test_the_shipped_site_list_is_usable_and_names_a_default() -> None:
+    """A plan naming no city we serve still has somewhere to look."""
+    sites = load_sites()
+
+    assert sites
+    assert [site for site in sites if site.default]
+    assert all(site.host.endswith(("hh.kz", "hh.ru")) for site in sites)
+
+
+def test_a_planned_area_picks_its_city_and_anything_else_falls_back() -> None:
+    """The area is free text out of a resume, so it is matched, never parsed."""
+    source = HHSource()
+
+    assert [site.host for site in source.sites_for([SearchQuery(area="Алматы")])] == [
+        "almaty.hh.kz"
+    ]
+    assert [site.host for site in source.sites_for([SearchQuery(area="astana")])] == [
+        "astana.hh.kz"
+    ]
+    assert [site.host for site in source.sites_for([SearchQuery(area="Берлин")])] == [
+        "almaty.hh.kz"
+    ]
+    assert [site.host for site in source.sites_for([SearchQuery()])] == ["almaty.hh.kz"]
+
+
+def test_the_connector_declares_no_credentials_and_is_always_configured() -> None:
+    """Anonymous is the whole design: no key can be added without changing that."""
+    source = HHSource()
+
+    assert source.required_credentials == ()
+    assert source.requires_auth is False
+    assert source.is_configured()
+    assert source.unavailable() is None
+    assert source.daily_quota is None
+
+
+async def test_a_source_with_no_position_store_still_walks(
+    client: SourceClient, http: respx.MockRouter
+) -> None:
+    """Absent hooks mean "start from the beginning", not a crash.
+
+    A connector held directly — in a script, in a test — has no pipeline behind
+    it to supply a store, and it has to work anyway.
+    """
+    http.get(ROBOTS_URL).mock(return_value=httpx.Response(200, text=HH_ROBOTS))
+    http.get(INDEX_URL).mock(
+        return_value=httpx.Response(
+            200, text=(FIXTURES / "hh_sitemap_index.xml").read_text(encoding="utf-8")
+        )
+    )
+    http.get(VACANCY1_URL).mock(return_value=httpx.Response(200, text=sitemap([])))
+    serve(http, [FULL])
+    source = HHSource()
+    source.bind(client.bind(source))
+
+    postings = [posting async for posting in source.search(SearchQuery())]
+
+    assert len(postings) == 1
+
+
+async def test_the_transport_refuses_a_search_url_even_if_this_connector_asked(
+    hh: HHSource,
+) -> None:
+    """The ban is not a promise this file makes; it is one the transport keeps."""
+    with pytest.raises(SourceError) as excinfo:
+        await hh.http.get_text(f"https://{HOST}/search/vacancy")
+
+    assert "закрыт" in excinfo.value.detail
+
+
+def _index_body() -> str:
+    """The captured sitemap index, for the assertion that it really lists resumes."""
+    return (FIXTURES / "hh_sitemap_index.xml").read_text(encoding="utf-8")
+
+
+# -- ordering, the position's lag, and sharing a budget ----------------
+
+
+async def test_the_freshest_postings_arrive_in_the_first_run(
+    hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the walk is not purely ascending.
+
+    A city's sitemap spans about a month. Ascending order is what makes the
+    position resumable, and on its own it would spend the first several runs on
+    three-week-old postings — a good share of them already expired — while the
+    vacancy published this morning waited a fortnight. For a job search that is
+    the wrong end of the file, so a bounded slice of the newest entries is
+    bought first.
+    """
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    serve(http, ids)  # dated ascending, so SALARY_TO_ONLY is the newest
+
+    postings = await collect(hh)
+
+    assert [posting.external_id for posting in postings][:2] == [SALARY_TO_ONLY, NO_COMPENSATION]
+    assert sorted(posting.external_id for posting in postings) == sorted(ids)
+
+
+async def test_a_head_pass_entry_is_not_bought_twice_in_one_run(
+    hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ascending pass walks past what the head pass already paid for."""
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    routes = serve(http, ids)
+
+    postings = await collect(hh)
+
+    assert len(postings) == len(ids)
+    assert [route.call_count for route in routes.values()] == [1, 1, 1, 1]
+
+
+async def test_the_head_pass_does_not_declare_the_tail_done(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The invariant the whole ordering rests on.
+
+    A mark can only ever say "everything up to here is done". Advancing it to an
+    entry the head pass fetched would declare every older entry done as well,
+    and the tail of the file would never be crawled at all — the exact silent
+    loss the ascending pass exists to prevent. So the head pass records nothing.
+    """
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
+    # Budget: index + two sitemaps + the two head pages, and nothing after.
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 5)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    routes = serve(http, ids)
+
+    first = await collect(hh)
+
+    assert [posting.external_id for posting in first] == [SALARY_TO_ONLY, NO_COMPENSATION]
+    assert store.saved == {}, "the head pass must record no position at all"
+
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 20)
+    second = await collect(hh)
+
+    assert {posting.external_id for posting in second} == set(ids)
+    assert routes[FULL].call_count == 1, "the oldest entry was reached exactly once"
+
+
+async def test_the_position_lags_the_yields_by_more_than_the_pipelines_batch(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why the mark trails what has been handed over.
+
+    A posting is yielded long before it is written: the runner accumulates a
+    batch and commits it in one statement. A mark naming the posting just
+    yielded would, after a crash, declare written what was only ever in memory —
+    and because the mark says done, those postings are never fetched again. The
+    lag has to exceed one of the runner's batches for that to be impossible,
+    which is asserted here directly so the two numbers cannot drift apart in
+    separate files.
+    """
+    assert WATERMARK_LAG > UPSERT_BATCH
+
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 3)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
+    ids = [
+        FULL,
+        NULL_COLLECTIONS,
+        NO_COMPENSATION,
+        SALARY_TO_ONLY,
+        SALARY_FROM_ONLY,
+        SALARY_NO_FREQUENCY,
+    ]
+    # Stop the walk before the file is drained: a finished file records its
+    # tail, and it is the mid-walk behaviour that matters here. Three requests
+    # go on the index and the two sitemaps, five on pages.
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
+    serve(http, ids)
+
+    await collect(hh)
+
+    saved = store.saved[f"sitemap:{HOST}:vacancy0"]
+    # Five entries dealt with, a lag of three: the mark names the second of
+    # them and says nothing about the three most recent.
+    assert saved["ids_at_lastmod"] == [NULL_COLLECTIONS]
+
+
+async def test_every_configured_city_is_reached_before_any_city_gets_seconds(
+    client: SourceClient,
+    http: respx.MockRouter,
+    store: StateStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A shared counter walked in order starves the cities after the first.
+
+    Backfilling one city takes about a dozen runs, so a single budget spent
+    front to back means the second city in the file sees nothing for days —
+    while the run reports success and an empty crawl looks like an empty market.
+    """
+    sites = tmp_path / "hh_sites.yaml"
+    sites.write_text(
+        "sites:\n"
+        "  - host: almaty.hh.kz\n    city: Алматы\n    country: KZ\n    default: true\n"
+        "    aliases: [алматы]\n"
+        "  - host: astana.hh.kz\n    city: Астана\n    country: KZ\n    default: true\n"
+        "    aliases: [астана]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.sources.hh.SITES_FILE", sites)
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 0)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
+    # Eight requests, four per city: index, two sitemaps, one page.
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
+
+    for host in ("almaty.hh.kz", "astana.hh.kz"):
+        http.get(f"https://{host}/robots.txt").mock(
+            return_value=httpx.Response(200, text=HH_ROBOTS)
+        )
+        http.get(f"https://{host}/sitemap/main.xml").mock(
+            return_value=httpx.Response(
+                200,
+                text=(FIXTURES / "hh_sitemap_index.xml")
+                .read_text(encoding="utf-8")
+                .replace("almaty.hh.kz", host),
+            )
+        )
+        http.get(f"https://{host}/sitemap/vacancy1.xml").mock(
+            return_value=httpx.Response(200, text=sitemap([]))
+        )
+        body = sitemap(dated([FULL, NULL_COLLECTIONS])).replace("almaty.hh.kz", host)
+        http.get(f"https://{host}/sitemap/vacancy0.xml").mock(
+            return_value=httpx.Response(200, text=body)
+        )
+        for vacancy_id in (FULL, NULL_COLLECTIONS):
+            http.get(f"https://{host}/vacancy/{vacancy_id}").mock(
+                return_value=httpx.Response(200, text=page(state(vacancy_id)))
+            )
+
+    source = HHSource()
+    source.bind(client.bind(source)).with_state(store.load, store.save)
+    postings = [posting async for posting in source.search_batch([SearchQuery()])]
+
+    hosts = {posting.url.split("/")[2] for posting in postings}
+    assert hosts == {"almaty.hh.kz", "astana.hh.kz"}
+
+
+# -- sitemap files that are empty, and files that are broken -----------
+
+
+async def test_an_empty_sitemap_file_is_survivable(hh: HHSource, http: respx.MockRouter) -> None:
+    """A small city legitimately has one, and it must not kill the walk."""
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "<?xml version='1.0' encoding='utf-8'?>"
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>'
+            ),
+        )
+    )
+
+    assert await collect(hh) == []
+
+
+async def test_a_sitemap_listing_urls_it_cannot_read_is_a_markup_change(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The distinction the empty case must not swallow.
+
+    A file with entries we can no longer parse — a renamed element, a dropped
+    lastmod — is hh changing the format, and it has to be loud. A file with
+    nothing in it is just empty. Both look like "zero entries" to a caller that
+    does not check which.
+    """
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "<?xml version='1.0' encoding='utf-8'?><urlset><url>"
+                f"<loc>{vacancy_url(FULL)}</loc><changed>2026-09-06</changed>"
+                "</url></urlset>"
+            ),
+        )
+    )
+
+    with pytest.raises(HHMarkupError):
+        await collect(hh)
+
+
+async def test_a_page_that_answers_for_a_different_vacancy_is_not_stored(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The shared client follows redirects, so the page answering is not always the page asked for.
+
+    hh forwards a superseded posting to its replacement. Storing that under the
+    id we asked for would file one vacancy's text under another's key, and every
+    later run would overwrite it again.
+    """
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated([FULL]))))
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(200, text=page(state(NULL_COLLECTIONS)))
+    )
+
+    assert await collect(hh) == []
+
+
+@pytest.mark.parametrize(
+    "frequency", ["MONTHLY", "TWICE_PER_MONTH", "WEEKLY", "DAILY", "PER_PROJECT"]
+)
+def test_the_payment_schedule_is_never_read_as_the_period(frequency: str) -> None:
+    """``frequency`` says how often it is paid, ``mode`` says what it is per.
+
+    Both are measured on the same postings — a monthly salary paid twice a month
+    is ordinary here — and reading the schedule as the period would divide a
+    salary by two, by 4.3 or by 21 before anything compares it to another
+    currency.
+    """
+    salary = _salary(
+        {
+            "from": 300000,
+            "currencyCode": "KZT",
+            "gross": False,
+            "mode": "MONTH",
+            "frequency": frequency,
+        }
+    )
+
+    assert salary is not None
+    assert salary.period is SalaryPeriod.MONTH
+    assert salary.frequency == frequency

@@ -1025,3 +1025,34 @@ async def test_a_dictionary_call_with_parameters_still_reaches_api_hh_ru(
 
     assert payload == {"categories": []}
     assert dict(route.calls[0].request.url.params) == {"locale": "RU"}
+
+
+# -- the cache salt ----------------------------------------------------
+
+
+async def test_a_changed_salt_is_a_cache_miss_and_an_unchanged_one_is_a_hit(
+    tmp_path: Path, clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """Invalidation by "the thing changed", not by "an hour passed".
+
+    hh publishes a lastmod per vacancy in its sitemap, so a crawler knows before
+    it asks whether a page can have moved. Passing that as the salt makes an
+    edited posting a miss and an untouched one a hit for the whole TTL, which is
+    what a thirty-day cache over fourteen thousand pages needs in order to be
+    both cheap and correct.
+    """
+    cache = ResponseCache(tmp_path)
+    route = http.get(PAGE_URL).mock(
+        side_effect=[httpx.Response(200, text=body) for body in ("first", "second")]
+    )
+    http.get(ROBOTS_URL).mock(return_value=httpx.Response(404))
+    client = clients(cache=cache)
+    source = bind(client, ApiSource())
+
+    first = await source.get_text(PAGE_URL, cache_salt="2026-09-06T10:00:00+03:00")
+    again = await source.get_text(PAGE_URL, cache_salt="2026-09-06T10:00:00+03:00")
+    moved = await source.get_text(PAGE_URL, cache_salt="2026-09-06T11:00:00+03:00")
+
+    assert (first, again) == ("first", "first")
+    assert route.call_count == 2, "the repeat came from disk, the changed salt did not"
+    assert moved == "second"

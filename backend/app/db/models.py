@@ -447,3 +447,36 @@ class SourceQuota(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class SourceState(Base):
+    """Where a source got to last time, under a key the source chooses.
+
+    A crawler that walks a large corpus in slices has to remember its position
+    across runs, and nothing else here can hold that. ``PipelineRun`` records
+    what a run did, not where inside a source it stopped; ``SourceQuota``
+    counts requests. Deriving a position from run timestamps is wrong in the
+    one case that matters — a run that died halfway would advance a watermark
+    past pages it never fetched, and those postings would never be collected.
+
+    Deliberately opaque to the framework. The key is a string the connector
+    invents (hh uses one per sitemap file, because a sitemap file is what its
+    ``lastmod`` values are grouped by), and the value is JSONB the connector
+    writes and reads back. Making this table know about sitemaps would put a
+    connector's business in the schema, which is the thing CLAUDE.md rule 5
+    exists to prevent.
+
+    No surrogate id, for the same reason ``SourceQuota`` has none: the natural
+    key is the row's identity, and a UUID would invite a second row for it.
+    """
+
+    __tablename__ = "source_state"
+
+    source_slug: Mapped[str] = mapped_column(String(50), primary_key=True)
+    #: Namespaced by the connector. Never a user identifier and never a URL with
+    #: a credential in it — this table is dumped in support conversations.
+    key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

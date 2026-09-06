@@ -24,6 +24,7 @@ EXPECTED_TABLES = {
     "pipeline_run",
     "profile_skill",
     "source_quota",
+    "source_state",
     "vacancy",
     "vacancy_skill",
     "vacancy_source",

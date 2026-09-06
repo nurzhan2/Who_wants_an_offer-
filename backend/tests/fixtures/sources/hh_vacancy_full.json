@@ -1,0 +1,525 @@
+{
+ "vacancyView": {
+  "isBrandingPreview": false,
+  "approved": true,
+  "vacancyId": 136773120,
+  "divisionId": null,
+  "managerId": 16528136,
+  "@vacancyCode": null,
+  "canApplyAiAssistant": false,
+  "name": "Служба Заботы",
+  "multi": false,
+  "status": {
+   "active": true,
+   "archived": false,
+   "disabled": false,
+   "waiting": false,
+   "needFix": false
+  },
+  "publicationDate": "2026-09-06T09:56:03.075+03:00",
+  "compensation": {
+   "from": 300000,
+   "to": 500000,
+   "currencyCode": "KZT",
+   "gross": true,
+   "perModeFrom": 300000,
+   "perModeTo": 500000,
+   "mode": "MONTH",
+   "frequency": "TWICE_PER_MONTH"
+  },
+  "company": {
+   "@showSimilarVacancies": true,
+   "@trusted": true,
+   "@category": "COMPANY",
+   "@countryId": 3,
+   "@state": "APPROVED",
+   "id": 9944711,
+   "name": "Inspire International",
+   "visibleName": "Inspire International",
+   "employerOrganizationFormId": 4,
+   "showOrganizationForm": true,
+   "companySiteUrl": "https://inspireapp.kz/",
+   "accreditedITEmployer": false,
+   "isIdentifiedByEsia": false,
+   "employerOnAdditionalCheck": false
+  },
+  "area": {
+   "@id": 160,
+   "@countryIsoCode": "KZ",
+   "name": "Алматы",
+   "path": ".40.160.",
+   "regionName": "[RU:3:area.None]",
+   "areaNamePre": "Алматы",
+   "areaCatalogTitle": "в Алматы"
+  },
+  "address": {
+   "@disabled": false,
+   "@wrong": false,
+   "city": "Алматы",
+   "street": "проспект Сакена Сейфуллина",
+   "building": "498",
+   "displayName": "Алматы, проспект Сакена Сейфуллина, 498",
+   "marker": {
+    "@lat": 43.251512,
+    "@lng": 76.933742
+   },
+   "manager": {
+    "@id": 12375970
+   }
+  },
+  "contactInfo": {
+   "contactsHidden": true
+  },
+  "asyncContactInfo": null,
+  "@showContact": true,
+  "allowChatWithManager": false,
+  "validThroughTime": "2026-09-30T09:56:03.086+03:00",
+  "hr-brand": null,
+  "inclusivenessTypes": null,
+  "inclusivenessDescription": "",
+  "@ageRestriction": null,
+  "workExperience": "between1And3",
+  "employmentForm": "FULL",
+  "workScheduleByDays": [
+   "FIVE_ON_TWO_OFF"
+  ],
+  "workingHours": [
+   "HOURS_8"
+  ],
+  "workFormats": [
+   "ON_SITE"
+  ],
+  "flyInFlyOutDurations": [],
+  "nightShifts": false,
+  "internship": false,
+  "description": "<p><strong>Мы Inspire</strong> — первая казахстанская компания, которая занимается ментальным здоровьем, личностным развитием и бизнес-мышлением.</p> <p>Мы создаем программы, которые помогают людям полностью менять мышление и добиваться высоких результатов в жизни, карьере, деньгах.</p> <p>В команде <strong>Inspire </strong>работают специалисты по психологии и тренера личностной трансформации. Мы создаем программы и обучение, которые помогают людям принимать сильные решения и двигаться к своим целям.</p> <p><strong>На данный момент у нас:</strong></p> <p>10 стран партнеров,<br />11 офисов,<br />6000 + клиентов по миру,<br />50.000 + посетителей мастер-классов.<br />Мы ищем людей, которым близка идея роста и работы ради высокой цели. Людей, которые хотят не просто выполнять задачи, а участвовать в создании проекта, который меняет жизни в лучшую сторону.</p> <p>Наш девиз:<strong> «Счастье персонала - это наш успех!»</strong></p> <p><strong>О позиции</strong><br />Ищем специалиста в <em>службу заботы</em> — вы будете сопровождать новых партнёров компании, помогать им пройти адаптацию и обучение, и мотивировать на успешный старт.</p> <p><strong>Обязанности</strong></p> <ul> <li>Ежедневное сопровождение и контакт с новыми партнёрами компании</li> <li>Мотивация партнёров к прохождению обучения</li> <li>Работа со звонками и перепиской с закреплёнными партнёрами</li> <li>Отслеживание прогресса партнёров и помощь на всех этапах адаптации</li> </ul> <p><br /><strong>Требования</strong></p> <ul> <li>Опыт работы от 1 года в колл-центре</li> <li>Стрессоустойчивость</li> <li>Эмпатия</li> <li>Энергичность</li> <li>Грамотная устная и письменная речь</li> <li>Владение казахским и русским языками</li> <li>Уверенный пользователь ПК</li> </ul> <p><strong>Условия</strong></p> <ul> <li>График: 5/2, полный день, с 10:00 до 19:00</li> <li>Бесплатная парковка для сотрудников</li> <li>Ежедневные талоны на обед</li> <li>Тимбилдинги за счет компании</li> <li>Обучение и постоянное курирование в начале стажировки</li> <li>Бесплатный доступ ко всем материалам компании</li> <li>Бонус 50 000 ₸ за каждого партнёра, ставшего лидером</li> <li>Стажировка — 1 неделя</li> <li>Требуется собственный ноутбук и телефон для работы</li> </ul>",
+  "platforms": [
+   "HH"
+  ],
+  "keySkills": {
+   "keySkill": [
+    "Деловое общение",
+    "Эмпатия",
+    "Телефонные переговоры",
+    "Работа с базами данных",
+    "Деловая переписка",
+    "Работа с большим объемом информации",
+    "забота",
+    "Обратная связь"
+   ]
+  },
+  "driverLicenseTypes": null,
+  "mapDisabled": false,
+  "showSignupForm": true,
+  "showResumeForm": false,
+  "showSkillsSurvey": false,
+  "skillsSurveyProfession": null,
+  "brandingType": null,
+  "hasChameleonContent": false,
+  "brandSnippetExpirationTime": null,
+  "systemInfo": null,
+  "canViewResponses": false,
+  "userTestId": null,
+  "userLabels": [],
+  "features": [
+   "canApply"
+  ],
+  "vacancyOnMapLink": "/search/vacancy/map?vacancy_id=",
+  "professionalRoleIds": [
+   121
+  ],
+  "translations": {
+   "workExperience": "1–3 года"
+  },
+  "vacancyProperties": {
+   "properties": [
+    {
+     "id": 686190722,
+     "propertyType": "HH_STANDARD_PLUS",
+     "defining": true,
+     "classifying": true,
+     "bundle": "HH",
+     "propertyWeight": 600,
+     "parameters": [
+      {
+       "key": "packageName",
+       "value": "RENEWAL_VP"
+      },
+      {
+       "key": "serviceId",
+       "value": "67526134"
+      }
+     ],
+     "startTimeIso": "2026-08-31T09:56:03.086+03:00",
+     "endTimeIso": "2026-09-30T09:56:03.086+03:00"
+    },
+    {
+     "id": 686190724,
+     "propertyType": "HH_AUTO_RENEWAL",
+     "bundle": "HH",
+     "propertyWeight": 600,
+     "parameters": [
+      {
+       "key": "intervalMinutes",
+       "value": "4320"
+      },
+      {
+       "key": "packageName",
+       "value": "RENEWAL_VP"
+      },
+      {
+       "key": "serviceId",
+       "value": "67526134"
+      },
+      {
+       "key": "nextActivationTimeIso",
+       "value": "2026-09-09T09:56:03.086+03:00"
+      }
+     ],
+     "startTimeIso": "2026-08-31T09:56:03.086+03:00",
+     "endTimeIso": "2026-09-30T09:56:03.086+03:00"
+    },
+    {
+     "id": 686190723,
+     "propertyType": "HH_SEARCH_RESULTS_NORMAL_POSITION",
+     "bundle": "HH",
+     "propertyWeight": 600,
+     "parameters": [
+      {
+       "key": "packageName",
+       "value": "RENEWAL_VP"
+      },
+      {
+       "key": "serviceId",
+       "value": "67526134"
+      }
+     ],
+     "startTimeIso": "2026-08-31T09:56:03.086+03:00",
+     "endTimeIso": "2026-09-30T09:56:03.086+03:00"
+    }
+   ],
+   "calculatedStates": {
+    "HH": {
+     "advertising": false,
+     "anonymous": false,
+     "filteredPropertyNames": [
+      "HH_AUTO_RENEWAL",
+      "HH_STANDARD_PLUS",
+      "HH_SEARCH_RESULTS_NORMAL_POSITION"
+     ],
+     "free": false,
+     "inPlatformCommunication": false,
+     "optimum": false,
+     "optionPremium": false,
+     "payForPerformance": false,
+     "premium": false,
+     "standard": false,
+     "standardPlus": true,
+     "translationKeys": [
+      "employer.VacancyCreate.PublicationType.STANDARD_PLUS"
+     ],
+     "virtualRecruiter": false,
+     "translation": "Стандарт плюс"
+    }
+   }
+  },
+  "brandStickerIds": null,
+  "closedForApplicants": false,
+  "autoRenewal": null,
+  "acceptLaborContract": false,
+  "civilLawContracts": [
+   "SELF_EMPLOYED",
+   "INDIVIDUAL_ENTREPRENEUR",
+   "INDIVIDUAL_PERSON"
+  ]
+ },
+ "vacancyFieldsDictionary": {
+  "employmentForm": [
+   {
+    "id": "FULL",
+    "text": "Полная",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "PART",
+    "text": "Частичная",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "PROJECT",
+    "text": "Проект или разовое задание",
+    "duration": "TEMPORARY"
+   },
+   {
+    "id": "FLY_IN_FLY_OUT",
+    "text": "Вахта",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "SIDE_JOB",
+    "text": "Подработка",
+    "duration": "TEMPORARY"
+   }
+  ],
+  "civilLawContract": [
+   {
+    "id": "SELF_EMPLOYED",
+    "text": "с самозанятым"
+   },
+   {
+    "id": "INDIVIDUAL_ENTREPRENEUR",
+    "text": "с ИП"
+   },
+   {
+    "id": "INDIVIDUAL_PERSON",
+    "text": "с физлицом"
+   }
+  ],
+  "flyInFlyOutDurations": [
+   {
+    "id": "DAYS_15",
+    "text": "15"
+   },
+   {
+    "id": "DAYS_20",
+    "text": "20"
+   },
+   {
+    "id": "DAYS_30",
+    "text": "30"
+   },
+   {
+    "id": "DAYS_40",
+    "text": "40"
+   },
+   {
+    "id": "DAYS_45",
+    "text": "45"
+   },
+   {
+    "id": "DAYS_60",
+    "text": "60"
+   },
+   {
+    "id": "DAYS_90",
+    "text": "90"
+   },
+   {
+    "id": "DAYS_120",
+    "text": "120"
+   },
+   {
+    "id": "DAYS_180",
+    "text": "180"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "workFormats": [
+   {
+    "id": "ON_SITE",
+    "text": "На месте работодателя"
+   },
+   {
+    "id": "REMOTE",
+    "text": "Удалённо"
+   },
+   {
+    "id": "HYBRID",
+    "text": "Гибрид"
+   },
+   {
+    "id": "FIELD_WORK",
+    "text": "Разъездной"
+   }
+  ],
+  "workingHours": [
+   {
+    "id": "HOURS_2",
+    "text": "2"
+   },
+   {
+    "id": "HOURS_3",
+    "text": "3"
+   },
+   {
+    "id": "HOURS_4",
+    "text": "4"
+   },
+   {
+    "id": "HOURS_5",
+    "text": "5"
+   },
+   {
+    "id": "HOURS_6",
+    "text": "6"
+   },
+   {
+    "id": "HOURS_7",
+    "text": "7"
+   },
+   {
+    "id": "HOURS_8",
+    "text": "8"
+   },
+   {
+    "id": "HOURS_9",
+    "text": "9"
+   },
+   {
+    "id": "HOURS_10",
+    "text": "10"
+   },
+   {
+    "id": "HOURS_11",
+    "text": "11"
+   },
+   {
+    "id": "HOURS_12",
+    "text": "12"
+   },
+   {
+    "id": "HOURS_24",
+    "text": "24"
+   },
+   {
+    "id": "FLEXIBLE",
+    "text": "По договорённости"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "workScheduleByDays": [
+   {
+    "id": "SIX_ON_ONE_OFF",
+    "text": "6/1"
+   },
+   {
+    "id": "FIVE_ON_TWO_OFF",
+    "text": "5/2"
+   },
+   {
+    "id": "FOUR_ON_FOUR_OFF",
+    "text": "4/4"
+   },
+   {
+    "id": "FOUR_ON_THREE_OFF",
+    "text": "4/3"
+   },
+   {
+    "id": "FOUR_ON_TWO_OFF",
+    "text": "4/2"
+   },
+   {
+    "id": "THREE_ON_THREE_OFF",
+    "text": "3/3"
+   },
+   {
+    "id": "THREE_ON_TWO_OFF",
+    "text": "3/2"
+   },
+   {
+    "id": "TWO_ON_TWO_OFF",
+    "text": "2/2"
+   },
+   {
+    "id": "TWO_ON_ONE_OFF",
+    "text": "2/1"
+   },
+   {
+    "id": "ONE_ON_THREE_OFF",
+    "text": "1/3"
+   },
+   {
+    "id": "ONE_ON_TWO_OFF",
+    "text": "1/2"
+   },
+   {
+    "id": "WEEKEND",
+    "text": "По выходным"
+   },
+   {
+    "id": "FLEXIBLE",
+    "text": "Свободный"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "inclusivenessTypes": [
+   {
+    "id": "VISION",
+    "text": "Нарушения зрения"
+   },
+   {
+    "id": "MENTAL",
+    "text": "Ментальные особенности"
+   },
+   {
+    "id": "HEARING",
+    "text": "Нарушения слуха"
+   },
+   {
+    "id": "MOBILITY",
+    "text": "Нарушения мобильности"
+   },
+   {
+    "id": "CHRONIC_DISEASES",
+    "text": "Хронические заболевания"
+   },
+   {
+    "id": "UNSPECIFIED",
+    "text": "Категория не указана"
+   }
+  ],
+  "mode": [
+   {
+    "id": "MONTH",
+    "text": "За месяц"
+   },
+   {
+    "id": "SHIFT",
+    "text": "За смену"
+   },
+   {
+    "id": "HOUR",
+    "text": "За час"
+   },
+   {
+    "id": "FLY_IN_FLY_OUT",
+    "text": "За вахту"
+   },
+   {
+    "id": "SERVICE",
+    "text": "За услугу"
+   }
+  ],
+  "frequency": [
+   {
+    "id": "DAILY",
+    "text": "Ежедневно"
+   },
+   {
+    "id": "WEEKLY",
+    "text": "Раз в неделю"
+   },
+   {
+    "id": "TWICE_PER_MONTH",
+    "text": "Два раза в месяц"
+   },
+   {
+    "id": "MONTHLY",
+    "text": "Раз в месяц"
+   },
+   {
+    "id": "PER_PROJECT",
+    "text": "За проект"
+   }
+  ]
+ }
+}

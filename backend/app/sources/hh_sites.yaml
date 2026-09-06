@@ -1,0 +1,29 @@
+# Which hh sites this deployment crawls, and how a planned area finds one.
+#
+# A file rather than class constants for the reason CLAUDE.md gives: the city is
+# not a property of the code. A deployment that moves to Astana edits this and
+# nothing else; a deployment that adds hh.ru adds an entry here. `default: true`
+# marks the sites used when the plan names no place this file recognises, which
+# is what happens for a remote-only or relocation-only profile.
+#
+# `aliases` are matched case-insensitively against SearchQuery.area, which is
+# free text the candidate typed into their resume, so every spelling that
+# actually turns up belongs here.
+sites:
+  - host: almaty.hh.kz
+    city: Алматы
+    country: KZ
+    default: true
+    aliases: [алматы, алма-ата, almaty, alma-ata, алматы қаласы]
+  - host: astana.hh.kz
+    city: Астана
+    country: KZ
+    aliases: [астана, astana, нур-султан, nur-sultan, целиноград]
+  - host: shymkent.hh.kz
+    city: Шымкент
+    country: KZ
+    aliases: [шымкент, shymkent, чимкент]
+  - host: karaganda.hh.kz
+    city: Караганда
+    country: KZ
+    aliases: [караганда, karaganda, қарағанды]

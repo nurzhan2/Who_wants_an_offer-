@@ -23,7 +23,10 @@ test: ## Run the test suite with coverage
 	$(UV) run pytest
 
 test-fast: ## Tests that need neither PostgreSQL nor a model
-	$(UV) run pytest -m "not db and not slow"
+	# "not network" is repeated from pyproject's addopts on purpose: a -m on the
+	# command line REPLACES that one, so leaving it out points the fast suite at
+	# the live hh site.
+	$(UV) run pytest -m "not db and not slow and not network"
 
 verify-embeddings: ## Load the real bge-m3 model and prove it works
 	$(UV) run --extra embeddings python scripts/verify_embeddings.py

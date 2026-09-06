@@ -40,6 +40,7 @@ from app.db.enums import PipelineRunStatus, VacancyCompleteness
 from app.db.repositories.pipeline_run import PipelineRunRepository
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.source_quota import SourceQuotaRepository
+from app.db.repositories.source_state import SourceStateRepository
 from app.db.repositories.vacancy import UpsertItem, VacancyRepository
 from app.db.session import session_factory
 from app.normalize.fingerprint import VERSION as FINGERPRINT_VERSION
@@ -333,7 +334,12 @@ async def _crawl(
 
 
 def _bind(source: BaseSource, outcome: SourceOutcome, sessions: Sessions) -> BaseSource:
-    """Give the source its client, its credit hook and its "seen this?" lookup."""
+    """Give the source its client, its credit hook, its "seen this?" lookup and its position.
+
+    Each hook opens its own short session rather than sharing one. A crawl runs
+    for minutes and the write it does at the end must not sit behind a
+    transaction opened at the start of it.
+    """
 
     async def spend(slug: str) -> None:
         outcome.requests += 1
@@ -347,8 +353,24 @@ def _bind(source: BaseSource, outcome: SourceOutcome, sessions: Sessions) -> Bas
         async with sessions() as session:
             return await VacancyRepository(session).known_external_ids(source.slug, external_ids)
 
+    async def load_state(key: str) -> dict[str, Any] | None:
+        async with sessions() as session:
+            return await SourceStateRepository(session).get(source.slug, key)
+
+    async def save_state(key: str, value: dict[str, Any]) -> None:
+        # Committed as soon as the connector asks, not at the end of the crawl:
+        # the point of the record is to survive the run dying, and a value
+        # written inside a transaction that never commits records nothing.
+        async with sessions() as session:
+            await SourceStateRepository(session).set(source.slug, key, value)
+            await session.commit()
+
     client = get_client()
-    return source.bind(client.bind(source, on_request=spend)).with_known_ids(known)
+    return (
+        source.bind(client.bind(source, on_request=spend))
+        .with_known_ids(known)
+        .with_state(load_state, save_state)
+    )
 
 
 async def _write(postings: list[RawPosting], outcome: SourceOutcome, sessions: Sessions) -> None:

@@ -1,0 +1,492 @@
+{
+ "vacancyView": {
+  "isBrandingPreview": false,
+  "approved": true,
+  "vacancyId": 136555460,
+  "divisionId": null,
+  "managerId": 10938925,
+  "@vacancyCode": null,
+  "canApplyAiAssistant": false,
+  "name": "Охранник в магазин Mango в Dostyk Plaza",
+  "multi": false,
+  "status": {
+   "active": true,
+   "archived": false,
+   "disabled": false,
+   "waiting": false,
+   "needFix": false
+  },
+  "publicationDate": "2026-08-24T14:38:06.346+03:00",
+  "compensation": {
+   "from": 220000,
+   "to": 220000,
+   "currencyCode": "KZT",
+   "gross": false,
+   "perModeFrom": 220000,
+   "perModeTo": 220000,
+   "mode": "MONTH"
+  },
+  "company": {
+   "@showSimilarVacancies": true,
+   "@trusted": true,
+   "@category": "COMPANY",
+   "@countryId": 3,
+   "@state": "APPROVED",
+   "id": 8935231,
+   "name": "K&K GmbH",
+   "visibleName": "K&K GmbH",
+   "employerOrganizationFormId": 4,
+   "showOrganizationForm": true,
+   "companySiteUrl": "",
+   "accreditedITEmployer": false,
+   "isIdentifiedByEsia": false,
+   "employerOnAdditionalCheck": false
+  },
+  "area": {
+   "@id": 160,
+   "@countryIsoCode": "KZ",
+   "name": "Алматы",
+   "path": ".40.160.",
+   "regionName": "[RU:3:area.None]",
+   "areaNamePre": "Алматы",
+   "areaCatalogTitle": "в Алматы"
+  },
+  "address": {
+   "@disabled": false,
+   "@wrong": false,
+   "city": "Алматы",
+   "street": "микрорайон Самал-2",
+   "building": "111",
+   "displayName": "Алматы, микрорайон Самал-2, 111",
+   "marker": {
+    "@lat": 43.233478,
+    "@lng": 76.956685
+   },
+   "manager": {
+    "@id": 10938925
+   }
+  },
+  "contactInfo": {
+   "contactsHidden": true
+  },
+  "asyncContactInfo": null,
+  "@showContact": true,
+  "allowChatWithManager": false,
+  "validThroughTime": "2026-09-23T14:38:06.364+03:00",
+  "hr-brand": null,
+  "inclusivenessTypes": null,
+  "inclusivenessDescription": "",
+  "@ageRestriction": null,
+  "workExperience": "between1And3",
+  "employmentForm": "FULL",
+  "workScheduleByDays": [
+   "TWO_ON_TWO_OFF"
+  ],
+  "workingHours": [
+   "HOURS_12"
+  ],
+  "workFormats": [
+   "ON_SITE"
+  ],
+  "flyInFlyOutDurations": [],
+  "nightShifts": false,
+  "internship": false,
+  "description": "<p>В магазин Mango требуется охранник.</p> <p><strong>Обязанности:</strong></p> <ul> <li>охрана объекта</li> <li>контроль торгового зала</li> <li>контроль за ввозом и вывозом (выносом) материальных ценностей</li> </ul> <p><strong>Требования:</strong></p> <ul> <li>опыт работы на аналогичной позиции не менее 1 года</li> </ul> <p><strong>Условия:</strong></p> <ul> <li>график работы 2/2, с 10-00 до 22-00</li> </ul>",
+  "platforms": [
+   "HH"
+  ],
+  "keySkills": {
+   "keySkill": [
+    "Работа в команде",
+    "Умение работать в коллективе",
+    "Умение работать в команде",
+    "Охрана объекта",
+    "Улаживание конфликтов",
+    "Умение работать с людьми",
+    "Материальная ответственность"
+   ]
+  },
+  "driverLicenseTypes": null,
+  "mapDisabled": false,
+  "showSignupForm": true,
+  "showResumeForm": false,
+  "showSkillsSurvey": false,
+  "skillsSurveyProfession": null,
+  "brandingType": null,
+  "hasChameleonContent": false,
+  "brandSnippetExpirationTime": null,
+  "systemInfo": null,
+  "canViewResponses": false,
+  "userTestId": null,
+  "userLabels": [],
+  "features": [
+   "canApply"
+  ],
+  "vacancyOnMapLink": "/search/vacancy/map?vacancy_id=",
+  "professionalRoleIds": [
+   90
+  ],
+  "translations": {
+   "workExperience": "1–3 года"
+  },
+  "vacancyProperties": {
+   "properties": [
+    {
+     "id": 681821966,
+     "propertyType": "HH_STANDARD",
+     "defining": true,
+     "classifying": true,
+     "bundle": "HH",
+     "propertyWeight": 400,
+     "parameters": [
+      {
+       "key": "packageName",
+       "value": "VP"
+      },
+      {
+       "key": "serviceId",
+       "value": "67090859"
+      }
+     ],
+     "startTimeIso": "2026-08-24T14:38:06.364+03:00",
+     "endTimeIso": "2026-09-23T14:38:06.364+03:00"
+    },
+    {
+     "id": 681821965,
+     "propertyType": "HH_SEARCH_RESULTS_NORMAL_POSITION",
+     "bundle": "HH",
+     "propertyWeight": 400,
+     "parameters": [
+      {
+       "key": "packageName",
+       "value": "VP"
+      },
+      {
+       "key": "serviceId",
+       "value": "67090859"
+      }
+     ],
+     "startTimeIso": "2026-08-24T14:38:06.364+03:00",
+     "endTimeIso": "2026-09-23T14:38:06.364+03:00"
+    }
+   ],
+   "calculatedStates": {
+    "HH": {
+     "advertising": false,
+     "anonymous": false,
+     "filteredPropertyNames": [
+      "HH_SEARCH_RESULTS_NORMAL_POSITION",
+      "HH_STANDARD"
+     ],
+     "free": false,
+     "inPlatformCommunication": false,
+     "optimum": false,
+     "optionPremium": false,
+     "payForPerformance": false,
+     "premium": false,
+     "standard": true,
+     "standardPlus": false,
+     "translationKeys": [
+      "employer.VacancyCreate.PublicationType.STANDARD"
+     ],
+     "virtualRecruiter": false,
+     "translation": "Стандарт"
+    }
+   }
+  },
+  "brandStickerIds": null,
+  "closedForApplicants": false,
+  "autoRenewal": null,
+  "acceptLaborContract": false,
+  "civilLawContracts": null
+ },
+ "vacancyFieldsDictionary": {
+  "employmentForm": [
+   {
+    "id": "FULL",
+    "text": "Полная",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "PART",
+    "text": "Частичная",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "PROJECT",
+    "text": "Проект или разовое задание",
+    "duration": "TEMPORARY"
+   },
+   {
+    "id": "FLY_IN_FLY_OUT",
+    "text": "Вахта",
+    "duration": "PERMANENT"
+   },
+   {
+    "id": "SIDE_JOB",
+    "text": "Подработка",
+    "duration": "TEMPORARY"
+   }
+  ],
+  "civilLawContract": [
+   {
+    "id": "SELF_EMPLOYED",
+    "text": "с самозанятым"
+   },
+   {
+    "id": "INDIVIDUAL_ENTREPRENEUR",
+    "text": "с ИП"
+   },
+   {
+    "id": "INDIVIDUAL_PERSON",
+    "text": "с физлицом"
+   }
+  ],
+  "flyInFlyOutDurations": [
+   {
+    "id": "DAYS_15",
+    "text": "15"
+   },
+   {
+    "id": "DAYS_20",
+    "text": "20"
+   },
+   {
+    "id": "DAYS_30",
+    "text": "30"
+   },
+   {
+    "id": "DAYS_40",
+    "text": "40"
+   },
+   {
+    "id": "DAYS_45",
+    "text": "45"
+   },
+   {
+    "id": "DAYS_60",
+    "text": "60"
+   },
+   {
+    "id": "DAYS_90",
+    "text": "90"
+   },
+   {
+    "id": "DAYS_120",
+    "text": "120"
+   },
+   {
+    "id": "DAYS_180",
+    "text": "180"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "workFormats": [
+   {
+    "id": "ON_SITE",
+    "text": "На месте работодателя"
+   },
+   {
+    "id": "REMOTE",
+    "text": "Удалённо"
+   },
+   {
+    "id": "HYBRID",
+    "text": "Гибрид"
+   },
+   {
+    "id": "FIELD_WORK",
+    "text": "Разъездной"
+   }
+  ],
+  "workingHours": [
+   {
+    "id": "HOURS_2",
+    "text": "2"
+   },
+   {
+    "id": "HOURS_3",
+    "text": "3"
+   },
+   {
+    "id": "HOURS_4",
+    "text": "4"
+   },
+   {
+    "id": "HOURS_5",
+    "text": "5"
+   },
+   {
+    "id": "HOURS_6",
+    "text": "6"
+   },
+   {
+    "id": "HOURS_7",
+    "text": "7"
+   },
+   {
+    "id": "HOURS_8",
+    "text": "8"
+   },
+   {
+    "id": "HOURS_9",
+    "text": "9"
+   },
+   {
+    "id": "HOURS_10",
+    "text": "10"
+   },
+   {
+    "id": "HOURS_11",
+    "text": "11"
+   },
+   {
+    "id": "HOURS_12",
+    "text": "12"
+   },
+   {
+    "id": "HOURS_24",
+    "text": "24"
+   },
+   {
+    "id": "FLEXIBLE",
+    "text": "По договорённости"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "workScheduleByDays": [
+   {
+    "id": "SIX_ON_ONE_OFF",
+    "text": "6/1"
+   },
+   {
+    "id": "FIVE_ON_TWO_OFF",
+    "text": "5/2"
+   },
+   {
+    "id": "FOUR_ON_FOUR_OFF",
+    "text": "4/4"
+   },
+   {
+    "id": "FOUR_ON_THREE_OFF",
+    "text": "4/3"
+   },
+   {
+    "id": "FOUR_ON_TWO_OFF",
+    "text": "4/2"
+   },
+   {
+    "id": "THREE_ON_THREE_OFF",
+    "text": "3/3"
+   },
+   {
+    "id": "THREE_ON_TWO_OFF",
+    "text": "3/2"
+   },
+   {
+    "id": "TWO_ON_TWO_OFF",
+    "text": "2/2"
+   },
+   {
+    "id": "TWO_ON_ONE_OFF",
+    "text": "2/1"
+   },
+   {
+    "id": "ONE_ON_THREE_OFF",
+    "text": "1/3"
+   },
+   {
+    "id": "ONE_ON_TWO_OFF",
+    "text": "1/2"
+   },
+   {
+    "id": "WEEKEND",
+    "text": "По выходным"
+   },
+   {
+    "id": "FLEXIBLE",
+    "text": "Свободный"
+   },
+   {
+    "id": "OTHER",
+    "text": "Другое"
+   }
+  ],
+  "inclusivenessTypes": [
+   {
+    "id": "VISION",
+    "text": "Нарушения зрения"
+   },
+   {
+    "id": "MENTAL",
+    "text": "Ментальные особенности"
+   },
+   {
+    "id": "HEARING",
+    "text": "Нарушения слуха"
+   },
+   {
+    "id": "MOBILITY",
+    "text": "Нарушения мобильности"
+   },
+   {
+    "id": "CHRONIC_DISEASES",
+    "text": "Хронические заболевания"
+   },
+   {
+    "id": "UNSPECIFIED",
+    "text": "Категория не указана"
+   }
+  ],
+  "mode": [
+   {
+    "id": "MONTH",
+    "text": "За месяц"
+   },
+   {
+    "id": "SHIFT",
+    "text": "За смену"
+   },
+   {
+    "id": "HOUR",
+    "text": "За час"
+   },
+   {
+    "id": "FLY_IN_FLY_OUT",
+    "text": "За вахту"
+   },
+   {
+    "id": "SERVICE",
+    "text": "За услугу"
+   }
+  ],
+  "frequency": [
+   {
+    "id": "DAILY",
+    "text": "Ежедневно"
+   },
+   {
+    "id": "WEEKLY",
+    "text": "Раз в неделю"
+   },
+   {
+    "id": "TWICE_PER_MONTH",
+    "text": "Два раза в месяц"
+   },
+   {
+    "id": "MONTHLY",
+    "text": "Раз в месяц"
+   },
+   {
+    "id": "PER_PROJECT",
+    "text": "За проект"
+   }
+  ]
+ }
+}
