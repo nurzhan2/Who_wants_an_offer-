@@ -14,9 +14,10 @@ never a long one: "не отключать rate limiting «чтобы быстр
 person in a hurry as much as to a loop.
 
 **Minimal normalisation is still normalisation.** A fingerprint is required by
-the schema, so it is computed here, and it is computed timidly: the city is left
-out rather than guessed from free text, because a wrong city merges two
-different jobs into one row and the second job is then simply gone.
+the schema, so it is computed here, and it is computed timidly: a city goes into
+the key when the source stated one in a structured field and never when it has
+to be guessed out of a free-text line, because a wrong city merges two different
+jobs into one row and the second job is then simply gone.
 """
 
 from collections.abc import AsyncIterator
@@ -44,8 +45,13 @@ def posting(
     title: str = "Backend Engineer",
     company: str | None = "Acme",
     description: str | None = "Python, FastAPI.",
+    derived: dict[str, object] | None = None,
 ) -> RawPosting:
-    """One posting from a fake source."""
+    """One posting from a fake source.
+
+    ``derived`` fills ``raw["_derived"]``, the block a connector writes what it
+    worked out into. It is the only channel a city reaches the runner through.
+    """
     return RawPosting(
         source_slug="fake",
         external_id=external_id,
@@ -53,6 +59,7 @@ def posting(
         title=title,
         company=company,
         description=description,
+        raw={"_derived": derived} if derived is not None else {},
     )
 
 
@@ -114,13 +121,46 @@ def test_a_posting_gets_the_fingerprint_the_column_demands() -> None:
     assert created.fingerprint_version == FINGERPRINT_VERSION
 
 
-def test_the_city_is_left_out_rather_than_guessed() -> None:
+def test_a_source_that_states_no_city_gets_no_city() -> None:
     """A guessed city changes the fingerprint, and a wrong fingerprint either
     splits one job in two — annoying, repairable — or merges two different jobs
     into one row, where the second one's title, salary and link are overwritten
     and no later pass can tell anything was lost."""
     created = to_vacancy(posting("1"))
     assert created.city is None
+
+
+def test_a_stated_city_reaches_both_the_column_and_the_key() -> None:
+    """A connector that reads a city off a structured field is not guessing, so
+    its value is used — in the column and in the fingerprint alike. A row keyed
+    apart by a city its own column does not show is a row nobody can explain."""
+    created = to_vacancy(posting("1", derived={"city": "Алматы"}))
+
+    assert created.city == "Алматы"
+    assert created.fingerprint == fingerprint(
+        company="Acme", title="Backend Engineer", city="Алматы"
+    )
+
+
+def test_one_employer_advertising_in_two_cities_is_two_vacancies() -> None:
+    """The loss version 2 of the fingerprint exists to stop: without the city
+    these two hashed together, the second overwrote the first in place, and the
+    vacancy count read low with nothing recording that a posting had gone."""
+    almaty = to_vacancy(posting("a", company="Магнум", derived={"city": "Алматы"}))
+    astana = to_vacancy(posting("b", company="Магнум", derived={"city": "Астана"}))
+
+    assert almaty.fingerprint != astana.fingerprint
+
+
+def test_a_free_text_location_is_not_treated_as_a_city() -> None:
+    """JSearch derives a ``location`` line that runs city, region and country
+    together. Cutting a city out of it is phase 4's job; hashing the whole line
+    would key one job differently on every source that spells its place its own
+    way."""
+    created = to_vacancy(posting("1", derived={"location": "Алматы, Казахстан"}))
+
+    assert created.city is None
+    assert created.fingerprint == fingerprint(company="Acme", title="Backend Engineer", city=None)
 
 
 def test_the_same_job_from_two_publishers_hashes_the_same() -> None:

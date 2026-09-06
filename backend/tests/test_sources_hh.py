@@ -44,6 +44,7 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from structlog.testing import capture_logs
 
 from app.core.config import settings
 from app.core.exceptions import SourceError
@@ -51,6 +52,7 @@ from app.db.enums import RemoteType, SalaryPeriod
 from app.pipeline.runner import UPSERT_BATCH
 from app.sources.base import RawPosting, SearchQuery
 from app.sources.hh import (
+    GONE_STATUSES,
     MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
     MAX_TIED_IDS,
@@ -67,7 +69,7 @@ from app.sources.hh import (
     strip_html,
     unwrap,
 )
-from app.sources.http import ResponseCache, SourceClient
+from app.sources.http import HHChallengedError, ResponseCache, SourceClient
 
 pytestmark = pytest.mark.unit
 
@@ -1700,3 +1702,227 @@ def test_a_sitemap_id_too_long_for_the_column_is_dropped() -> None:
 
     assert _entry(site, f"https://{HOST}/vacancy/{long_id}", "2026-09-06T10:00:00+03:00") is None
     assert _entry(site, f"https://{HOST}/vacancy/1" * 1, "2026-09-06T10:00:00+03:00") is not None
+
+
+# -- a check for robots stops the walk ---------------------------------
+
+
+CAPTCHA_URL = f"https://{HOST}/account/captcha?backurl=/vacancy/1&state=7f3c1a"
+
+
+async def drain_until_challenged(source: HHSource) -> list[RawPosting]:
+    """Everything the walk yielded before hh refused it.
+
+    Written out rather than reusing ``collect`` because the list comprehension
+    there discards its partial result when the generator raises, and what the
+    walk had already handed over is precisely what this section is about.
+    """
+    got: list[RawPosting] = []
+    with pytest.raises(HHChallengedError):
+        async for posting in source.search_batch([SearchQuery()]):
+            got.append(posting)
+    return got
+
+
+async def test_a_captcha_redirect_stops_the_walk_and_keeps_what_it_bought(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The live run of 2026-09-06, in miniature.
+
+    172 vacancies had been read when request 173 — a plain ``/vacancy/{id}``
+    with no query string — was answered ``302`` into hh's captcha. Everything
+    read before it is real and paid for and is handed over; the walk then stops
+    for this source rather than trying the next page, because a captcha is a
+    decision about this crawler and the next page would get the same one.
+    """
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    for vacancy_id in (FULL, NULL_COLLECTIONS):
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+    http.get(vacancy_url(NO_COMPENSATION)).mock(
+        return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
+    )
+    captcha = http.get(url__startswith=f"https://{HOST}/account/captcha").mock(
+        return_value=httpx.Response(200, text="докажите, что вы не робот")
+    )
+
+    got = await drain_until_challenged(hh)
+
+    assert [posting.external_id for posting in got] == [FULL, NULL_COLLECTIONS]
+    assert captcha.call_count == 0, "the captcha page is never fetched, let alone solved"
+
+
+async def test_a_challenge_is_not_counted_as_an_unreadable_page(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """One odd page is tolerated; one captcha is not, and the difference matters.
+
+    The markup tolerance exists because a truncated response must not wedge a
+    walk that resumes at the same entry every run. A challenge is the opposite
+    situation: the markup was never seen, the site has decided something about
+    us, and spending two more requests to confirm it before reporting a page
+    redesign that did not happen is both wrong and impolite.
+    """
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
+    )
+    later = {
+        vacancy_id: http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+        for vacancy_id in (NULL_COLLECTIONS, NO_COMPENSATION)
+    }
+
+    with pytest.raises(HHChallengedError) as excinfo:
+        await collect(hh)
+
+    assert MAX_MARKUP_FAILURES == 3, "the tolerance this must not consume"
+    assert all(route.call_count == 0 for route in later.values())
+    assert "проверкой на робота" in excinfo.value.detail
+    assert not isinstance(excinfo.value, HHMarkupError)
+
+
+async def test_a_challenge_leaves_the_crawl_position_where_it_was(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The interruption that proved the watermark, asserted as a rule.
+
+    The position never names the page we were refused, so the next run asks for
+    it again — which is the whole reason a challenged run is recorded as an
+    interruption and not as a failure. The lag is shortened here so the mark
+    moves at all in a six-entry fixture; without that this would pass for the
+    uninteresting reason that nothing had been recorded yet.
+    """
+    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
+    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    for vacancy_id in (FULL, NULL_COLLECTIONS):
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(200, text=page(state(vacancy_id)))
+        )
+    for vacancy_id in (NO_COMPENSATION, SALARY_TO_ONLY):
+        http.get(vacancy_url(vacancy_id)).mock(
+            return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
+        )
+
+    await drain_until_challenged(hh)
+
+    recorded = store.saved.get(f"sitemap:{HOST}:vacancy0", {}).get("ids_at_lastmod", [])
+    assert NO_COMPENSATION not in recorded, "the refused page was declared dealt with"
+    assert SALARY_TO_ONLY not in recorded, "an entry never reached was declared dealt with"
+
+
+async def test_the_transport_and_not_this_connector_decides_what_a_captcha_is(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The connector builds no ``/account`` URL and needs no rule about one.
+
+    The redirect is chosen by hh and resolved inside httpx, so the only place
+    that sees the hop is the shared client's request hook. A check written here
+    would look like the guard while guarding nothing — the page would already
+    have been fetched by the time this module could look at it.
+    """
+    serve(http, [FULL])
+    http.get(vacancy_url(FULL)).mock(
+        return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
+    )
+
+    with pytest.raises(HHChallengedError) as excinfo:
+        await collect(hh)
+
+    assert excinfo.value.challenge_path == "/account/captcha"
+    assert excinfo.value.challenge_host == HOST
+
+
+async def test_a_challenge_names_the_host_and_the_page_in_the_log(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The one behaviour the ``except HHChallengedError`` clause actually adds.
+
+    Not consuming the markup tolerance is a property of the type — a challenge
+    is not an ``HHMarkupError``, so the counter never sees one — and holds with
+    that clause deleted; measured by deleting it, at which point every other
+    test in this file still passed. What deleting it loses is this line, which
+    is the only record of which host and which page a crawl was cut on, and
+    which somebody deciding whether to walk that host more slowly has to read.
+    Its two counters say how much of the walk had already been paid for.
+    """
+    ids = [FULL, NULL_COLLECTIONS]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(state(FULL))))
+    http.get(vacancy_url(NULL_COLLECTIONS)).mock(
+        return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
+    )
+
+    with capture_logs() as records:
+        got = await drain_until_challenged(hh)
+
+    assert [posting.external_id for posting in got] == [FULL]
+    stopped = [record for record in records if record["event"] == "sources.hh.challenged"]
+    assert len(stopped) == 1, "a crawl is cut once and says so once"
+    assert stopped[0]["log_level"] == "warning"
+    assert stopped[0]["host"] == HOST
+    assert stopped[0]["url"] == vacancy_url(NULL_COLLECTIONS)
+    assert stopped[0]["fetched"] == 2
+    assert stopped[0]["stored"] == 1
+
+
+class ChallengeWithAStatusError(HHChallengedError):
+    """A challenge that has learned a response status, as a later one might.
+
+    Today's carries none, and that is an accident of how this one arrives: the
+    transport refuses the redirect before the captcha hop is sent, so there is
+    no response to read a status off. A challenge delivered as a status code
+    would have one, and 404 is the value that makes the order of the ``except``
+    clauses in ``_fetch`` load-bearing rather than decorative — it is in
+    ``GONE_STATUSES``, so the clause below would file the page as taken down.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "hh: источник ответил проверкой на робота",
+            host=HOST,
+            path="/account/captcha",
+            source_slug="hh",
+        )
+        self.extra["response_status"] = 404
+
+
+async def test_a_challenge_carrying_a_gone_status_is_still_a_stopped_crawl(
+    hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``except HHChallengedError: raise`` in ``_fetch``, pinned to a test.
+
+    That clause is a no-op today — nothing carries a status for the clause
+    under it to read — which is exactly why it would survive a review as dead
+    code and be deleted. The day a challenge does carry 404, deleting it means
+    ``GONE_STATUSES`` matches, ``_fetch`` returns None, the page is counted as
+    a posting taken down, and the walk carries on through a host that has just
+    stopped us: no exception, no report, one more request. This asserts the
+    ordering instead of the accident that currently hides it.
+    """
+    assert 404 in GONE_STATUSES, "otherwise this proves nothing about the ordering"
+    ids = [FULL, NULL_COLLECTIONS]
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    asked: list[str] = []
+    served = hh.http.get_text
+
+    async def challenge_the_vacancy_pages(url: str, **kwargs: Any) -> str:
+        """Serve the sitemaps as usual; answer any vacancy page with a challenge."""
+        if "/vacancy/" not in url:
+            return await served(url, **kwargs)
+        asked.append(url)
+        raise ChallengeWithAStatusError
+
+    monkeypatch.setattr(hh.http, "get_text", challenge_the_vacancy_pages)
+
+    with pytest.raises(HHChallengedError) as excinfo:
+        await collect(hh)
+
+    assert excinfo.value.extra["response_status"] in GONE_STATUSES
+    assert asked == [vacancy_url(FULL)], "the walk went on past a host that had stopped it"

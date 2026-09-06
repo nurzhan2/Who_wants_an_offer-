@@ -24,6 +24,14 @@ is weaker than the file: ``urllib.robotparser`` has no wildcard support, so a
 rule like hh's ``Disallow: *?*`` parses as a literal path prefix and matches
 nothing at all. Rules we can read but it cannot apply are enforced by
 :meth:`SourceClient._refuse_forbidden` instead of being silently discarded.
+
+**A refusal and a challenge are two different events and say so.** Refusing a
+URL means we built one we are not allowed to ask for. Being challenged means we
+asked for exactly what we were allowed to ask for and the site decided we are a
+robot. They arrive at the same place — :func:`guard_redirects`, on a hop the
+remote server chose — and telling them apart is the whole of
+:func:`refuse_challenge`; see :class:`HHChallengedError` for what it cost to
+learn that the wrong message here is expensive.
 """
 
 import asyncio
@@ -44,7 +52,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict
 from tenacity import (
     AsyncRetrying,
     RetryCallState,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential_jitter,
 )
@@ -110,10 +118,34 @@ QUERYLESS_HOSTS: frozenset[str] = frozenset({"hh.kz", "hh.ru"})
 #: live file on 2026-09-06. Those files are living people's CVs, and the one
 #: prohibition in this phase that must not depend on a connector getting a
 #: regular expression right is therefore stated at the transport.
+#:
+#: ``/account`` is listed for a second reason on top of the obvious one that an
+#: anonymous crawler has no business on a signed-in page. It is what makes
+#: :func:`refuse_challenge` able to say "we were pushed here" as a fact rather
+#: than a guess: with the path closed to anything this process builds, a
+#: ``/account`` URL arriving at :func:`guard_redirects` can only have come from
+#: a redirect the remote server chose.
 BLOCKED_PATHS: dict[str, tuple[str, ...]] = {
-    "hh.kz": ("/search", "/resume", "/sitemap/resumes"),
-    "hh.ru": ("/search", "/resume", "/sitemap/resumes"),
+    "hh.kz": ("/search", "/resume", "/sitemap/resumes", "/account"),
+    "hh.ru": ("/search", "/resume", "/sitemap/resumes", "/account"),
     "api.hh.ru": ("/vacancies",),
+}
+
+#: Where a host sends us once it has decided we are a robot, per host rule.
+#:
+#: Measured on a live run on 2026-09-06: 184 requests over 253 seconds at about
+#: 0.7 rps, and on request 173 a plain ``GET https://almaty.hh.kz/vacancy/…``
+#: with no query string was answered ``302`` to
+#: ``/account/captcha?backurl=…&state=…``.
+#:
+#: The whole ``/account`` subtree is listed rather than ``/account/captcha``
+#: alone, because a site that has decided to challenge an anonymous reader has
+#: more than one door to push it through — a captcha interstitial and a login
+#: wall are the same decision wearing different clothes — and none of them is a
+#: page this crawler could do anything with if it arrived there.
+CHALLENGE_PATHS: dict[str, tuple[str, ...]] = {
+    "hh.kz": ("/account",),
+    "hh.ru": ("/account",),
 }
 
 #: Query parameters that carry a credential. Redacted before a URL reaches a log
@@ -147,6 +179,43 @@ class RetryableResponseError(SourceError):
         self.response_status = status_code
         self.retry_after = retry_after
         super().__init__(detail, source_slug=source_slug, response_status=status_code)
+
+
+class HHChallengedError(SourceError):
+    """The source answered a permitted URL with a check for robots.
+
+    A separate class because it means something different from every other
+    refusal in this module, and the difference is expensive to blur. The others
+    mean *we* built a URL we are not allowed to ask for, and the person reading
+    one goes and looks at URL construction. This one means we asked for exactly
+    what we were allowed to ask for and the site decided we are a robot — there
+    is nothing in the connector to fix, and sending somebody to look for it
+    costs an afternoon.
+
+    That is not hypothetical. On the live run of 2026-09-06 the message read
+    «robots.txt на almaty.hh.kz запрещает любой URL со строкой запроса» for a
+    request that was ``GET https://almaty.hh.kz/vacancy/136284790`` — no query
+    string, entirely within the rules. The query string belonged to the captcha
+    hh redirected us to, and the refusal to follow it was right; only the
+    explanation was wrong.
+
+    Named for hh because hh is the only host whose challenge has actually been
+    measured. :data:`CHALLENGE_PATHS` is where a second one would be added.
+
+    Two properties are load-bearing rather than incidental. It is **never
+    retried** — see :func:`worth_retrying`, which says so by name rather than by
+    happening to omit it from a tuple — because a challenge is a decision and
+    repeating a request a site has just refused is both useless and the rudest
+    thing a crawler can do. And it **never means the source is broken**, so the
+    pipeline records it as an interruption: see ``SourceOutcome.challenged``.
+    """
+
+    def __init__(
+        self, detail: str, *, host: str, path: str, source_slug: str | None = None
+    ) -> None:
+        self.challenge_host = host
+        self.challenge_path = path
+        super().__init__(detail, source_slug=source_slug, challenge_host=host, challenge_path=path)
 
 
 def parse_retry_after(value: str | None, *, now: datetime | None = None) -> float | None:
@@ -217,6 +286,53 @@ def redact(url: str | httpx.URL) -> str:
     return cleaned.geturl()
 
 
+def _covers(host: str, rule: str) -> bool:
+    """Whether a host rule names this host or one of its subdomains."""
+    return host == rule or host.endswith(f".{rule}")
+
+
+def _under(path: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether a path is one of these prefixes or sits below it.
+
+    Stricter than the ``startswith`` used for :data:`BLOCKED_PATHS`, and
+    deliberately not shared with it: there the loose form is the point —
+    ``/sitemap/resumes`` has to catch ``/sitemap/resumes0.xml``, which is a file
+    name and not a directory. Here the loose form would read ``/accountancy`` as
+    ``/account`` and report a page as a captcha, which is exactly the class of
+    wrong message this function exists to stop making.
+    """
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes)
+
+
+def refuse_challenge(url: httpx.URL, *, slug: str | None = None) -> None:
+    """Raise when this URL is a host's check for robots rather than a page.
+
+    Decided by the target and never by the status code. A 302 on its own is a
+    perfectly ordinary thing for a site to answer — hh moves a posting to its
+    successor with one all day long, and the connector depends on that working —
+    so the status says nothing. Where this particular 302 points says everything.
+
+    Meaningful only on a hop the remote server chose, which is why
+    :func:`guard_redirects` is the only caller: ``/account`` is in
+    :data:`BLOCKED_PATHS`, so a URL this process built is refused before a
+    request is ever constructed and cannot reach here.
+    """
+    prefix = f"{slug}: " if slug else ""
+    host = (url.host or "").lower()
+    for rule, prefixes in CHALLENGE_PATHS.items():
+        if _covers(host, rule) and _under(url.path, prefixes):
+            # The query string is dropped on purpose: hh's carries ``backurl``
+            # and an opaque ``state``, neither of which tells anybody anything
+            # and both of which would then live in pipeline_run.errors.
+            raise HHChallengedError(
+                f"{prefix}источник ответил проверкой на робота: {host} перенаправляет "
+                f"на {url.path} — прогон остановлен",
+                host=host,
+                path=url.path,
+                source_slug=slug,
+            )
+
+
 def refuse_forbidden(url: httpx.URL, *, slug: str | None = None) -> None:
     """Raise unless this exact URL may be requested.
 
@@ -235,7 +351,7 @@ def refuse_forbidden(url: httpx.URL, *, slug: str | None = None) -> None:
     host = (url.host or "").lower()
 
     def covers(rule: str) -> bool:
-        return host == rule or host.endswith(f".{rule}")
+        return _covers(host, rule)
 
     if any(covers(blocked) for blocked in BLOCKED_HOSTS):
         raise SourceError(
@@ -261,6 +377,23 @@ def refuse_forbidden(url: httpx.URL, *, slug: str | None = None) -> None:
             )
 
 
+def worth_retrying(exc: BaseException) -> bool:
+    """Whether this failure is worth spending another request on.
+
+    Written as a named predicate rather than left to
+    ``retry_if_exception_type((RetryableResponseError, httpx.TransportError))``
+    for one case: :class:`HHChallengedError` must never be retried, and "it
+    happens not to be in that tuple" is not a guarantee. Somebody widening the
+    tuple later — to ``SourceError``, say, which is the obvious widening and
+    which the challenge is a subclass of — would turn one antibot decision into
+    four requests against a site that has just said no, and nothing in the code
+    would have objected.
+    """
+    if isinstance(exc, HHChallengedError):
+        return False
+    return isinstance(exc, RetryableResponseError | httpx.TransportError)
+
+
 async def guard_redirects(request: httpx.Request) -> None:
     """Apply the bans to every request httpx makes, not only to the first.
 
@@ -274,7 +407,14 @@ async def guard_redirects(request: httpx.Request) -> None:
     Installed on the client rather than checked afterwards on
     ``response.history``, because by then the request has already been made,
     and "we never asked for it" is the whole promise.
+
+    The challenge check runs first, and the order is the fix rather than a
+    detail. hh's captcha URL carries a query string, so ``refuse_forbidden``
+    has a true thing to say about it — «robots.txt запрещает любой URL со
+    строкой запроса» — and that true thing describes a URL *we* built, which
+    this one is not. Asked second, it never gets the chance.
     """
+    refuse_challenge(request.url)
     refuse_forbidden(request.url)
 
 
@@ -762,7 +902,7 @@ class SourceClient:
             return backoff(state)
 
         retrying = AsyncRetrying(
-            retry=retry_if_exception_type((RetryableResponseError, httpx.TransportError)),
+            retry=retry_if_exception(worth_retrying),
             stop=stop_after_attempt(MAX_ATTEMPTS),
             wait=wait_policy,
             sleep=self.sleep,

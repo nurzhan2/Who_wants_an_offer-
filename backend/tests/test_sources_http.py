@@ -49,6 +49,7 @@ from app.sources.http import (
     MAX_ATTEMPTS,
     MAX_RETRY_AFTER_SECONDS,
     REDACTED,
+    HHChallengedError,
     ResponseCache,
     RetryableResponseError,
     RobotsCache,
@@ -57,6 +58,7 @@ from app.sources.http import (
     TokenBucket,
     parse_retry_after,
     redact,
+    worth_retrying,
 )
 
 pytestmark = pytest.mark.unit
@@ -72,6 +74,13 @@ PAGE_URL = f"{HOST}/jobs/1"
 #: Deliberately not the configured default, so an assertion on a sent header
 #: proves the value came from settings rather than from httpx's own default.
 USER_AGENT = "wwao-test-agent/9.9 (+https://example.invalid/bot)"
+
+#: The hh host and the exact page of the live run of 2026-09-06 whose 302 into
+#: a captcha was reported as a robots.txt violation. Real values, so the tests
+#: below describe the incident rather than an invented one.
+HH_HOST = "https://almaty.hh.kz"
+HH_VACANCY_URL = f"{HH_HOST}/vacancy/136284790"
+HH_CAPTCHA_URL = f"{HH_HOST}/account/captcha?backurl=/vacancy/136284790&state=7f3c1a"
 
 #: Key-shaped: long, opaque, no dot. Both redaction rules should catch it.
 SECRET = "0f9c2b7a41d84e6f8a3b5c7d9e1f2a3b"
@@ -1129,3 +1138,193 @@ async def test_a_borrowed_client_is_guarded_too(
         await bind(clients(borrowed), ApiSource()).get_text("https://indeed.com/viewjob")
 
     assert page.call_count == 0
+
+
+# -- a check for robots is not a rule we broke -------------------------
+#
+# Both of these end in a refused redirect, and both refusals are correct. The
+# whole of this section is that they are not the same event and must not read
+# as if they were. On the live run of 2026-09-06 the captcha was reported as a
+# robots.txt violation -- "this host forbids any URL with a query string" -- for
+# a request that had no query string in it, which sends whoever is on call to
+# fix URL construction: an afternoon spent looking for a bug that does not
+# exist, while the actual answer is to crawl that host more slowly or later.
+
+
+def serve_hh_robots(http: respx.MockRouter) -> respx.Route:
+    """hh's wildcard group, for the host these tests crawl."""
+    return http.get(f"{HH_HOST}/robots.txt").mock(return_value=httpx.Response(200, text=HH_ROBOTS))
+
+
+async def test_a_redirect_into_hhs_captcha_is_a_challenge_and_says_so(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The measured case, with the message it should have carried.
+
+    Request 173 of 184 was this URL, with no query string and entirely within
+    the rules, and hh answered a 302 into its captcha. Refusing to follow is
+    right and unchanged; what the refusal is called is the fix. The query
+    string belongs to hh's captcha, not to anything we built, so naming
+    robots.txt describes a URL this process never constructed.
+    """
+    serve_hh_robots(http)
+    page = http.get(HH_VACANCY_URL).mock(
+        return_value=httpx.Response(302, headers={"location": HH_CAPTCHA_URL})
+    )
+    captcha = http.get(url__startswith=f"{HH_HOST}/account/captcha").mock(
+        return_value=httpx.Response(200, text="докажите, что вы не робот")
+    )
+
+    with pytest.raises(HHChallengedError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
+
+    assert captcha.call_count == 0, "the captcha page itself is never fetched"
+    assert page.call_count == 1
+    detail = excinfo.value.detail
+    assert "проверкой на робота" in detail
+    assert "robots.txt" not in detail, "we did not break robots.txt; hh challenged us"
+    assert "строкой запроса" not in detail
+    assert excinfo.value.challenge_path == "/account/captcha"
+    # backurl and hh's opaque state say nothing to anybody and would then live
+    # in pipeline_run.errors and in an HTTP response.
+    assert "backurl" not in detail
+    assert "state=" not in detail
+
+
+async def test_a_redirect_to_what_robots_really_forbids_still_blames_robots(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The other half, unchanged and asserted so it cannot be lost to the fix.
+
+    A hop into hh's search is a URL nobody may request, the message says which
+    rule closes it, and it is not a challenge -- so a report cannot start
+    calling every refused redirect an antibot decision either.
+    """
+    serve_hh_robots(http)
+    http.get(HH_VACANCY_URL).mock(
+        return_value=httpx.Response(
+            302, headers={"location": f"{HH_HOST}/search/vacancy?text=python"}
+        )
+    )
+    search = http.get(f"{HH_HOST}/search/vacancy?text=python").mock(
+        return_value=httpx.Response(200, text="must not be read")
+    )
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
+
+    assert search.call_count == 0
+    assert not isinstance(excinfo.value, HHChallengedError)
+    assert "строкой запроса" in excinfo.value.detail
+
+
+async def test_a_302_is_not_by_itself_a_challenge(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The decision is the target, never the status code.
+
+    hh moves a posting to its successor with a 302 often enough that the walk
+    depends on following them. Reading the status as the signal would stop this
+    connector on an ordinary Tuesday.
+    """
+    serve_hh_robots(http)
+    http.get(HH_VACANCY_URL).mock(
+        return_value=httpx.Response(302, headers={"location": f"{HH_HOST}/vacancy/136284791"})
+    )
+    successor = http.get(f"{HH_HOST}/vacancy/136284791").mock(
+        return_value=httpx.Response(200, text="the posting that replaced it")
+    )
+
+    body = await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
+
+    assert body == "the posting that replaced it"
+    assert successor.call_count == 1
+
+
+async def test_a_challenge_is_never_retried(
+    clients: ClientFactory, http: respx.MockRouter, clock: FakeClock
+) -> None:
+    """Four attempts is the policy for a server having a bad minute.
+
+    A captcha is a decision, not a bad minute. Repeating a request a host has
+    just refused gains nothing and is the rudest thing a crawler can do, so the
+    page is asked for exactly once and no backoff is ever waited.
+    """
+    serve_hh_robots(http)
+    page = http.get(HH_VACANCY_URL).mock(
+        return_value=httpx.Response(302, headers={"location": HH_CAPTCHA_URL})
+    )
+
+    with pytest.raises(HHChallengedError):
+        await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
+
+    assert MAX_ATTEMPTS > 1, "otherwise this test proves nothing about the policy"
+    assert page.call_count == 1
+    assert clock.sleeps == [], "a challenge must not even wait a backoff"
+
+
+@pytest.mark.parametrize(
+    ("failure", "retried"),
+    [
+        (HHChallengedError("stopped", host="hh.kz", path="/account/captcha"), False),
+        (RetryableResponseError("503", status_code=503), True),
+        (httpx.ConnectError("connection reset"), True),
+        (SourceError("HTTP 404"), False),
+    ],
+)
+def test_the_retry_policy_names_the_challenge_rather_than_omitting_it(
+    failure: BaseException, retried: bool
+) -> None:
+    """Why the predicate is written out instead of a tuple of types.
+
+    The challenge is a SourceError, and SourceError is the obvious thing for
+    somebody to widen the retryable tuple to. That widening would turn one
+    antibot decision into four requests against a host that has just said no,
+    and nothing in the code would have objected. Naming it makes the widening
+    fail here instead.
+    """
+    assert worth_retrying(failure) is retried
+
+
+async def test_a_url_this_process_built_into_account_is_our_own_mistake(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """The invariant the challenge check rests on, asserted from the other side.
+
+    ``/account`` is closed to anything this process constructs, so a ``/account``
+    URL arriving at the redirect hook can only have come from a hop the remote
+    server chose. That is what lets the challenge say "we were pushed here" as a
+    fact. Asked for directly, it is refused as the ordinary closed path it is,
+    and the message says we built it.
+    """
+    page = http.get(url__startswith=f"{HH_HOST}/account").mock(
+        return_value=httpx.Response(200, text="must not be read")
+    )
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(f"{HH_HOST}/account/captcha")
+
+    assert page.call_count == 0
+    assert not isinstance(excinfo.value, HHChallengedError)
+    assert "закрыт" in excinfo.value.detail
+
+
+async def test_a_path_that_merely_starts_with_account_is_not_called_a_captcha(
+    clients: ClientFactory, http: respx.MockRouter
+) -> None:
+    """``/accountancy`` is a word, not a challenge.
+
+    The prefix test used for the blocked paths is loose on purpose --
+    ``/sitemap/resumes`` has to catch ``/sitemap/resumes0.xml`` -- and reusing
+    it here would report a page as an antibot decision, which is the exact class
+    of wrong message this whole section exists to stop making.
+    """
+    serve_hh_robots(http)
+    http.get(HH_VACANCY_URL).mock(
+        return_value=httpx.Response(302, headers={"location": f"{HH_HOST}/accountancy"})
+    )
+
+    with pytest.raises(SourceError) as excinfo:
+        await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
+
+    assert not isinstance(excinfo.value, HHChallengedError)

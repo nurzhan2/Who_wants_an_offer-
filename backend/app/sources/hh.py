@@ -23,6 +23,28 @@ layer answers "allowed" for the search URL — measured against the live file on
 from being gone, so the transport refuses a query string on hh outright, along
 with ``/search`` and ``api.hh.ru/vacancies``.
 
+**Being challenged is not the same as breaking a rule, and the crawl says
+which.** On a live run of 2026-09-06 — 184 requests over 253 seconds, 172
+vacancies read — request 173 was a plain ``GET /vacancy/136284790`` with no
+query string, and hh answered ``302`` to ``/account/captcha?…``. Refusing to
+follow that is right and stays. What changed is what it is called: a redirect
+into ``/account`` raises :class:`~app.sources.http.HHChallengedError` and stops
+the run for this source, instead of reporting that we built a URL robots.txt
+forbids, which we had not. Nothing is retried, nothing already fetched is
+thrown away, and the position stays where it was, so the next run resumes at
+the page this one was refused. What it does not do is solve the captcha, slow
+down and try again inside the same run, or come back wearing a browser's
+User-Agent.
+
+Only that redirect is recognised, and the gap is written down rather than
+papered over: a challenge delivered as a status code — a 403 whose body holds
+the captcha — has never been served to this repository, and a marker guessed
+for one would be worse than the gap. The ordinary page captured on 2026-09-06
+already carries ``captcha`` in its translations dictionary, under
+``error.signup.captcha.invalid``, so a body test written today would report
+every page it read successfully as a challenge. docs/SOURCES.md records what
+such a run looks like until somebody measures the real answer.
+
 **No account is involved, and that is the point.** The objection this connector
 had to answer was not robots but the user's own hh profile, where their working
 resume lives: an automated login there risks a ban that costs more than any
@@ -130,9 +152,10 @@ from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.db.enums import RemoteType, SalaryPeriod
 from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
+from app.sources.http import HHChallengedError
 from app.sources.registry import register_source
 
-if TYPE_CHECKING:  # pragma: no cover - the runtime import would be a cycle
+if TYPE_CHECKING:  # pragma: no cover - imported for the annotation only
     from app.sources.http import SourceHTTP
 
 logger = get_logger(__name__)
@@ -1000,6 +1023,35 @@ class HHSource(BaseSource):
         state.fetched += 1
         try:
             posting = await self._fetch(state.site, entry)
+        except HHChallengedError:
+            # What this clause does and does not do, because the difference was
+            # worth an argument. It does NOT keep the challenge out of the
+            # markup tolerance below: that is a property of the type — a
+            # challenge is not an HHMarkupError, so the counter never sees one —
+            # and it would hold with these lines deleted. Deleting them changes
+            # exactly one thing, and this is it: the log line naming the host
+            # and the page hh stopped us on, which is the only record of where
+            # a crawl was cut and is what somebody deciding whether to walk that
+            # host more slowly reads. The pipeline sees the exception but not
+            # which page it happened on.
+            #
+            # The comment is also the place to say that the accident is the
+            # wanted behaviour rather than a lucky one: hh has decided something
+            # about this crawler, and the answer is to stop walking every host
+            # of theirs — not to try two more pages first and then report a
+            # markup change that did not happen.
+            #
+            # ``test_a_challenge_names_the_host_and_the_page_in_the_log``
+            # asserts the event, so removing this clause fails a test instead of
+            # quietly losing the line.
+            logger.warning(
+                "sources.hh.challenged",
+                host=state.site.host,
+                url=entry.url,
+                fetched=state.fetched,
+                stored=state.stored,
+            )
+            raise
         except HHMarkupError:
             state.unreadable += 1
             if state.unreadable >= MAX_MARKUP_FAILURES:
@@ -1106,6 +1158,15 @@ class HHSource(BaseSource):
                 # and an untouched one a hit. See ``ResponseCache.key``.
                 cache_salt=entry.lastmod.isoformat(),
             )
+        except HHChallengedError:
+            # Re-raised before the clause below can look at it. There is no
+            # status code to read — the transport refused the redirect into
+            # hh's captcha before that hop was sent — so the ``response_status``
+            # test would find nothing, conclude the posting is not gone, and
+            # re-raise it anyway. Stated rather than left to that accident,
+            # because adding a status to the challenge later would silently turn
+            # a stopped crawl into a page counted as missing.
+            raise
         except SourceError as exc:
             status_code = exc.extra.get("response_status")
             if status_code in GONE_STATUSES:

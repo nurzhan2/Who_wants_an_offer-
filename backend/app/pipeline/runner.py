@@ -10,6 +10,14 @@ source finishes ``partial`` rather than ``failed``: ``last_successful`` counts
 partial runs, so marking the whole crawl failed would reset the incremental
 watermark and force a full re-crawl next time.
 
+**A source that refuses us is not a source that broke.** A site answering a
+permitted request with a check for robots has decided something about us, and
+the run for it is over — immediately, with no retry, because retrying a request
+a host has just refused is useless and rude. It is recorded as
+``SourceOutcome.challenged`` and stays ``partial``: the connector is fine, the
+watermark must not reset, and a report needs to be able to say «остановлены
+проверкой» rather than «источник сломан».
+
 **Each source is bounded by its own rate limit, not by a shared gate.** The
 limits are per vendor, so one shared semaphore would let a source with a
 generous allowance starve a careful one — and with remotive permitted four
@@ -50,7 +58,7 @@ from app.schemas.pipeline import PipelineRunCreate, PipelineRunFinish
 from app.schemas.profile import CandidateProfileRead
 from app.schemas.vacancy import VacancyCreate
 from app.sources.base import BaseSource, RawPosting, SourceUnavailable, Unavailable
-from app.sources.http import get_client
+from app.sources.http import HHChallengedError, get_client
 from app.sources.query_planner import QueryPlan, plan_queries
 from app.sources.registry import disabled_reason, get_enabled_sources, get_source
 
@@ -81,10 +89,34 @@ class SourceOutcome:
     skipped: Unavailable | None = None
     duration_seconds: float = 0.0
     run_id: UUID | None = None
+    #: The source answered with a check for robots and this run was stopped for
+    #: it. A field of its own rather than a shade of ``status``, because the two
+    #: answer different questions: ``status`` says how much of the work got
+    #: done, and this says why it stopped. A report that has both can write
+    #: «остановлены проверкой» where it would otherwise write «источник сломан»,
+    #: which is the difference between rescheduling and debugging.
+    challenged: bool = False
 
     @property
     def status(self) -> PipelineRunStatus:
-        """Partial when something broke but something also arrived."""
+        """Partial when something broke but something also arrived.
+
+        A challenge is ``PARTIAL`` whatever it managed to reach, and never
+        ``FAILED``. Two reasons, and the second is the one with teeth.
+
+        ``FAILED`` reads as "the connector is broken, go and look at it", and a
+        challenge is the one failure where there is nothing in the connector to
+        look at: the requests were within the rules and the site said no anyway.
+
+        And the status is not only prose. ``last_successful`` counts partial
+        runs as a watermark, so recording a challenge as a failure would reset
+        the incremental position of a source that was working perfectly one
+        request earlier and force a full re-crawl — spending several times the
+        requests, against a host that has just told us we are asking for too
+        many.
+        """
+        if self.challenged:
+            return PipelineRunStatus.PARTIAL
         if not self.errors:
             return PipelineRunStatus.SUCCESS
         if self.found:
@@ -118,6 +150,68 @@ class RunReport:
         """Postings collapsed into a vacancy another posting already created."""
         return sum(outcome.duplicates for outcome in self.sources)
 
+    @property
+    def challenged_sources(self) -> list[str]:
+        """Sources a check for robots stopped, for a report to name as such.
+
+        Separate from the error list on purpose. Everything in ``errors`` wants
+        somebody to read a traceback; this wants somebody to decide whether to
+        crawl that host more slowly, or less often, or not today.
+        """
+        return [outcome.slug for outcome in self.sources if outcome.challenged]
+
+
+#: Width of ``vacancy.city``. A longer value fails ``VacancyCreate`` and takes
+#: the whole batch down instead of the one posting that carried it.
+MAX_CITY = 120
+
+
+def stated_city(posting: RawPosting) -> str | None:
+    """The city a connector read off the posting, or None when it read none.
+
+    ``RawPosting.raw["_derived"]`` is the seam connectors already use for what
+    they worked out rather than for what the payload literally said, and a
+    ``city`` key in it means a place name lifted from a structured field. Read
+    by key rather than by source slug, so a new connector opts in from inside
+    ``sources/`` and this module never learns its name (CLAUDE.md rule 5). No
+    city is named here; the value comes from the posting.
+
+    **The trust this places in a connector has one known hole.** hh fills the
+    key from the page's ``address.city``, falls back to its ``area``, and — for
+    a page that gives neither — falls back a third time to the city of the host
+    it was crawled from: ``city=(city or site.city)`` in ``hh.py``'s
+    ``_derive``. That third value is not something the posting stated. It is
+    this deployment's own ``hh_sites.yaml`` reaching the deduplication key, so
+    such a posting is keyed by where we were standing when we read it, and one
+    walked from two hosts becomes two rows with one ``vacancy_source`` row
+    flipping between them.
+
+    Nothing here can undo that: the three cases arrive flattened into one
+    string, and a guard in this module cannot tell which one it is holding. The
+    fix belongs in ``_derive`` — leave the city ``None`` when the page states
+    none, which is what every other connector already does — and until that
+    lands this docstring names the exception rather than repeating a rule the
+    data does not keep. It is thought to fire rarely: the connector's own probe
+    of 200 vacancy pages found ``address`` on 184 of them and ``area`` on all
+    200, so no page in that sample would have reached the third fallback.
+
+    Deliberately *not* read: JSearch's ``_derived["location"]``, which is one
+    free-text line holding a city, a region and a country together («Алматы,
+    Казахстан»). Cutting a city out of that line is normalisation and phase 4
+    owns it, and hashing the whole line instead would key one job differently
+    on every source that spells its location its own way — a split, so nothing
+    is lost, but nothing is gained either. arbeitnow and remotive state no
+    place at all in a structured field, so their postings keep hashing without
+    a city, exactly as they did under version 1.
+    """
+    derived = posting.raw.get("_derived")
+    if not isinstance(derived, dict):
+        return None
+    city = derived.get("city")
+    if not isinstance(city, str):
+        return None
+    return " ".join(city.split())[:MAX_CITY] or None
+
 
 def to_vacancy(posting: RawPosting) -> VacancyCreate:
     """Minimal normalisation: enough to store the posting, no more.
@@ -126,18 +220,23 @@ def to_vacancy(posting: RawPosting) -> VacancyCreate:
     What cannot wait is the fingerprint, because the column is NOT NULL and
     UNIQUE and nothing can be written without one.
 
-    ``city`` is deliberately left empty here rather than guessed from a
-    free-text location. A wrong city changes the fingerprint, and a fingerprint
-    computed from a guess merges two different jobs or splits one — the first of
-    which loses data irreversibly.
+    ``city`` is taken from the posting when its source stated one and left
+    ``None`` when it did not; it is never guessed out of free text. Both the
+    column and the fingerprint get the same value, because a row whose key
+    distinguishes it by city while its own ``city`` column is empty is a row
+    nobody can explain. Leaving the city out of the key merges an employer's
+    four cities into one row and overwrites three of the four postings, which
+    is the loss :mod:`app.normalize.fingerprint` calls unrecoverable.
     """
     company = (posting.company or "").strip() or None
     description = posting.description or None
+    city = stated_city(posting)
     return VacancyCreate(
-        fingerprint=fingerprint(company=company, title=posting.title, city=None),
+        fingerprint=fingerprint(company=company, title=posting.title, city=city),
         fingerprint_version=FINGERPRINT_VERSION,
         title=posting.title,
         company=company,
+        city=city,
         description_raw=description,
         completeness=(VacancyCompleteness.FULL if description else VacancyCompleteness.STUB),
     )
@@ -281,6 +380,29 @@ async def _run_source(source: BaseSource, plan: QueryPlan, sessions: Sessions) -
 
     try:
         await _crawl(source, plan, outcome, sessions)
+    except HHChallengedError as exc:
+        # Caught apart from every other failure, and one line above it, because
+        # it is not one: the source answered a permitted request with a check
+        # for robots. Recorded under its own stage and logged as a warning
+        # rather than an exception, since a traceback here points at the hop
+        # that was refused and there is no bug in it to find.
+        #
+        # This ends the run for this source and nothing else. The others are
+        # separate tasks under the gather above and keep going. What this source
+        # already fetched has been written by the time we get here, and its
+        # crawl position was left exactly where it was — so the next run resumes
+        # at the page this one was refused, and re-fetches nothing it stored.
+        outcome.challenged = True
+        outcome.errors.append(
+            {"stage": "challenge", "error": type(exc).__name__, "detail": exc.detail}
+        )
+        logger.warning(
+            "pipeline.source_challenged",
+            slug=source.slug,
+            found=outcome.found,
+            requests=outcome.requests,
+            detail=exc.detail,
+        )
     except Exception as exc:  # a broken source, not a broken run
         logger.exception("pipeline.source_failed", slug=source.slug)
         outcome.errors.append({"stage": "crawl", "error": type(exc).__name__, "detail": str(exc)})
@@ -314,21 +436,42 @@ async def _run_source(source: BaseSource, plan: QueryPlan, sessions: Sessions) -
 async def _crawl(
     source: BaseSource, plan: QueryPlan, outcome: SourceOutcome, sessions: Sessions
 ) -> None:
-    """Fetch and write, one batch at a time."""
+    """Fetch and write, one batch at a time.
+
+    An interrupted crawl still writes the batch it was holding. Those postings
+    are already fetched and already paid for — on the run that produced this
+    rule, 172 pages had been read and the last 72 of them were in this list —
+    and dropping them means buying them again next run for nothing. The
+    connector's crawl position is behind them by design, so writing them is
+    safe: the position never names a posting this function has not handed to
+    the database.
+    """
     bound = _bind(source, outcome, sessions)
     batch: list[RawPosting] = []
 
     # No semaphore inside a source: its concurrency is already bounded by its
     # own token bucket, which is the limit the vendor actually published. A
     # second gate here would look like a safeguard while enforcing nothing.
-    async for posting in bound.search_batch(plan.queries):
-        outcome.found += 1
-        if source.needs_detail_fetch:
-            posting = await bound.fetch_detail(posting)
-        batch.append(posting)
-        if len(batch) >= UPSERT_BATCH:
-            await _write(batch, outcome, sessions)
-            batch = []
+    try:
+        async for posting in bound.search_batch(plan.queries):
+            outcome.found += 1
+            if source.needs_detail_fetch:
+                posting = await bound.fetch_detail(posting)
+            batch.append(posting)
+            if len(batch) >= UPSERT_BATCH:
+                await _write(batch, outcome, sessions)
+                batch = []
+    except Exception:
+        if batch:
+            try:
+                await _write(batch, outcome, sessions)
+            except Exception:
+                # Logged, not raised: a write that fails while unwinding must
+                # not replace the failure that stopped the crawl. That one says
+                # why the run ended — a check for robots reads very differently
+                # from a broken connector — and the caller classifies on it.
+                logger.exception("pipeline.partial_write_failed", slug=source.slug)
+        raise
     if batch:
         await _write(batch, outcome, sessions)
 
