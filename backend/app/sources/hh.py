@@ -639,8 +639,12 @@ class _SiteRun:
     fetched_head: set[str] = field(default_factory=set)
     fetched: int = 0
     stored: int = 0
-    gone: int = 0
-    not_live: int = 0
+    #: Pages that were bought and produced nothing storable: taken down since
+    #: the sitemap was written, archived, or answering for a different vacancy.
+    #: One counter rather than three, because the log is read to answer "how
+    #: much of what we paid for was worth keeping" and the reasons are already
+    #: in the debug lines beside it.
+    not_stored: int = 0
     unreadable: int = 0
 
 
@@ -803,6 +807,7 @@ class HHSource(BaseSource):
         spend()
 
         due: dict[str, list[SitemapEntry]] = {}
+        marks: dict[str, FileWatermark] = {}
         for name, url in files:
             if stop():
                 truncated.add(site.host)
@@ -810,9 +815,12 @@ class HHSource(BaseSource):
                 continue
             entries = await self._sitemap_entries(site, url)
             spend()
-            mark = await self._watermark(site, name)
+            # Read once and kept: the same mark decides what is due and then
+            # advances over it, and nothing writes in between. Reading it twice
+            # would be two sources of truth for one number.
+            marks[name] = await self._watermark(site, name)
             due[name] = sorted(
-                (entry for entry in entries if not mark.is_done(entry)),
+                (entry for entry in entries if not marks[name].is_done(entry)),
                 key=lambda entry: (entry.lastmod, entry.external_id),
             )
         outstanding = sum(len(entries) for entries in due.values())
@@ -842,7 +850,7 @@ class HHSource(BaseSource):
                     outstanding=len(entries),
                 )
                 continue
-            mark = await self._watermark(site, name)
+            mark = marks[name]
             # The position lags the yields. A posting is handed to the pipeline
             # long before the pipeline writes it — the runner batches — so a
             # mark that named the posting just yielded would, after a crash,
@@ -903,8 +911,7 @@ class HHSource(BaseSource):
             fetched=state.fetched,
             head=len(state.fetched_head),
             stored=state.stored,
-            gone=state.gone,
-            not_live=state.not_live,
+            not_stored=state.not_stored,
             unreadable=state.unreadable,
             budget_left=max(0, budget.remaining),
         )
@@ -918,6 +925,12 @@ class HHSource(BaseSource):
         it. Three in one run is not an odd page: it is hh having moved the state
         we parse, which is the failure this connector exists to announce rather
         than absorb.
+
+        The raise leaves the position unsaved past its last periodic write, so
+        the next run re-buys at most ``WATERMARK_SAVE_EVERY`` pages. That is the
+        cheaper half of the trade: catching it here to save the mark would mean
+        recording progress through a file we have just decided we can no longer
+        read.
         """
         state.fetched += 1
         try:
@@ -934,7 +947,7 @@ class HHSource(BaseSource):
             )
             return None
         if posting is None:
-            state.gone += 1
+            state.not_stored += 1
             return None
         state.stored += 1
         return posting

@@ -131,11 +131,18 @@ async def test_a_whole_posting_still_comes_out_of_a_live_page(
     """End to end against the live site, bounded to a handful of requests.
 
     The two tests above check the shapes; this one checks that they still add up
-    to something storable — a posting with an id, a URL and a title. The budget
-    is cut to five requests so a canary can never turn into a crawl, and no
-    position store is installed, so nothing this test does is recorded.
+    to something storable — a posting with an id, a URL and a title. No position
+    store is installed, so nothing this run does is recorded, and the budget is
+    cut so a canary can never turn into a crawl.
+
+    The budget has to clear the planning cost, and that is the thing worth
+    knowing: a site's sitemaps are all read before any page is fetched, because
+    the newest-first slice is chosen across the whole city at once. Almaty has
+    ten files, so eleven requests buy nothing at all — a smaller number here
+    fails with "site not reached" and would read as hh having broken.
     """
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 5)
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 20)
+    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 5)
 
     postings = [posting async for posting in hh.search_batch([])]
 
