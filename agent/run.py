@@ -338,6 +338,12 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
                 url=item.url,
                 letter=letter,
                 hh_warning=_hh_warning_in(previous),
+                # Carried straight from the queue to the card. This package
+                # neither computes a score nor edits an explanation; it shows
+                # what the backend said, so the person approving can disagree
+                # with it.
+                score=item.score,
+                score_explanation=item.score_explanation,
             )
         )
     return candidates

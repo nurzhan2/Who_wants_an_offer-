@@ -73,6 +73,11 @@ class Candidate:
     #: own words, carried over from the last run that got as far as the response
     #: form. Optional and last, so every existing call site keeps working.
     hh_warning: str | None = None
+    #: Why this vacancy is in front of the owner at all: the match score on the
+    #: project's 0-100 scale, and the sentence behind it. Both come from the
+    #: queue untouched — this package neither computes nor edits them.
+    score: float | None = None
+    score_explanation: str | None = None
 
     def render(self) -> str:
         """Exactly what the human is shown. The mandate is bound to this text.
@@ -88,6 +93,19 @@ class Candidate:
         whose url and id disagree would have been confirmed on the strength of a
         title and a link that had nothing to do with the application actually
         sent.
+
+        **The match score is printed with its explanation, and its absence is
+        printed too.** A number on its own is not a reason to write to an
+        employer; the explanation is what the owner can check against the
+        vacancy in front of them, and disagreeing with it is exactly what the
+        drop list is for. When the queue carried no score, the card says so
+        instead of staying quiet: silence there reads as "nobody scored this
+        one" and as "this one scored badly" equally well, and the difference
+        decides whether the list in front of the person is ordered by anything
+        at all. Both fields are the backend's, carried through the queue
+        untouched, so binding them into the digest also means a card approved
+        against one explanation cannot be reused for a payload carrying
+        another.
 
         **The letter is printed whole.** It used to be cut at 200 characters,
         which meant the human was asked to approve text they had not read, in
@@ -135,6 +153,7 @@ class Candidate:
             f"{self.title} — {self.company or 'без компании'}",
             f"  вакансия {self.vacancy_id}",
             f"  {self.url}",
+            *self._score_lines(),
         ]
         # Truthiness rather than ``is not None``: an empty string would print a
         # heading with nothing under it, which reads as a warning nobody wrote.
@@ -152,6 +171,21 @@ class Candidate:
         if shown != card:
             shown = f"{shown}\n  (часть символов не в кодировке консоли, показаны как «?»)"
         return shown
+
+    def _score_lines(self) -> list[str]:
+        """The match score block: the number, then the reasoning under it.
+
+        One decimal place because the scale is 0-100 and the second digit is
+        noise a person will read as precision. The explanation is quoted with
+        the same ``|`` gutter the letter and hh's warning use, so everything on
+        the card that was written elsewhere looks like it was.
+        """
+        if self.score is None:
+            return ["  соответствие: не посчитано"]
+        lines = [f"  соответствие: {self.score:.1f} из 100"]
+        if self.score_explanation:
+            lines.extend(f"  | {line}" for line in self.score_explanation.splitlines())
+        return lines
 
 
 @final

@@ -131,6 +131,10 @@ known-first-party = ["app", "factories", "helpers"]
 # every line. Scoped to the package rather than disabled globally.
 "agent/*.py" = ["RUF001", "RUF002", "RUF003"]
 "agent/tests/*.py" = ["RUF001", "RUF002", "RUF003"]
+# The CLI prints the same Russian to the same console, and its docstrings
+# argue about the Kazakh letters that do not fit in that console's codepage.
+"wwao/*.py" = ["RUF001", "RUF002", "RUF003"]
+"wwao/tests/*.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
@@ -141,7 +145,7 @@ docstring-code-format = true
 # ── mypy ──────────────────────────────────────────────────────────────
 [tool.mypy]
 python_version = "3.12"
-files = ["backend/app", "agent"]
+files = ["backend/app", "agent", "wwao"]
 strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
@@ -156,7 +160,7 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-testpaths = ["backend/tests", "agent/tests"]
+testpaths = ["backend/tests", "agent/tests", "wwao/tests"]
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -167,6 +171,9 @@ addopts = [
     # produced a coverage.xml with zero agent files, and CI's --cov-fail-under
     # therefore said nothing at all about the package this repository added last.
     "--cov=agent",
+    # And the CLI, for the same reason: its tests run in this session, so its
+    # code has to be inside the same coverage gate.
+    "--cov=wwao",
     "--cov-report=term-missing",
     # Deselected, not skipped. conftest.py makes a skip fatal in CI so that a
     # green build means everything ran, and a test that deliberately talks to a
@@ -189,9 +196,9 @@ markers = [
 filterwarnings = ["error", "ignore::DeprecationWarning:pytest_asyncio.*"]
 
 [tool.coverage.run]
-source = ["backend/app", "agent"]
+source = ["backend/app", "agent", "wwao"]
 branch = true
-omit = ["backend/app/__init__.py", "agent/__init__.py"]
+omit = ["backend/app/__init__.py", "agent/__init__.py", "wwao/__init__.py"]
 
 [tool.coverage.report]
 show_missing = true
