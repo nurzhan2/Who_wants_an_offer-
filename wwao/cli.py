@@ -5,6 +5,7 @@
     python -m wwao letters --limit 5  написать письма
     python -m wwao queue              что готово к отклику и почему остальное нет
     python -m wwao apply --send       отклики, по одному, с подтверждением
+    python -m wwao outcomes           что hh отвечает на уже отправленное
 
 **Every subcommand is a child process, and that is the design rather than an
 implementation detail.** ``backend/`` and ``agent/`` must not meet: the crawler
@@ -14,8 +15,9 @@ the separation by parsing the import graph. A single command that can do both
 is exactly the thing that could fuse them, so it is built so that it cannot:
 this module imports neither world, at import time or later. ``crawl``, ``match``
 and ``letters`` start the script that owns the work; ``apply`` starts ``python
--m agent.run``. The CLI process itself never loads ``app``, never loads
-``agent``, and never loads a browser driver, whichever subcommand is running.
+-m agent.run`` and ``outcomes`` starts ``python -m agent.outcomes``. The CLI
+process itself never loads ``app``, never loads ``agent``, and never loads a
+browser driver, whichever subcommand is running.
 
 Lazy imports would have been enough to satisfy the letter of that rule and were
 rejected, because the guarantee they give is "nobody wrote the wrong import
@@ -46,6 +48,18 @@ top instead of opening a browser first. There is no flag, and no environment
 variable, that lifts it — this module reads no environment at all — and the
 task is explicit that if such a switch starts to look necessary, the task has
 been misunderstood.
+
+**``outcomes`` is the third category, and it needs saying because there were
+only two.** ``crawl``, ``match``, ``letters`` and ``queue`` need neither a
+person nor an account; ``apply`` needs both. ``outcomes`` needs the account and
+not the person: it opens the owner's browser and reads one page per application
+already sent, so nobody has to answer anything, but it cannot run on a machine
+that is not signed in. So it gets ``apply``'s closed flag set — nothing is
+forwarded blindly to a subcommand that runs under somebody's login — and not
+``apply``'s terminal check, because there is no card to read and no word to
+type. It sends nothing, and it cannot: ``agent/outcomes.py`` mints no mandate,
+so ``agent/gate.py`` refuses every application-shaped request the browser
+makes.
 
 Everything else runs with no human and no account, which is what makes it
 runnable overnight.
@@ -78,6 +92,12 @@ SCRIPTS: Final[Path] = REPO_ROOT / "scripts"
 #: The agent, started as a module rather than imported. The one string in this
 #: package that names the other world, and it is data, not an import.
 AGENT_MODULE: Final[str] = "agent.run"
+
+#: The read-only half of the agent, started the same way and for the same
+#: reason. A separate module rather than a flag on the one above, because
+#: «прочитать, что ответил hh» and «отправить отклик» must not be two moods of
+#: one program that has already been started.
+OUTCOMES_MODULE: Final[str] = "agent.outcomes"
 
 #: The queue as it exists today: a JSON file the backend writes and the agent
 #: reads. ``--from`` takes an http(s) base URL instead, for the endpoint
@@ -175,6 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "Ночью запускаются crawl, match, letters и queue: им не нужен ни человек, "
             "ни аккаунт. apply отправляет отклики и работает только в терминале. "
+            "outcomes посередине: аккаунт нужен, человек — нет, отправить он ничего "
+            "не может. "
             f"Коды возврата: {EXIT_OK} успех, {EXIT_FAILED} шаг не удался, "
             f"{EXIT_MISSING_PIECE} этой части пайплайна ещё нет, "
             f"{EXIT_NO_HUMAN} apply запущен без человека."
@@ -230,6 +252,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=(),
         help="вернуть вакансии из needs_manual или failed в очередь; ничего не отправляет",
     )
+
+    outcomes = subparsers.add_parser(
+        "outcomes",
+        help="пройти по отправленным откликам и прочитать, что ответил hh",
+        description=(
+            "Открывает по одной странице на каждый уже отправленный отклик и "
+            "записывает, что hh о нём говорит. Нужен аккаунт, не нужен человек. "
+            "Отправить ничего не может: мандата не выдаётся, и шлюз отклоняет "
+            "любой запрос, похожий на отклик."
+        ),
+    )
+    outcomes.add_argument("--limit", type=int, default=None, help="сколько откликов обойти за раз")
+    outcomes.add_argument(
+        "--to",
+        default=None,
+        metavar="URL",
+        help=(
+            "дополнительно отправить прочитанное в трекер: базовый адрес бэкенда "
+            "(http://localhost:8000). Локальный файл agent/probe/outcomes.json пишется всегда"
+        ),
+    )
     return parser
 
 
@@ -272,6 +315,8 @@ def main(
 
     if args.command == "queue":
         return _show_queue(args, fetch=fetch, out=out, err=err)
+    if args.command == "outcomes":
+        return _outcomes(args, run=run, err=err)
     return _apply(args, run=run, src=src, out=out, err=err)
 
 
@@ -309,6 +354,28 @@ def _apply(args: argparse.Namespace, *, run: Runner, src: TextIO, out: TextIO, e
         command += ["--queue", str(args.queue)]
     if args.requeue:
         command += ["--requeue", *args.requeue]
+    return run(command)
+
+
+def _outcomes(args: argparse.Namespace, *, run: Runner, err: TextIO) -> int:
+    """Start the read-only walk, in its own process, with nobody watching.
+
+    No terminal check, and the difference from :func:`_apply` is the whole point
+    of having two subcommands: there is no card here, nothing is confirmed and
+    nothing leaves. What this needs is the account, which is why it is still a
+    child process of its own with a closed flag set rather than something the
+    unattended half of the pipeline can wander into.
+    """
+    walker = REPO_ROOT / "agent" / "outcomes.py"
+    if not walker.is_file():
+        print(f"outcomes: обхода нет на месте — {walker} не найден.", file=err)
+        return EXIT_MISSING_PIECE
+
+    command = [sys.executable, "-m", OUTCOMES_MODULE]
+    if args.limit is not None:
+        command += ["--limit", str(args.limit)]
+    if args.to:
+        command += ["--to", str(args.to)]
     return run(command)
 
 

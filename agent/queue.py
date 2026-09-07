@@ -178,15 +178,100 @@ class Result:
     #: line. It is set on a ``sent`` result: nothing hh writes in that form stops
     #: an application.
     hh_warning: str | None = None
+    #: The letter that was typed into the form, character for character.
+    #:
+    #: Asked for on the wire rather than copied from ``application.cover_letter``
+    #: at the other end, because those two can differ silently: the letter column
+    #: is overwritten in place by a regeneration, so a run between the queue
+    #: being taken and this result arriving replaces the evidence with text no
+    #: employer saw. Only the process that did the typing knows what went out.
+    #:
+    #: **Nothing in this package sets it yet**, so it is ``None`` on every result
+    #: today and ``application.sent_letter`` stays NULL — honest, and visibly
+    #: empty. It is declared here because this is the only file it can be
+    #: declared in: the backend has accepted the field since 2026-09-07 and the
+    #: module that types the letter cannot add it to this dataclass. Whoever
+    #: fills it must pass ``mandate.letter`` unmodified — that is the text the
+    #: human confirmed and the text ``agent/submit.py`` types — and must not
+    #: reconstruct it from anywhere else.
+    #:
+    #: ``None`` means "not reported"; ``""`` would mean "reported that nothing
+    #: was typed", which hh permits on some vacancies. The two are different
+    #: facts and the backend stores them differently.
+    sent_letter: str | None = None
+    #: ``negotiations.total`` as hh reported it, from
+    #: ``applicantVacancyResponseStatuses``. ``None`` is "not measured" and ``0``
+    #: is hh saying there are none — the distinction is the whole value of the
+    #: field, so it must never be defaulted to a number.
+    negotiations_total: int | None = None
+    #: ``topicList[].lastState``, quoted. hh's vocabulary and hh's to extend:
+    #: ``RESPONSE`` and ``DISCARD`` are all anyone here has seen, so this is a
+    #: string and deliberately not an enum. See ``agent/outcomes.py``, which is
+    #: what fills it, for why an unfamiliar value is carried rather than mapped.
+    last_state: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        """The wire form. ``Any`` for the same boundary reason as above."""
+        """The wire form. ``Any`` for the same boundary reason as above.
+
+        Every key here has to exist on ``app.schemas.agent.ApplicationResult``;
+        ``backend/tests/test_agent_queue.py`` parses this literal and asserts
+        exactly that, because a field the backend rejects is a 422 on a result
+        describing an application that has already left.
+        """
         return {
             "vacancy_id": self.vacancy_id,
             "status": self.status,
             "reason": self.reason,
+            "sent_letter": self.sent_letter,
             "hh_warning": self.hh_warning,
+            "negotiations_total": self.negotiations_total,
+            "last_state": self.last_state,
         }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "Result":
+        """One result read back off a document this package wrote.
+
+        Only :class:`ResultsFile` needs this, and only so that a later run can
+        see what the previous one recorded. ``Any`` for the same boundary reason
+        as :meth:`QueueItem.from_json`.
+
+        Every field but the two required ones degrades to ``None`` rather than
+        raising: this reads a *memory*, and a memory that refuses to load
+        because one entry grew a shape it did not have is a memory that makes
+        the next run start from nothing.
+        """
+        vacancy_id = payload.get("vacancy_id")
+        status = payload.get("status")
+        if not isinstance(vacancy_id, str) or not isinstance(status, str):
+            raise QueueFormatError(f"В результате нет vacancy_id и status: {payload!r}")
+        total = payload.get("negotiations_total")
+        return cls(
+            vacancy_id=vacancy_id,
+            status=status,
+            reason=_text(payload.get("reason")),
+            sent_letter=_text(payload.get("sent_letter")),
+            hh_warning=_text(payload.get("hh_warning")),
+            # ``bool`` is an ``int`` in Python and ``true`` would read as 1.
+            negotiations_total=(
+                total if isinstance(total, int) and not isinstance(total, bool) else None
+            ),
+            last_state=_text(payload.get("last_state")),
+        )
+
+
+def _text(value: object) -> str | None:
+    """A string off the wire, or nothing. Never a coerced ``repr``."""
+    return value if isinstance(value, str) else None
+
+
+def _document(results: Sequence[Result]) -> str:
+    """The results document, in the one shape both transports carry."""
+    return json.dumps(
+        {"version": CONTRACT_VERSION, "results": [result.to_json() for result in results]},
+        ensure_ascii=False,
+        indent=1,
+    )
 
 
 @runtime_checkable
@@ -200,6 +285,60 @@ class Queue(Protocol):
     def report(self, results: Sequence[Result]) -> None:
         """Hand back what happened."""
         ...
+
+
+@runtime_checkable
+class ResultSink(Protocol):
+    """Somewhere results go. The half of :class:`Queue` that does not read.
+
+    Split out because ``agent/outcomes.py`` takes no queue at all: it walks
+    applications the journal already records as sent and has nothing to be
+    handed. Asking it for a :class:`Queue` would mean handing it a ``take`` it
+    must not call, and an unused method on an object that reaches the network
+    is an invitation.
+    """
+
+    def report(self, results: Sequence[Result]) -> None:
+        """Hand back what happened."""
+        ...
+
+
+@final
+class ResultsFile:
+    """A results document at a path of its own.
+
+    The same shape :class:`FileQueue` writes beside its queue, addressable
+    directly, because two different runs answer two different questions and
+    must not overwrite each other's answer: ``queue-results.json`` is what one
+    apply run did, and ``agent/outcomes.json`` is what hh has said since. A
+    single file holding both would lose whichever ran last.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def report(self, results: Sequence[Result]) -> None:
+        """Write the document, replacing whatever was there."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(_document(results), encoding="utf-8")
+
+    def read(self) -> list[Result]:
+        """What this document holds, or nothing at all when there is no file.
+
+        A missing file is an ordinary state — no run has written one yet — and
+        reads as an empty list. A file that is *not* this document raises, and
+        that difference matters to the caller: "nothing to compare against" and
+        "the memory is unreadable" produce different sentences for a person.
+        """
+        if not self.path.is_file():
+            return []
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except ValueError as error:
+            raise QueueFormatError(f"{self.path.name} — не JSON: {error}") from error
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            raise QueueFormatError(f"{self.path.name} не содержит поля results")
+        return [Result.from_json(entry) for entry in payload["results"] if isinstance(entry, dict)]
 
 
 @final
@@ -233,15 +372,12 @@ class FileQueue:
         return [QueueItem.from_json(entry) for entry in payload["items"][:limit]]
 
     def report(self, results: Sequence[Result]) -> None:
-        """Write the outcomes next to the queue."""
-        self.results_path.write_text(
-            json.dumps(
-                {"version": CONTRACT_VERSION, "results": [r.to_json() for r in results]},
-                ensure_ascii=False,
-                indent=1,
-            ),
-            encoding="utf-8",
-        )
+        """Write the outcomes next to the queue.
+
+        Through :class:`ResultsFile` rather than beside it: the document's shape
+        is the contract, and two writers of one shape is one writer too many.
+        """
+        ResultsFile(self.results_path).report(results)
 
 
 #: The environment variable holding the shared local token the queue endpoint

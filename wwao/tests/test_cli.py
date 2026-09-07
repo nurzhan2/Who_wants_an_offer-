@@ -734,3 +734,80 @@ def test_a_backend_that_is_not_running_is_reported_as_such(
         fetch_over_http(BASE, 5)
 
     assert "Не удалось спросить" in str(raised.value)
+
+
+# ── outcomes: the account without the person ──────────────────────────
+
+
+def test_outcomes_starts_the_read_only_walk_as_its_own_process() -> None:
+    """A module of its own rather than a mood of the one that sends.
+
+    ``agent.outcomes`` opens pages and reads them; ``agent.run`` sends
+    applications. Making the second do the first under a flag would put the
+    apply flow one argument away from a run that was meant to read.
+    """
+    runner = Recorder()
+
+    code, _, _ = run_cli(["outcomes"], run=runner)
+
+    assert code == 0
+    assert runner.commands == [[sys.executable, "-m", "agent.outcomes"]]
+
+
+def test_outcomes_forwards_only_the_flags_it_declares() -> None:
+    """A closed set, like ``apply``'s and for the same reason.
+
+    This subcommand runs under the owner's login too. Nothing is handed through
+    blindly, so a flag added to the walk one day has to be added here as well,
+    in front of the tests in this file.
+    """
+    runner = Recorder()
+
+    run_cli(["outcomes", "--limit", "5", "--to", "http://localhost:8000"], run=runner)
+
+    assert runner.commands == [
+        [
+            sys.executable,
+            "-m",
+            "agent.outcomes",
+            "--limit",
+            "5",
+            "--to",
+            "http://localhost:8000",
+        ]
+    ]
+
+
+def test_outcomes_refuses_a_flag_it_does_not_know_instead_of_forwarding_it() -> None:
+    """What makes the set closed."""
+    runner = Recorder()
+
+    with pytest.raises(SystemExit) as exit_info:
+        run_cli(["outcomes", "--send"], run=runner)
+
+    assert exit_info.value.code == 2
+    assert runner.commands == []
+
+
+def test_outcomes_runs_where_nobody_is_watching_and_apply_does_not() -> None:
+    """The third category, and the line between it and ``apply``.
+
+    There is no card to read and no word to type here: the walk confirms
+    nothing because it sends nothing. So the terminal check that guards
+    ``apply`` would be a refusal with no rule behind it — and one rule fewer
+    that a person has to hold in their head. What it does still need is the
+    account, which is why it is a child process of its own.
+    """
+    runner = Recorder()
+
+    walked, _, _ = run_cli(["outcomes"], run=runner, tty=False)
+    applied, _, _ = run_cli(["apply"], run=Recorder(), tty=False)
+
+    assert walked == 0
+    assert applied == cli.EXIT_NO_HUMAN
+    assert runner.commands == [[sys.executable, "-m", "agent.outcomes"]]
+
+
+def test_the_walk_the_cli_names_is_a_file_the_repository_can_show_you() -> None:
+    """A router's whole content is where each step lives."""
+    assert (cli.REPO_ROOT / "agent" / "outcomes.py").is_file()

@@ -65,7 +65,7 @@ With `make` available, the same thing is `make install && make up && make dev`.
 
 ## From a crawl to an application
 
-One entry point, five subcommands, in the order you use them:
+One entry point, six subcommands, in the order you use them:
 
 ```bash
 uv run python -m wwao crawl                # walk the sources (hh, arbeitnow, remotive, …)
@@ -73,6 +73,7 @@ uv run python -m wwao match                # score what was found against the pr
 uv run python -m wwao letters --limit 20   # write cover letters for the top N by score
 uv run python -m wwao queue                # what is ready to apply to, and why the rest is not
 uv run python -m wwao apply                # show each card and send what you confirm
+uv run python -m wwao outcomes             # read back what hh says about what you sent
 ```
 
 The first four need no account and no human, which is what makes them the parts
@@ -88,6 +89,22 @@ the letter in full, and any warning hh itself raises — and sends only what you
 confirm by typing a word. There is no flag that answers that prompt: a closed
 stdin, a pipe or a cron job is a refusal, not a default yes. It is a dry run
 unless you pass `--send`, and `--send` still only gets you as far as the prompt.
+
+`outcomes` is the third category: it needs the account but not the person. It
+opens one page per application you have already sent and writes down what hh
+now says about it — `negotiations.total`, and `lastState` if hh has named one —
+into `agent/probe/outcomes.json` (that directory is gitignored, and the file
+records which jobs you applied to and who turned you down), and into the tracker
+as well with `--to http://localhost:8000`. It cannot send anything, and that is structural
+rather than a promise: the walk mints no confirmation, so the request gate that
+stands in front of every application refuses every application-shaped request
+the browser makes, and the run prints how many it refused. It keeps the same
+pacing and working hours as `apply` — same account, same session — stops at the
+first page hh does not serve as the vacancy asked for, and never changes an
+application's recorded state. `lastState` is hh's own vocabulary and is stored
+as hh writes it: nothing here decides what a state *means*, and there are two
+outcomes on this account so far, which is not enough for any number computed
+from them to be worth printing.
 
 The agent is a separate package with a separate risk profile, and the two do not
 import each other: `backend/` is anonymous, read-only and safe on a server;
