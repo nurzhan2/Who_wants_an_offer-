@@ -294,6 +294,24 @@ class Settings(BaseSettings):
     incremental_run_interval_hours: Annotated[int, Field(ge=1)] = 3
     max_vacancy_age_days: Annotated[int, Field(ge=1)] = 45
 
+    # ── Local apply agent (agent/) ────────────────────────────────────
+    # The agent runs on the owner's own machine, under their own hh account,
+    # and reaches this API over HTTP and nothing else. It has no database
+    # access. See app/api/v1/applications.py for why the authentication here
+    # is one local token and deliberately nothing more.
+    #: Shared secret for /api/v1/applications. No default, like every other
+    #: secret here: unset means the queue refuses to serve, never that it
+    #: serves without a check.
+    agent_api_token: SecretStr | None = None
+    #: Which connector's postings the agent can act on. Configuration rather
+    #: than a constant so that teaching the agent a second site does not need
+    #: an edit in this file — the same reason CLAUDE.md rule 5 gives for
+    #: keeping per-source knowledge out of the framework.
+    agent_source_slug: str = "hh"
+    #: Floor on the match score before a vacancy is worth a slot out of the
+    #: agent's deliberately small daily budget.
+    agent_queue_min_score: Annotated[int, Field(ge=0, le=100)] = 70
+
     @field_validator("*", mode="before")
     @classmethod
     def _empty_string_is_unset(cls, value: Any) -> Any:

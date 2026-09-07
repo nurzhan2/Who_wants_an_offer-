@@ -4,17 +4,18 @@ The brief says the agent's only contact with the backend is its HTTP API: it
 takes a queue and returns results, with no database access. That is the right
 shape and it is written below as :class:`HttpQueue`.
 
-It does not exist yet. ``backend/app/api/v1/router.py`` mounts resume, profile,
-sources and pipeline; there is no vacancy list, no application endpoint and no
-queue. `Application` exists as a table and a set of schemas with nothing serving
-them. The brief also forbids adding it — «не трогать backend» — so the honest
-thing is to define the contract, implement the client against it, and ship
-something the owner can actually run today.
+It was written before the endpoint existed. For a while ``api/v1`` mounted only
+resume, profile, sources and pipeline, so the honest thing was to define the
+contract, implement the client against it, and ship something the owner could
+actually run — which is :class:`FileQueue`, the same JSON read from
+``agent/queue.json``. ``/api/v1/applications`` has since landed against this
+shape, behind a shared local token; both transports are kept, because the file
+needs no server, no database and no token, and that is what a person can run on
+the first day of a fresh checkout.
 
-That is :class:`FileQueue`: the same JSON the endpoint will return, read from
-``agent/queue.json``. Swapping one for the other is a single line in the CLI,
-and the fixture tests run against the shape rather than against either source,
-so the day the endpoint lands nothing here needs re-testing.
+Swapping one for the other is a single line in the CLI, and the tests run
+against the shape rather than against either source, so nothing below the
+transport had to change when the endpoint arrived.
 
 The fields are chosen so the prefilter can run **before** a page is opened, which
 is the whole point of a prefilter. Every one of them is something the crawler in
@@ -22,9 +23,19 @@ is the whole point of a prefilter. Every one of them is something the crawler in
 ``vacancy_source.raw["_derived"]`` — external_id, url, title, company,
 closed_for_applicants — so the endpoint, when someone writes it, is a projection
 of rows that exist rather than new work.
+
+The two exceptions are :attr:`QueueItem.letter` and
+:attr:`QueueItem.score`/:attr:`QueueItem.score_explanation`, which come from the
+steps after the crawl. They are here rather than left out because both belong on
+the confirmation card: the letter is what an employer will read in the owner's
+name, and the score with its explanation is the only answer this project has to
+"why is this vacancy in front of me". Neither is used to decide anything in this
+package — the agent never scores and never writes a letter — so both are carried
+untouched and shown.
 """
 
 import json
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -57,6 +68,19 @@ class QueueItem:
     archived: bool = False
     #: The application is completed on the employer's own site. A human's job.
     external_application: bool = False
+    #: How well this vacancy matches the profile, on the 0-100 scale the whole
+    #: project uses, and the sentence behind that number.
+    #:
+    #: Both reach the confirmation card, and the explanation is the half that
+    #: matters there. A person deciding whether to send is not helped by «82» —
+    #: they are helped by which requirements this profile covers and which it
+    #: does not, which is what makes the number checkable rather than trusted.
+    #: Both are optional because the scoring step may not have run; a card built
+    #: from an item without a score says so rather than staying silent, because
+    #: "no score" and "a bad score" must not look the same to the person
+    #: approving an application.
+    score: float | None = None
+    score_explanation: str | None = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "QueueItem":
@@ -82,6 +106,7 @@ class QueueItem:
                 f"vacancy_id {vacancy_id!r} не совпадает с вакансией в ссылке: {url!r}"
             )
         title = payload.get("title")
+        explanation = payload.get("score_explanation")
         return cls(
             vacancy_id=vacancy_id,
             url=url,
@@ -91,7 +116,35 @@ class QueueItem:
             closed_for_applicants=bool(payload.get("closed_for_applicants", False)),
             archived=bool(payload.get("archived", False)),
             external_application=bool(payload.get("external_application", False)),
+            score=_score(payload.get("score")),
+            score_explanation=explanation if isinstance(explanation, str) else None,
         )
+
+
+def _score(value: object) -> float | None:
+    """A match score off the wire, or nothing, and never a wrong number.
+
+    The backend keeps scores as ``Numeric(5, 2)``, and how that arrives depends
+    on the JSON encoder at the other end: a number from one, the string
+    ``"82.50"`` from another. Both are accepted because both are the same score
+    and refusing one of them would make the card's most useful line depend on a
+    serialisation detail.
+
+    Anything else — a null, a word, a number outside the scale the project
+    defines — becomes ``None`` rather than a guess. The card then says the score
+    was not computed, which is true and readable; a silently coerced 0 would
+    read as "a terrible match" and a coerced 100 as the opposite, and both are
+    inventions shown to somebody deciding whether to write to an employer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return None
+    try:
+        score = float(value)
+    except ValueError:
+        return None
+    if not 0.0 <= score <= 100.0:
+        return None
+    return score
 
 
 @final
@@ -184,19 +237,41 @@ class FileQueue:
         )
 
 
+#: The environment variable holding the shared local token the queue endpoint
+#: sits behind. Read here rather than hardcoded anywhere, like every other
+#: secret in this project; the name is configuration, the value never is.
+#:
+#: Both processes belong to the same person on the same machine, so there is no
+#: second party to authenticate. What the token buys is that nothing *else* on
+#: the host reaches the queue by guessing a URL, and a queue reachable that way
+#: hands out the owner's cover letters.
+TOKEN_VARIABLE: Final[str] = "AGENT_API_TOKEN"
+
+
 @final
 class HttpQueue:
-    """The queue as the brief describes it, for the endpoint that does not exist.
+    """The queue as the brief describes it, over the endpoint that now exists.
 
-    Written now so the contract is a thing in the repository rather than a
-    sentence in a brief, and so switching is one line. It is deliberately thin:
-    the shape it parses is :class:`QueueItem`'s, identical to the file's, and
-    the tests exercise that shape rather than this transport.
+    Written before the endpoint did, so the contract was a thing in the
+    repository rather than a sentence in a brief; ``/api/v1/applications``
+    landed against this shape and is guarded by a shared local token, which is
+    why the header below is here. Still deliberately thin: what it parses is
+    :class:`QueueItem`, identical to the file's, and the tests exercise that
+    shape rather than this transport.
     """
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, token: str | None = None, timeout: float = 30.0) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        #: Taken from the environment unless a caller passes one, so the value
+        #: never reaches a command line or a log. An empty token sends no header
+        #: at all: the endpoint then answers 401, which reads as "not configured"
+        #: rather than as "rejected", and that is the more useful of the two.
+        self.token = os.environ.get(TOKEN_VARIABLE, "") if token is None else token
+
+    def _headers(self) -> dict[str, str]:
+        """The one header this client sends. Never logged, never printed."""
+        return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
     def take(self, limit: int) -> Sequence[QueueItem]:
         """``GET {base}/api/v1/applications/queue?limit=…``."""
@@ -205,6 +280,7 @@ class HttpQueue:
         response = httpx.get(
             f"{self.base_url}/api/v1/applications/queue",
             params={"limit": limit},
+            headers=self._headers(),
             timeout=self.timeout,
         )
         response.raise_for_status()
@@ -220,6 +296,7 @@ class HttpQueue:
         response = httpx.post(
             f"{self.base_url}/api/v1/applications/results",
             json={"version": CONTRACT_VERSION, "results": [r.to_json() for r in results]},
+            headers=self._headers(),
             timeout=self.timeout,
         )
         response.raise_for_status()
