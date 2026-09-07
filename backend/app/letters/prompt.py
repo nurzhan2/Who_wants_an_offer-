@@ -23,9 +23,19 @@ Three things are done about that, and none of them is asking the model nicely:
 
 The prompt itself lives in ``app/llm/prompts/cover_letter.md``, per CLAUDE.md;
 this module only fills it in.
+
+One more block is filled in here and comes from :mod:`app.letters.examples`:
+past letters that got an answer, offered as few-shot examples. It goes through
+:func:`defang` like the description does. Those letters were sent by a person
+and may have been edited by hand, so they are not text this code wrote, and text
+this code did not write does not get to close a fence. The block sits after
+every instruction that constrains the letter and before the description, so the
+untrusted part stays last.
 """
 
 from app.letters.context import LetterContext, MatchedSkill, clip_description
+from app.letters.examples import ChosenExample
+from app.letters.examples import block as examples_block
 from app.letters.guard import is_safe
 
 #: Markers around the untrusted description. Long and unlovely on purpose: they
@@ -206,12 +216,22 @@ def _join(values: tuple[str, ...]) -> str:
     return ", ".join(values)
 
 
-def variables(context: LetterContext, *, feedback: str = "") -> dict[str, str]:
+def variables(
+    context: LetterContext,
+    *,
+    feedback: str = "",
+    examples: tuple[ChosenExample, ...] = (),
+) -> dict[str, str]:
     """Everything ``cover_letter.md`` needs, and nothing it does not.
 
     ``prompts.render`` refuses both a missing placeholder and an unused variable,
     so this dict and the template are checked against each other on every call —
     which is why a test renders it rather than only inspecting it.
+
+    ``examples`` is empty in the ordinary case and renders as the empty string,
+    which leaves the prompt exactly as it was before few-shot examples existed.
+    The block is defanged like the description: an example is a letter a person
+    sent, not a letter this code wrote, so it does not get to close a fence.
     """
     return {
         "letter_language": context.language,
@@ -219,6 +239,7 @@ def variables(context: LetterContext, *, feedback: str = "") -> dict[str, str]:
         "vacancy_facts": vacancy_block(context),
         "candidate_facts": candidate_block(context),
         "skill_overlap": overlap_block(context),
+        "examples": defang(examples_block(examples)),
         "fence_open": FENCE_OPEN,
         "fence_close": FENCE_CLOSE,
         "description": fenced_description(context),

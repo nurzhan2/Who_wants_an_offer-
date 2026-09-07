@@ -17,11 +17,12 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Select, select
+from sqlalchemy import Select, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.base import uuid7
+from app.db.enums import ApplicationStatus
 from app.db.models import (
     Application,
     CandidateProfile,
@@ -38,6 +39,14 @@ from app.letters.context import (
     letter_max_length,
     role_names,
 )
+from app.letters.examples import (
+    ANSWERED_STATUSES,
+    POSITIVE_STATUSES,
+    ExamplePool,
+    LetterExample,
+    OutcomeEvidence,
+    grade_of,
+)
 
 logger = get_logger(__name__)
 
@@ -45,6 +54,13 @@ logger = get_logger(__name__)
 #: the rest of the payload is read through, so a source that nests it elsewhere
 #: still works.
 DERIVED_KEY = "_derived"
+
+#: How many answered applications to read before ranking them. Generous on
+#: purpose — the real number today is one — and bounded anyway, because the
+#: ranking
+#: happens in Python and an unbounded ``SELECT`` over a tracker that grew for a
+#: year is a query nobody would notice going slow.
+MAX_CANDIDATES = 50
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,13 +191,22 @@ async def queue(
     ]
 
 
-async def save_letter(session: AsyncSession, *, vacancy_id: UUID, text: str) -> tuple[UUID, bool]:
+async def save_letter(
+    session: AsyncSession, *, vacancy_id: UUID, text: str, profile_id: UUID
+) -> tuple[UUID, bool]:
     """Store the letter on this vacancy's application row, and say what happened.
 
     Returns the row's id and whether it had to be created. The tracker has no
     unique constraint on ``vacancy_id`` — a person may legitimately track two
     attempts at the same job — so this updates the oldest row rather than
     inserting a second one, which is what keeps a repeated batch run idempotent.
+
+    ``profile_id`` is recorded because this letter may later be shown to the
+    model as an example of what got an answer, and an example written from a
+    different resume would teach it to claim experience this candidate has not
+    got. On an existing row it is filled in only when it is empty: a row that
+    already names a profile was written from that one, and overwriting it would
+    manufacture the false provenance the column exists to prevent.
 
     The letter is saved, never sent. Sending is ``agent/``'s, after a human
     confirms it, and nothing in ``backend/`` can do it.
@@ -193,12 +218,16 @@ async def save_letter(session: AsyncSession, *, vacancy_id: UUID, text: str) -> 
         .limit(1)
     )
     if application is None:
-        application = Application(id=uuid7(), vacancy_id=vacancy_id, cover_letter=text)
+        application = Application(
+            id=uuid7(), vacancy_id=vacancy_id, cover_letter=text, profile_id=profile_id
+        )
         session.add(application)
         await session.flush()
         return application.id, True
 
     application.cover_letter = text
+    if application.profile_id is None:
+        application.profile_id = profile_id
     await session.flush()
     return application.id, False
 
@@ -212,6 +241,162 @@ async def existing_letter(session: AsyncSession, vacancy_id: UUID) -> str | None
         .order_by(Application.created_at, Application.id)
         .limit(1)
     )
+
+
+async def load_examples(
+    session: AsyncSession, *, profile_id: UUID, limit: int = MAX_CANDIDATES
+) -> ExamplePool:
+    """Past letters that got an answer, and the counts describing the pool.
+
+    Returns the candidates and an :class:`app.letters.examples.OutcomeEvidence`
+    carrying the figures only a query can produce — how many applications went
+    out, how many the employer answered either way, how many of those were
+    positive, and how many positives cannot be shown because the text that was
+    sent was never recorded. :func:`app.letters.examples.select` fills in the
+    three that depend on the vacancy in hand. The counts are computed here
+    rather than derived from the candidate list because "two sent, none
+    answered" and "two sent, two rejected" are different facts and both are
+    invisible in a list of positives, which is empty in either case.
+
+    **The text is ``sent_letter`` and never ``cover_letter``.** Since migration
+    ``0008_application_send_record`` the row holds both: the string the agent
+    typed into hh's form, written once, and the letter as it stands now, which
+    this module overwrites on every ``--force`` regeneration. Only the first is
+    evidence about what an employer actually read, and showing the second as
+    "the letter that got an interview" would be presenting an unsent letter as a
+    successful one — a lie of exactly the kind this feature is not allowed to
+    tell, and one reachable through a code path in this same package. A positive
+    outcome whose ``sent_letter`` is NULL is therefore counted in
+    :attr:`OutcomeEvidence.text_unknown` and shown to nobody. Every row that
+    predates the send record is one of those.
+
+    **Only letters written for this profile**, and that is now recorded rather
+    than inferred. It used to be reached through the ``match`` row, which does
+    not hold it: a match exists for every profile against every vacancy in the
+    shared pool, so once this profile had been scored against a vacancy an
+    earlier profile applied to, that earlier profile's sent letter was served as
+    an example of what to claim. Showing the model a letter written from a
+    different resume is the shortest path to a letter claiming experience its
+    candidate has not got. The honest fix was an
+    ``application.profile_id`` column, and since migration 0009 that is what
+    this reads. A row whose profile is NULL — typed into the tracker by hand, or
+    written before 0009 — is not evidence about any resume and is not shown.
+
+    **The requirement list is the snapshot when there is one.**
+    ``application.vacancy_key_skills`` is what the posting asked for on the day
+    it was sent to; the ``vacancy_skill`` rows and the payload are what a
+    re-crawl has since made of it. Similarity has to be measured against the
+    first, because the letter that got the answer was answering that. NULL means
+    the row predates the snapshot and the vacancy is read as it stands now,
+    which costs two queries per such candidate — an N+1 that is deliberate and
+    bounded: N is the number of answered applications, which is one on this
+    account today, and capped by :data:`MAX_CANDIDATES` in any case.
+    """
+    # Since migration 0009 the row records whose resume it was written from, so
+    # this is the fact rather than the proxy it used to be. The old join went
+    # through ``match``, and a match row exists for every profile against every
+    # vacancy in the shared pool — so once this profile had been scored against a
+    # vacancy an earlier profile applied to, that earlier profile's sent letter
+    # was served as an example of what to claim. NULL is not this profile: a
+    # letter whose provenance is unknown is not evidence about any resume.
+    for_profile = select(Application).where(Application.profile_id == profile_id)
+    # "Sent" is the predicate ``app/services/agent_queue.py`` already treats as
+    # acted on, widened by the agent's own record: ``sent_at`` is set by the
+    # process that did the sending, the other two by a person working the
+    # kanban, and an application sent by hand is still an application sent.
+    sent = (
+        Application.sent_at.is_not(None)
+        | (Application.status != ApplicationStatus.SAVED)
+        | Application.applied_at.is_not(None)
+    )
+    answered = Application.status.in_(sorted(ANSWERED_STATUSES))
+    positive = Application.status.in_(sorted(POSITIVE_STATUSES))
+
+    totals = (
+        await session.execute(
+            for_profile.with_only_columns(
+                func.count().filter(sent).label("sent"),
+                func.count().filter(answered).label("answered"),
+                func.count().filter(positive).label("positive"),
+                func.count()
+                .filter(positive & Application.sent_letter.is_(None))
+                .label("text_unknown"),
+            )
+        )
+    ).one()
+
+    rows = (
+        await session.execute(
+            for_profile.with_only_columns(
+                Application.vacancy_id,
+                Application.status,
+                Application.sent_at,
+                Application.sent_letter,
+                Application.vacancy_key_skills,
+                Vacancy.title,
+            )
+            .join(Vacancy, Vacancy.id == Application.vacancy_id)
+            .where(positive)
+            .where(Application.sent_letter.is_not(None))
+            .order_by(nulls_last(Application.sent_at.desc()), Application.created_at.desc())
+            .limit(limit)
+        )
+    ).all()
+
+    examples: list[LetterExample] = []
+    seen: set[UUID] = set()
+    for row in rows:
+        grade = grade_of(row.status)
+        # A vacancy can carry more than one tracker row — two attempts at the
+        # same job are legitimate — and the same letter twice in one prompt is
+        # not two pieces of evidence.
+        if grade is None or row.sent_letter is None or row.vacancy_id in seen:
+            continue
+        seen.add(row.vacancy_id)
+        examples.append(
+            LetterExample(
+                vacancy_id=row.vacancy_id,
+                title=row.title,
+                key_skills=await _asked_for(session, row.vacancy_id, row.vacancy_key_skills),
+                text=row.sent_letter,
+                grade=grade,
+                sent_at=row.sent_at,
+            )
+        )
+
+    return ExamplePool(
+        candidates=tuple(examples),
+        counts=OutcomeEvidence(
+            sent=totals.sent,
+            answered=totals.answered,
+            positive=totals.positive,
+            text_unknown=totals.text_unknown,
+        ),
+    )
+
+
+async def _asked_for(session: AsyncSession, vacancy_id: UUID, snapshot: object) -> tuple[str, ...]:
+    """What that vacancy asked for: the send-time snapshot, or the row today.
+
+    ``snapshot`` is a JSONB column, so its declared ``list[str]`` is a promise
+    nothing enforces — it was last written by a service reading a payload. NULL
+    means "not recorded" and falls through to the live rows; ``[]`` means
+    "recorded, and the posting named none", which is a real answer and is
+    returned as one rather than re-read into a different one.
+    """
+    if isinstance(snapshot, list):
+        return tuple(name.strip() for name in snapshot if isinstance(name, str) and name.strip())
+    return await _required_skills(session, vacancy_id, await _derived_of(session, vacancy_id))
+
+
+async def _derived_of(session: AsyncSession, vacancy_id: UUID) -> list[dict[str, Any]]:
+    """The connectors' derived blocks for one vacancy, in payload order."""
+    raws = [
+        source.raw
+        for source in (await session.scalars(_sources_of(vacancy_id))).all()
+        if isinstance(source.raw, dict)
+    ]
+    return [raw[DERIVED_KEY] for raw in raws if isinstance(raw.get(DERIVED_KEY), dict)]
 
 
 def _sources_of(vacancy_id: UUID) -> Select[tuple[VacancySource]]:

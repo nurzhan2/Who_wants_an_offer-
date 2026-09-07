@@ -2,28 +2,39 @@
 
 This is the only module that knows the whole sequence:
 
-    load the rows -> compute the overlap -> generate -> check -> save
+    load the rows -> compute the overlap -> pick the examples -> generate ->
+    check -> save
 
 Everything it reports is a fact about what happened, not a summary of it: which
 vacancy, where the text came from, what the checks caught, whether anything was
 written. A run that produced ten fallbacks and a run that produced ten model
 letters are not the same run, and a report that cannot tell them apart is the
-kind of green tick nobody should trust.
+kind of green tick nobody should trust. The same goes for the examples: a letter
+written with two past letters in its prompt and a letter written with none reach
+the database looking identical, so :attr:`LetterOutcome.evidence` carries the
+counts that say which happened.
+
+**The example step is the feedback loop, and it is few-shot prompting.** Nothing
+is trained; letters that got an answer are pasted into the next prompt. The
+common case is that there are none — see :mod:`app.letters.examples` — and in
+that case this step changes nothing at all.
 
 The letter is saved and never sent. Sending belongs to ``agent/``, from a
 browser, under the user's own account, and only after a human has confirmed that
 particular letter for that particular vacancy.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.letters import examples as few_shot
 from app.letters import store
-from app.letters.context import ProfileFacts, build_context
+from app.letters.context import LetterContext, ProfileFacts, build_context
+from app.letters.examples import ChosenExample, OutcomeEvidence
 from app.letters.generator import GeneratedLetter, LetterUnwritableError, generate
 from app.letters.guard import LetterProblem
 from app.llm.router import LLMRouter, get_router
@@ -50,6 +61,10 @@ class LetterOutcome:
     #: failure rather than a skip and is logged at error level, but it reaches
     #: the report the same way, because the report is what a person reads.
     skipped: str | None = None
+    #: What was known about past outcomes when this letter was written, in
+    #: counts. Whatever displays it has to be able to say «данных пока мало» and
+    #: mean it, which is why this is counts and a flag rather than a rate.
+    evidence: OutcomeEvidence = field(default_factory=OutcomeEvidence)
 
     @property
     def problems(self) -> tuple[LetterProblem, ...]:
@@ -65,6 +80,7 @@ async def write_letter(
     router: LLMRouter | None = None,
     force: bool = False,
     dry_run: bool = False,
+    pool: few_shot.ExamplePool | None = None,
 ) -> LetterOutcome:
     """Generate and save one letter.
 
@@ -72,6 +88,10 @@ async def write_letter(
     letter is left alone: a batch that regenerates what it wrote yesterday burns
     the expensive call for nothing, and would quietly replace a letter the person
     may have edited by hand.
+
+    ``pool`` is the run's past outcomes, read once by :func:`write_batch` and
+    passed down. Left out, this loads them itself, so writing a single letter
+    from the command line gets the same examples a batch would.
     """
     facts = await store.load_vacancy_facts(session, vacancy_id)
     if facts is None:
@@ -88,6 +108,7 @@ async def write_letter(
         )
 
     context = build_context(facts, profile)
+    chosen, evidence = await _examples_for(session, context, profile, pool=pool)
     if dry_run:
         return LetterOutcome(
             vacancy_id=vacancy_id,
@@ -95,11 +116,12 @@ async def write_letter(
             company=facts.company,
             matched=len(context.overlap.matched),
             missing=len(context.overlap.missing),
+            evidence=evidence,
             skipped="dry_run",
         )
 
     try:
-        letter = await generate(context, router=router or get_router())
+        letter = await generate(context, router=router or get_router(), examples=chosen)
     except LetterUnwritableError as exc:
         # Nothing is saved. A letter that fails a hard constraint is worse than
         # an empty column: the column is visible in the report below and in the
@@ -119,10 +141,13 @@ async def write_letter(
             company=facts.company,
             matched=len(context.overlap.matched),
             missing=len(context.overlap.missing),
+            evidence=evidence,
             skipped="letter_unwritable",
         )
 
-    await store.save_letter(session, vacancy_id=vacancy_id, text=letter.text)
+    await store.save_letter(
+        session, vacancy_id=vacancy_id, text=letter.text, profile_id=profile.profile_id
+    )
 
     logger.info(
         "letters.written",
@@ -133,6 +158,8 @@ async def write_letter(
         matched=len(context.overlap.matched),
         missing=len(context.overlap.missing),
         rejected_for=[problem.value for problem in letter.rejected_for],
+        examples_used=letter.examples_used,
+        outcomes_known=evidence.answered,
     )
     return LetterOutcome(
         vacancy_id=vacancy_id,
@@ -142,8 +169,26 @@ async def write_letter(
         matched=len(context.overlap.matched),
         missing=len(context.overlap.missing),
         characters=len(letter.text),
+        evidence=evidence,
         saved=True,
     )
+
+
+async def _examples_for(
+    session: AsyncSession,
+    context: LetterContext,
+    profile: ProfileFacts,
+    *,
+    pool: few_shot.ExamplePool | None,
+) -> tuple[tuple[ChosenExample, ...], OutcomeEvidence]:
+    """The past letters this vacancy gets shown, and what is known about them.
+
+    Selection happens per vacancy because "similar" is a question about *this*
+    vacancy's requirement list; the query behind it happens once per run.
+    """
+    if pool is None:
+        pool = await store.load_examples(session, profile_id=profile.profile_id)
+    return few_shot.select(pool, context)
 
 
 async def write_batch(
@@ -155,6 +200,7 @@ async def write_batch(
     router: LLMRouter | None = None,
     force: bool = False,
     dry_run: bool = False,
+    pool: few_shot.ExamplePool | None = None,
 ) -> list[LetterOutcome]:
     """Work down the queue of vacancies that still need a letter.
 
@@ -162,6 +208,10 @@ async def write_batch(
     provider holds a concurrency semaphore of its own; firing a hundred of these
     at once would queue on that semaphore anyway while making the run impossible
     to interrupt cleanly halfway through.
+
+    ``pool`` lets a caller that already has the run's past outcomes — a script
+    that wants to print how much is known before it prints the letters — hand
+    them in instead of paying for the same query twice.
     """
     profile = await store.load_profile_facts(session, profile_id)
     if profile is None:
@@ -174,6 +224,11 @@ async def write_batch(
         min_score=min_score,
         include_written=force,
     )
+    # Once for the run: the answered applications do not change while a batch is
+    # being written, and which of them suit a given vacancy is decided per
+    # vacancy from this same list.
+    if pool is None:
+        pool = await store.load_examples(session, profile_id=profile.profile_id)
     outcomes: list[LetterOutcome] = []
     for item in queued:
         outcomes.append(
@@ -184,6 +239,7 @@ async def write_batch(
                 router=router,
                 force=force,
                 dry_run=dry_run,
+                pool=pool,
             )
         )
     return outcomes

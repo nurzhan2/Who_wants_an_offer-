@@ -50,6 +50,7 @@ from app.core.exceptions import AppError, LLMError
 from app.core.logging import get_logger
 from app.letters import prompt as prompt_builder
 from app.letters.context import LetterContext, MatchedSkill, fold
+from app.letters.examples import ChosenExample
 from app.letters.guard import ENGLISH, LetterProblem, find_problems, is_safe
 from app.llm import usage as usage_ledger
 from app.llm.base import LLMTask, LLMUsage
@@ -148,6 +149,11 @@ class GeneratedLetter:
     usages: tuple[LLMUsage, ...] = ()
     addressed_skills: tuple[str, ...] = ()
     acknowledged_gaps: tuple[str, ...] = ()
+    #: How many past letters were shown to the model as examples. Recorded
+    #: because a run that had examples and a run that had none are not the same
+    #: run, and a report that cannot tell them apart would let somebody credit
+    #: the feedback loop for a letter written without any of it.
+    examples_used: int = 0
 
     @property
     def cost_usd(self) -> float | None:
@@ -230,7 +236,12 @@ def feedback_for(problems: list[LetterProblem]) -> str:
     )
 
 
-async def generate(context: LetterContext, *, router: LLMRouter | None = None) -> GeneratedLetter:
+async def generate(
+    context: LetterContext,
+    *,
+    router: LLMRouter | None = None,
+    examples: tuple[ChosenExample, ...] = (),
+) -> GeneratedLetter:
     """One letter for one vacancy, guaranteed to pass every hard constraint.
 
     The guarantee is the return type's, and it is checked rather than argued: a
@@ -243,6 +254,13 @@ async def generate(context: LetterContext, *, router: LLMRouter | None = None) -
     there is nothing left to fall back to, and the two ways of not saying so —
     saving the stub, or returning it and letting the service call that success —
     both end with an employer reading it.
+
+    ``examples`` are past letters that got an answer, already selected and
+    already through the guard by :mod:`app.letters.examples`. They change the
+    prompt and nothing else: the checks on the answer are the same checks, so a
+    claim copied out of an example is rejected by ``inspect_draft`` exactly like
+    one the model invented on its own. Empty is the ordinary case, and an empty
+    tuple renders no prompt text at all.
     """
     router = router or get_router()
     usages: list[LLMUsage] = []
@@ -255,7 +273,7 @@ async def generate(context: LetterContext, *, router: LLMRouter | None = None) -
                 PROMPT_NAME,
                 CoverLetterDraft,
                 task=TASK,
-                variables=prompt_builder.variables(context, feedback=feedback),
+                variables=prompt_builder.variables(context, feedback=feedback, examples=examples),
             )
         except LLMError as exc:
             # The provider is gone, or it failed to produce the shape twice.
@@ -281,6 +299,7 @@ async def generate(context: LetterContext, *, router: LLMRouter | None = None) -
                 usages=tuple(usages),
                 addressed_skills=tuple(result.value.addressed_skills),
                 acknowledged_gaps=tuple(result.value.acknowledged_gaps),
+                examples_used=len(examples),
             )
 
         seen.extend(problems)
@@ -327,6 +346,12 @@ async def generate(context: LetterContext, *, router: LLMRouter | None = None) -
         # overlap here would be the same silent deletion in the outcome record.
         addressed_skills=fallback.addressed_skills,
         acknowledged_gaps=context.overlap.missing,
+        # Zero even when the model was shown examples, because this text is not
+        # the model's: the rule-based letter is assembled from the context and
+        # saw nothing. Reporting the examples here would credit them for a
+        # letter they had no part in, which is the whole failure mode this
+        # feature has to avoid.
+        examples_used=0,
     )
 
 
