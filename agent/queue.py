@@ -160,8 +160,14 @@ class Result:
     vacancy_id: str
     status: str
     reason: str | None = None
-    #: hh's own warning about this application, quoted from the response form:
-    #: «Такой отклик может получить отказ» followed by the requirement it names.
+    #: hh's own words about this application, quoted from the response form.
+    #: One or two sentences, one per line: «Такой отклик может получить отказ»
+    #: followed by the requirement it names, and — since 2026-09-07 — «поменяйте
+    #: видимость резюме…», which is about the resume rather than this vacancy and
+    #: is therefore true of every application sent while that setting stands. It
+    #: used to be treated as a refusal and never reached a ``sent`` result at
+    #: all; hh accepts those applications, measured, and
+    #: ``agent/state_page.py`` carries the record.
     #:
     #: A field of its own rather than a sentence inside :attr:`reason`, because
     #: the two are different things to whoever stores this. ``reason`` is why
@@ -169,7 +175,8 @@ class Result:
     #: this is hh's analysis of the application itself — it names one unmet
     #: requirement, which is more precise than any similarity score this project
     #: computes, and it belongs beside the match score rather than in a log
-    #: line. It can be set on a ``sent`` result: the soft warning never blocks.
+    #: line. It is set on a ``sent`` result: nothing hh writes in that form stops
+    #: an application.
     hh_warning: str | None = None
 
     def to_json(self) -> dict[str, Any]:

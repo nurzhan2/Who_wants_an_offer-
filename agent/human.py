@@ -35,6 +35,19 @@ of the dry run before a single candidate could be read. See :meth:`Candidate
 .render`, which also says why the digest binds the reduced text rather than the
 original.
 
+**Since 2026-09-07 this is the only thing between a queue file and somebody's
+real application, and it got one new job rather than one less.** hh's «поменяйте
+видимость резюме…» used to stop every send by itself, so the confirmation was
+never the last line of defence in practice — nothing could get past that rule to
+reach it. That rule is gone: it was a guess, hh accepts those applications, and
+the measurement is in ``agent/state_page.py``. Nothing here was relaxed to make
+room for it — the word is still typed in full, the default is still no, EOF is
+still a refusal, a duplicate is still a cancellation, and :func:`mint` is still
+called nowhere else. What changed is that hh's advice now has to *arrive*: it is
+on the card under its own heading and once more for the whole batch, because an
+owner about to send twelve applications should learn from this prompt, not from
+the summary afterwards, that hh thinks all twelve will be limited.
+
 **One candidate per vacancy, checked here as well as upstream.** ``run.py``
 deduplicates the batch; this refuses to mint a second mandate for a vacancy that
 is already in the list, because :func:`mint` is the point where a duplicate
@@ -58,6 +71,14 @@ from agent.state_page import printable
 #: key produces, and this is the last gate before something irreversible.
 CONFIRM_WORD: Final[str] = "отправляем"
 
+#: What hh's resume-visibility sentence is filed under on one card. Says out
+#: loud that it is not about this vacancy, because the line under it names a
+#: vacancy («Чтобы откликнуться на эту вакансию…») and would otherwise read as
+#: one job's problem.
+VISIBILITY_HEADING: Final[str] = (
+    "  hh: видимость резюме — это касается ВСЕХ откликов, не только этого:"
+)
+
 
 @final
 @dataclass(frozen=True, slots=True)
@@ -78,6 +99,14 @@ class Candidate:
     #: queue untouched — this package neither computes nor edits them.
     score: float | None = None
     score_explanation: str | None = None
+    #: hh's «поменяйте видимость резюме…», in hh's own words, when the journal
+    #: carries it. A field of its own rather than a second line inside
+    #: :attr:`hh_warning`, and the difference is the whole reason it was added
+    #: (2026-09-07): that sentence is about the *resume*, so it is not a remark
+    #: about this vacancy but a statement about every application in the list —
+    #: including the ones no run has ever opened a form for. A card that files it
+    #: under "what hh said about this job" is a card that reads it as small.
+    hh_visibility: str | None = None
 
     def render(self) -> str:
         """Exactly what the human is shown. The mandate is bound to this text.
@@ -112,17 +141,30 @@ class Candidate:
         an employer-facing message they did not write — the backend generates
         it. A long letter is a long prompt; that is the correct cost.
 
-        **hh's own warning is printed too, when there is one.** The response
-        form is the first and only place hh says whether it will accept an
-        application from this account — «Такой отклик может получить отказ»
-        followed by the requirement that is unmet, or a refusal naming a setting
-        to change — and it only opens after this card has been answered. So the
-        warning shown here is the one hh gave last time, carried through the
-        journal. It is quoted rather than summarised: the measured refusal names
-        a setting by a name the owner can search for, and a paraphrase sends
-        them looking for one that does not exist. Being on the card also means
-        the mandate binds it, so a decision made while reading hh's objection
-        cannot be reused for a payload that no longer carries it.
+        **hh's own words are printed too, when there are any, and the two kinds
+        are printed differently.** The response form is the only place hh says
+        anything about an application, and it opens after this card has been
+        answered — so whatever is shown here is what hh said last time, carried
+        through the journal. Both kinds are quoted rather than summarised,
+        because both name a setting or a requirement by a name the owner can
+        search for and a paraphrase sends them looking for one hh does not use.
+
+        They are separated because they are not the same size of statement
+        (2026-09-07). «Такой отклик может получить отказ» is about this vacancy:
+        it names one requirement this employer set that the resume does not meet.
+        «Чтобы откликнуться на эту вакансию, поменяйте видимость резюме…» is
+        about the resume, so hh shows it on every vacancy while that setting
+        stands, and reading it as a note about this one job is reading it as
+        twelve small remarks instead of one large one. It used to stop the
+        application outright, which made the distinction moot; now that the
+        application goes out, the card is where the owner finds out that hh
+        thinks it will not be seen — so it gets its own heading, saying that it
+        is true of every application here, and :func:`confirm` says the same
+        thing once for the batch.
+
+        Being on the card means the mandate binds both, so a decision made while
+        reading hh's objection cannot be reused for a payload that no longer
+        carries it.
 
         **Everything printed here is reduced to cp1251, which is what a Russian
         Windows console encodes to.** Not only hh's warnings, which arrive
@@ -157,8 +199,11 @@ class Candidate:
         ]
         # Truthiness rather than ``is not None``: an empty string would print a
         # heading with nothing under it, which reads as a warning nobody wrote.
+        if self.hh_visibility:
+            lines.append(VISIBILITY_HEADING)
+            lines.extend(f"  | {line}" for line in self.hh_visibility.splitlines())
         if self.hh_warning:
-            lines.append("  hh уже предупреждал:")
+            lines.append("  hh уже предупреждал об этой вакансии:")
             lines.extend(f"  | {line}" for line in self.hh_warning.splitlines())
         if self.letter is None:
             lines.append("  без сопроводительного письма")
@@ -234,6 +279,7 @@ def confirm(
     for index, candidate in enumerate(candidates, start=1):
         print(f"[{index}] {candidate.render()}\n", file=out)
 
+    _say_it_once_for_the_batch(candidates, out)
     print(
         "Введите номера, которые НЕ надо отправлять, через пробел "
         "(пустая строка — отправляем все).",
@@ -262,6 +308,41 @@ def confirm(
         )
         for candidate in kept
     ]
+
+
+def _say_it_once_for_the_batch(candidates: Sequence[Candidate], out: TextIO) -> None:
+    """Repeat hh's resume-visibility sentence once, for the whole list.
+
+    Printed between the cards and the drop prompt, which is the last thing read
+    before the answer. It is a repetition on purpose: the sentence is already on
+    every card that carries it, and the point being made here is the one no
+    single card can make — that this is one statement about the resume rather
+    than a coincidence across N vacancies, and that it is equally true of the
+    ones whose cards say nothing, because a card only knows what hh happened to
+    say the last time a form was open for that vacancy.
+
+    **It adds nothing to the digest and it must not.** Every word here is either
+    fixed text or a line already printed inside a card, and the cards are what
+    :func:`mint` binds. A summary carrying anything of its own would be text the
+    human read and the mandate did not cover, which is the failure this module
+    exists to prevent, in the one function that is supposed to prevent it.
+    """
+    carrying = [candidate for candidate in candidates if candidate.hh_visibility]
+    if not carrying:
+        return
+    print("ВНИМАНИЕ. hh пишет про видимость резюме:", file=out)
+    # Through ``printable`` like everything else quoted out of hh. It reaches
+    # here from the journal rather than straight from the page, and a column
+    # somebody else may have written into is not a reason to trust the codepage.
+    for line in printable(carrying[0].hh_visibility or "").splitlines():
+        print(f"  | {line}", file=out)
+    print(
+        "Это про само резюме, а не про вакансию: hh сказал это про "
+        f"{len(carrying)} из {len(candidates)} в списке,\n"
+        "и это верно для всех остальных тоже. Отклики уйдут — hh их принимает, —\n"
+        "но hh считает, что работодатель может их не увидеть.\n",
+        file=out,
+    )
 
 
 def _read_line(src: TextIO) -> str:

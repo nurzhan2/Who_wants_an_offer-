@@ -29,7 +29,6 @@ from agent.prefilter import (
     Verdict,
     decide,
     decide_before_opening,
-    decide_on_form,
     read,
     read_status,
 )
@@ -37,9 +36,9 @@ from agent.queue import CONTRACT_VERSION, FileQueue, QueueFormatError, QueueItem
 from agent.state import Actor, Status
 from agent.state_page import (
     Application,
-    FormWarning,
     FormWarnings,
     Negotiations,
+    mentions_visibility,
     printable,
     read_applied,
     read_form_warnings,
@@ -784,38 +783,50 @@ MEASURED_MODAL = (
 )
 
 
-def test_the_visibility_demand_is_a_hard_stop_in_hh_s_own_words() -> None:
-    """Never send, and quote hh rather than paraphrasing.
+def test_the_visibility_notice_is_read_in_hh_s_own_words_and_stops_nothing() -> None:
+    """It used to be a hard stop. It was a guess, and it blocked every send.
 
-    A paraphrase sends the owner looking for a setting under a name hh does not
-    use. The non-breaking spaces are why this is matched on a normalised copy:
-    the string hh serves is not the string anybody would type.
+    Rewritten 2026-09-07 from ``test_the_visibility_demand_is_a_hard_stop_in_hh_s
+    _own_words``, which asserted ``may_send is False`` on this exact card. hh
+    accepts these applications — measured the same day, recorded in
+    ``agent/evidence/20260907-send-under-visibility-notice.json`` — so what is
+    pinned here is the half that was always right: hh's sentence is read out
+    whole, quoted rather than paraphrased, because it names a setting under a
+    name the owner can search for. The non-breaking spaces are why matching
+    happens on a normalised copy: the string hh serves is not the string
+    anybody would type.
     """
     warnings = read_form_warnings(MEASURED_MODAL)
 
-    assert warnings.verdict is FormWarning.BLOCKING
-    assert warnings.may_send is False
-    assert warnings.blocking is not None
-    assert "поменяйте видимость резюме" in warnings.blocking
-    assert "«Видно компаниям-клиентам HeadHunter»" in warnings.blocking
+    assert warnings.visibility is not None
+    assert "поменяйте видимость резюме" in warnings.visibility
+    assert "«Видно компаниям-клиентам HeadHunter»" in warnings.visibility
+    # Nothing on this object can be asked "may I send" any more. The properties
+    # that answered it are gone, and this is what stops them coming back.
+    assert not hasattr(warnings, "may_send")
+    assert not hasattr(warnings, "verdict")
 
 
-def test_the_soft_warning_is_carried_but_never_blocks() -> None:
-    """hh naming the unmet requirement is worth more than any score computed here.
+def test_both_things_hh_says_are_kept_and_neither_outranks_the_other() -> None:
+    """They arrived on one card, and they are about different things.
 
-    It arrived on the same card as the hard stop, which is why the verdict is
-    not a single value: a one-of-three answer would have thrown this away.
+    «может получить отказ» is about this vacancy — it names the requirement the
+    resume misses. The visibility notice is about the resume, so it is equally
+    true of every other application in the batch. A single-valued verdict used
+    to hide the first behind the second whenever both were present.
     """
     warnings = read_form_warnings(MEASURED_MODAL)
 
-    assert warnings.soft is not None
-    assert "может получить отказ" in warnings.soft
-    assert "ниже обязательного уровня" in warnings.soft
-    assert "Добавить сопроводительное" not in warnings.soft
+    assert warnings.likely_rejection is not None
+    assert "может получить отказ" in warnings.likely_rejection
+    assert "ниже обязательного уровня" in warnings.likely_rejection
+    assert "Добавить сопроводительное" not in warnings.likely_rejection
+    # In the order hh had them on the card, which is the order they are shown in.
+    assert warnings.said == (warnings.visibility, warnings.likely_rejection)
 
 
-def test_a_soft_warning_on_its_own_lets_the_application_through() -> None:
-    """It is an opinion about the odds, not a refusal."""
+def test_the_likely_rejection_warning_on_its_own_is_read_and_carried() -> None:
+    """It is an opinion about the odds, and it was never a refusal."""
     warnings = read_form_warnings(
         "Отклик на вакансию\nPython-разработчик\n"
         "Такой отклик может получить отказ\n"
@@ -823,20 +834,20 @@ def test_a_soft_warning_on_its_own_lets_the_application_through() -> None:
         "Откликнуться"
     )
 
-    assert warnings.verdict is FormWarning.SOFT
-    assert warnings.may_send is True
-    assert decide_on_form(warnings).verdict is Verdict.PROCEED
-    assert "меньше, чем указал работодатель" in decide_on_form(warnings).reason
+    assert warnings.visibility is None
+    assert warnings.likely_rejection is not None
+    assert "меньше, чем указал работодатель" in warnings.likely_rejection
+    assert len(warnings.said) == 1
 
 
 def test_a_warning_in_words_nobody_has_seen_is_not_invented_into_a_meaning() -> None:
     """An unrecognised sentence is reported as neither warning, on purpose.
 
-    The two errors are not symmetric. Missing a stop costs one slot and is
-    caught afterwards, because hh refuses the application itself and
-    ``negotiations.total`` still reads 0. Treating every new sentence as a stop
-    sends the whole queue to a human the first time hh edits that card, and
-    nobody edits it back.
+    Nothing is invented from it in either direction. Since 2026-09-07 the cost
+    of being wrong here is a line on a confirmation card rather than a vacancy
+    taken out of the run, but the rule is the same one: this reads two measured
+    families and refuses to guess outside them, because a card full of text hh
+    did not write teaches its reader to stop reading the card.
     """
     warnings = read_form_warnings(
         "Отклик на вакансию\nPython-разработчик\n"
@@ -844,18 +855,27 @@ def test_a_warning_in_words_nobody_has_seen_is_not_invented_into_a_meaning() -> 
         "Откликнуться"
     )
 
-    assert warnings.verdict is FormWarning.NONE
-    assert (warnings.blocking, warnings.soft) == (None, None)
-    assert decide_on_form(warnings).verdict is Verdict.PROCEED
+    assert (warnings.visibility, warnings.likely_rejection) == (None, None)
+    assert warnings.said == ()
 
 
-def test_the_blocking_warning_reaches_the_person_through_the_decision() -> None:
-    """The reason a human reads carries hh's sentence, not a summary of it."""
-    decision = decide_on_form(read_form_warnings(MEASURED_MODAL))
+def test_nothing_in_the_prefilter_decides_anything_from_the_modal_s_text() -> None:
+    """``decide_on_form`` is gone, and this is what keeps it gone.
 
-    assert decision.verdict is Verdict.MANUAL
-    assert decision.status is Status.NEEDS_MANUAL
-    assert "поменяйте видимость резюме" in decision.reason
+    It existed to turn one sentence into a ``MANUAL`` verdict. That sentence is
+    advice, so the stage had nothing left to decide, and a decision function
+    that can only answer ``PROCEED`` is a guard shape with nothing behind it —
+    the next reader would believe it. What may stop an application is a
+    checkable fact, and every one of them is knowable before the modal opens, so
+    :func:`decide` is where they all live.
+    """
+    import agent.prefilter as prefilter_module
+
+    assert not hasattr(prefilter_module, "decide_on_form")
+    assert not any(
+        "FormWarnings" in str(annotation)
+        for annotation in getattr(prefilter_module.decide, "__annotations__", {}).values()
+    )
 
 
 def test_everything_quoted_out_of_hh_survives_the_console_it_is_printed_on() -> None:
@@ -865,8 +885,8 @@ def test_everything_quoted_out_of_hh_survives_the_console_it_is_printed_on() -> 
     character outside the codepage used to end the run at print time, in the
     middle of a batch, with the browser already open.
     """
-    decision = decide_on_form(read_form_warnings(MEASURED_MODAL))
-    decision.reason.encode("cp1251")
+    for line in read_form_warnings(MEASURED_MODAL).said:
+        line.encode("cp1251")
 
     assert printable("Опыт ┌─ Python") == "Опыт ?? Python"
     printable("вопрос 🙂").encode("cp1251")
@@ -1066,7 +1086,7 @@ RENDERED_CARD = (
 SUBMIT_LABEL = "Откликнуться"
 
 #: hh's demand in full, non-breaking spaces and all, as it was measured.
-RESUME_HIDDEN_DEMAND = (
+RESUME_VISIBILITY_LINE = (
     f"Чтобы откликнуться на{NBSP}эту вакансию, поменяйте видимость резюме "
     f"на{NBSP}«Видно компаниям-клиентам HeadHunter»"
 )
@@ -1236,20 +1256,28 @@ def test_a_card_that_did_render_is_read_and_believed() -> None:
 
     warnings = submit._open_the_form(page, a_fake_mandate())
 
-    assert (warnings.blocking, warnings.soft) == (None, None)
+    assert (warnings.visibility, warnings.likely_rejection) == (None, None)
     assert page.clicked == [selectors.any_apply_control()]
 
 
-def test_the_refusal_is_still_a_refusal_when_the_card_is_readable() -> None:
-    """The measured blocking card, down the same path, still stops the send."""
+def test_the_visibility_notice_comes_back_out_of_the_open_form_and_raises_nothing() -> None:
+    """Rewritten 2026-09-07 from ``test_the_refusal_is_still_a_refusal_…``.
+
+    That test asserted this same card raised ``RefusedByHHError`` out of
+    ``_open_the_form``. The class is gone with the rule: hh accepts these
+    applications. What the card is worth is hh's sentence, so what is pinned now
+    is that the sentence comes back to the caller intact — and that opening the
+    form is a reading, with nothing raised out of it.
+    """
     page = _ModalPage(
-        card=(f"Отклик на вакансию\n{RESUME_HIDDEN_DEMAND}\nPython-разработчик\nОткликнуться")
+        card=(f"Отклик на вакансию\n{RESUME_VISIBILITY_LINE}\nPython-разработчик\nОткликнуться")
     )
 
-    with pytest.raises(submit.RefusedByHHError) as excinfo:
-        submit._open_the_form(page, a_fake_mandate())
+    warnings = submit._open_the_form(page, a_fake_mandate())
 
-    assert "видимость резюме" in excinfo.value.said
+    assert warnings.visibility is not None
+    assert "видимость резюме" in warnings.visibility
+    assert not hasattr(submit, "RefusedByHHError")
 
 
 def test_the_apply_link_must_name_this_vacancy_and_no_other() -> None:
@@ -1293,24 +1321,23 @@ def test_an_apply_link_that_does_not_name_exactly_this_vacancy_is_refused(
 
 
 def test_what_hh_said_at_any_point_in_the_open_form_is_kept() -> None:
-    """The card is classified before the letter is typed, and the send is after it.
+    """The card is read before the letter is typed, and the send is after it.
 
     hh can answer the letter — a length it will not take, a policy on the text —
-    and the first reading cannot have seen that. Both readings are kept: a stop
-    from either stops, and a warning from either reaches the journal.
+    and the first reading cannot have seen that. Both readings are kept, so a
+    sentence from either reaches the journal and the person reading it next.
     """
-    before = FormWarnings(blocking=None, soft="Такой отклик может получить отказ")
-    after = FormWarnings(blocking="Письмо слишком длинное", soft=None)
+    before = FormWarnings(visibility=None, likely_rejection="Такой отклик может получить отказ")
+    after = FormWarnings(visibility="Поменяйте видимость резюме", likely_rejection=None)
 
     both = submit._everything_hh_said(before, after)
 
-    assert both.blocking == "Письмо слишком длинное"
-    assert both.soft == "Такой отклик может получить отказ"
-    assert both.may_send is False
-    assert decide_on_form(both).verdict is Verdict.MANUAL
+    assert both.visibility == "Поменяйте видимость резюме"
+    assert both.likely_rejection == "Такой отклик может получить отказ"
+    assert both.said == (both.visibility, both.likely_rejection)
 
 
-# ── the hard stop survives hh rewording it ───────────────────
+# ── the reading survives hh rewording its own sentence ───────
 
 #: Zero-width space: invisible, not whitespace to :meth:`str.split`, and a thing
 #: web typography really does insert. Spelled with :func:`chr` for the same
@@ -1321,39 +1348,38 @@ ZWSP = chr(0x200B)
 @pytest.mark.parametrize(
     "line",
     [
-        pytest.param(RESUME_HIDDEN_DEMAND, id="the measured sentence"),
+        pytest.param(RESUME_VISIBILITY_LINE, id="the measured sentence"),
         pytest.param("Поменяйте видимость вашего резюме", id="one word in between"),
         pytest.param("Измените настройки видимости резюме", id="another case ending"),
         pytest.param("Резюме скрыто — поменяйте видимость", id="the other order"),
         pytest.param(f"Поменяйте видимость рез{ZWSP}юме", id="a zero-width space inside a word"),
     ],
 )
-def test_the_hard_stop_survives_hh_rewording_its_own_sentence(line: str) -> None:
-    """The docstring promised "any mention of resume visibility". Now it is true.
+def test_the_notice_survives_hh_rewording_its_own_sentence(line: str) -> None:
+    """The docstring promised "any mention of resume visibility". It is true.
 
-    It used to be an exact two-word bigram inside a single line, so
-    «видимость вашего резюме» — one word wider — was not a hard stop at
-    all, and neither was any other case ending. The asymmetry decides how wide
-    to cast the net: a false positive hands one vacancy to the owner, a false
-    negative sends an application hh will not show to the employer.
+    It used to be an exact two-word bigram inside a single line, so «видимость
+    вашего резюме» — one word wider — matched nothing, and neither did any other
+    case ending. What being wrong costs has changed since (2026-09-07: this is
+    advice, and it stops nothing), but the direction has not — missing it means
+    the owner sends a batch without being told hh thinks the whole batch is
+    limited, and matching one line too many costs a quoted line on a card.
     """
     warnings = read_form_warnings(f"Отклик на вакансию\n{line}\nОткликнуться")
 
-    assert warnings.verdict is FormWarning.BLOCKING
-    assert warnings.may_send is False
-    assert decide_on_form(warnings).verdict is Verdict.MANUAL
+    assert warnings.visibility is not None
+    assert warnings.said == (warnings.visibility,)
 
 
-def test_a_demand_hh_has_split_over_two_lines_is_still_a_demand() -> None:
+def test_a_notice_hh_has_split_over_two_lines_is_still_read() -> None:
     """No single line carries it, so every line that mentions it is quoted."""
     warnings = read_form_warnings(
         "Отклик на вакансию\nРезюме скрыто.\nПоменяйте видимость в настройках.\nОткликнуться"
     )
 
-    assert warnings.may_send is False
-    assert warnings.blocking is not None
-    assert "Резюме скрыто." in warnings.blocking
-    assert "Поменяйте видимость" in warnings.blocking
+    assert warnings.visibility is not None
+    assert "Резюме скрыто." in warnings.visibility
+    assert "Поменяйте видимость" in warnings.visibility
 
 
 @pytest.mark.parametrize(
@@ -1363,22 +1389,44 @@ def test_a_demand_hh_has_split_over_two_lines_is_still_a_demand() -> None:
         pytest.param(
             "Отклик на вакансию\nТакой отклик может получить отказ\n"
             "Английский язык в резюме «Python-разработчик» ниже уровня.\nОткликнуться",
-            id="the soft warning, which itself names a resume",
+            id="the likely-rejection warning, which itself names a resume",
         ),
     ],
 )
-def test_the_wider_net_does_not_catch_the_cards_that_may_be_sent(modal: str) -> None:
-    """Casting wider costs false stops, so the cards that must not stop are checked.
+def test_the_wider_net_does_not_read_a_visibility_notice_into_these_cards(modal: str) -> None:
+    """Casting wider costs false positives, so the quiet cards are checked.
 
-    The soft warning is the one that matters: hh's own «может получить отказ»
-    reason names «резюме», so half of the demand sits on a perfectly sendable
-    card and only the other half keeps it sendable.
+    The second one matters: hh's own «может получить отказ» reason names
+    «резюме», so half of the notice's words sit on a card that says nothing
+    about visibility, and only the other half keeps it out of that heading. A
+    card headed «видимость резюме — это касается ВСЕХ откликов» over a sentence
+    about an English level is a card its reader learns to skip.
     """
     warnings = read_form_warnings(modal)
 
-    assert warnings.blocking is None
-    assert warnings.may_send is True
-    assert decide_on_form(warnings).verdict is Verdict.PROCEED
+    assert warnings.visibility is None
+
+
+def test_one_rule_decides_what_counts_as_the_visibility_notice() -> None:
+    """Two callers, one rule, and no second opinion about hh's sentence.
+
+    :func:`read_form_warnings` applies it to a line of the open card;
+    ``agent/run.py`` applies it to a sentence that came back out of the journal,
+    where hh's two kinds of sentence share one reason column and have to be told
+    apart again before a confirmation card can label them. A second matcher would
+    drift from this one and the failure would be silent: hh's statement about the
+    resume filed under "about this vacancy" reads as a small remark about one
+    job, which is exactly the thing it is not.
+    """
+    assert mentions_visibility(RESUME_VISIBILITY_LINE)
+    assert mentions_visibility("Поменяйте видимость вашего резюме")
+    assert not mentions_visibility("Такой отклик может получить отказ")
+
+    warnings = read_form_warnings(MEASURED_MODAL)
+
+    assert warnings.visibility is not None and mentions_visibility(warnings.visibility)
+    assert warnings.likely_rejection is not None
+    assert not mentions_visibility(warnings.likely_rejection)
 
 
 # ── when the count and the list disagree ─────────────────────

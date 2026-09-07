@@ -271,6 +271,78 @@ def test_the_confirmation_carries_the_letter_the_human_saw() -> None:
     verify(mandate)  # and it is a real, usable mandate
 
 
+def test_hhs_advice_is_bound_into_the_confirmation_like_everything_else_shown() -> None:
+    """Added 2026-09-07, with the change that made this prompt load-bearing.
+
+    hh's «поменяйте видимость резюме…» used to stop every application on its own,
+    so nothing could reach this prompt under it and the prompt was not, in
+    practice, the last thing between a queue file and a real application. It is
+    now. The advice therefore has to be on the card — and being on the card has
+    to mean what it means for every other field: the digest covers it, so a
+    payload whose warning changed cannot reuse a confirmation given while the old
+    one was on screen.
+
+    Both directions are checked, because a field that is rendered but not bound,
+    or bound but not rendered, fails in a way nobody sees.
+    """
+    said = "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме"
+    warned = Candidate("1", "A", None, "https://hh.kz/vacancy/1", None, hh_visibility=said)
+    quiet = Candidate("1", "A", None, "https://hh.kz/vacancy/1", None)
+
+    assert said in warned.render()
+    assert digest(warned.render()) != digest(quiet.render())
+
+    (mandate,) = confirm(
+        [warned], stream_in=io.StringIO(f"\n{CONFIRM_WORD}\n"), stream_out=io.StringIO()
+    )
+
+    assert mandate.form_digest == digest(warned.render())
+    assert mandate.form_digest != digest(quiet.render())
+
+
+def test_the_batch_is_told_once_what_hh_said_about_the_resume() -> None:
+    """One statement about twelve applications, said once where it is read.
+
+    The per-card heading cannot make this point: hh's sentence names a vacancy
+    («Чтобы откликнуться на эту вакансию…»), so twelve cards carrying it read as
+    twelve separate remarks about twelve jobs rather than one remark about the
+    resume they all share. The summary sits between the cards and the drop
+    prompt, which is the last thing read before the answer is typed.
+
+    It adds nothing to what the mandate binds, and that is asserted here rather
+    than assumed: every word of it is either fixed text or a line already inside
+    a card, so consent still covers exactly what was shown.
+    """
+    said = "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме"
+    candidates = [
+        Candidate("1", "A", None, "https://hh.kz/vacancy/1", None, hh_visibility=said),
+        Candidate("2", "B", None, "https://hh.kz/vacancy/2", None),
+    ]
+    shown = io.StringIO()
+
+    mandates = confirm(candidates, stream_in=io.StringIO(f"\n{CONFIRM_WORD}\n"), stream_out=shown)
+
+    printed = shown.getvalue()
+    assert "ВНИМАНИЕ" in printed
+    assert said in printed
+    assert "1 из 2" in printed, "the batch is told how much of it hh has spoken about"
+    assert "для всех остальных" in printed, "and that it is true of the rest too"
+    assert [m.form_digest for m in mandates] == [digest(c.render()) for c in candidates]
+
+
+def test_a_quiet_batch_says_nothing_about_visibility() -> None:
+    """A banner nobody earned is a banner everybody learns to skip."""
+    shown = io.StringIO()
+
+    confirm(
+        [Candidate("1", "A", None, "https://hh.kz/vacancy/1", None)],
+        stream_in=io.StringIO(f"\n{CONFIRM_WORD}\n"),
+        stream_out=shown,
+    )
+
+    assert "ВНИМАНИЕ" not in shown.getvalue()
+
+
 def test_only_the_confirmation_module_mints_a_mandate() -> None:
     """``mint`` is a capability, and this is the test that keeps it scarce.
 

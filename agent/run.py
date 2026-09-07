@@ -51,11 +51,23 @@ non-zero, because the state machine is a guarantee and not a formality.
 **A vacancy leaves ``needs_manual`` or ``failed`` only by a person's hand, and
 ``--requeue`` is that hand** (2026-09-07). ``agent.state`` reserves those two
 moves for :data:`~agent.state.Actor.HUMAN` and nothing in this package performed
-them, so a vacancy hh had refused was skipped for ever and the warning hh gave
-about it could never reach a confirmation card — the one place it is worth
-reading, because hh's own sentence names the requirement that is unmet. The
-command sends nothing and opens nothing; it moves rows the owner names, keeping
-what hh said about them.
+them, so a vacancy the run had set aside was skipped for ever and anything the
+journal remembered about it could never reach a confirmation card. The command
+sends nothing and opens nothing; it moves rows the owner names, keeping what was
+said about them.
+
+**hh's own words are now something the owner reads, never something the agent
+obeys** (2026-09-07). «Чтобы откликнуться на эту вакансию, поменяйте видимость
+резюме…» used to arrive here as a refusal, be written to ``needs_manual`` and
+stop the application; it is advice, hh accepts those applications, and the
+measurement is in ``agent/state_page.py`` beside the words it matches. So there
+is one more thing this file has to get right than there was: the sentence is
+about the *resume*, not about the vacancy it appeared on, which makes it true of
+every application in a batch. It goes into the journal and the results file per
+vacancy, onto the next confirmation card under its own heading, and — because
+twelve identical lines scrolling past read as twelve small remarks rather than
+one large one — into a single line after the run's own count. See
+:func:`_say_what_hh_said_about_the_resume`.
 """
 
 import argparse
@@ -92,12 +104,16 @@ from agent.state import (
     IllegalTransitionError,
     Status,
 )
-from agent.state_page import APPLIED_SIGNAL_MEASURED, printable, read_state
+from agent.state_page import (
+    APPLIED_SIGNAL_MEASURED,
+    mentions_visibility,
+    printable,
+    read_state,
+)
 from agent.submit import (
     AlreadyAppliedError,
     CaptchaPresentedError,
     IdempotencyUnknownError,
-    RefusedByHHError,
     WrongVacancyError,
     looks_like_a_challenge,
     submit,
@@ -213,18 +229,32 @@ class _Bookkeeping:
         return True
 
 
-def _hh_warning_in(entry: Entry | None) -> str | None:
-    """hh's own words out of a journal row, when that is what the row holds.
+def _hh_words_in(entry: Entry | None) -> tuple[str | None, str | None]:
+    """hh's own words out of a journal row, split back into the two things hh says.
 
     Everything else in that column — this agent's own conclusions — returns
-    ``None``, because a card that attributes «не удалось прочитать состояние
-    страницы» to hh is a card that teaches its reader not to believe the
-    attribution.
+    ``(None, None)``, because a card that attributes «не удалось прочитать
+    состояние страницы» to hh is a card that teaches its reader not to believe
+    the attribution.
+
+    **Why this splits rather than handing back one string** (2026-09-07). The
+    journal has one column for "why it ended here" and this package must not
+    grow it a second one for a change this size; ``agent/journal.py`` belongs to
+    another change. But the two things hh says are not the same kind of thing,
+    and the card has to label them differently: «может получить отказ» is about
+    this vacancy, and the resume-visibility notice is about the resume, so it is
+    true of every application in the batch and not only of the one it happens to
+    be recorded against. The split uses
+    :func:`~agent.state_page.mentions_visibility` — the same rule that produced
+    the lines in the first place, rather than a second opinion about them.
     """
     reason = entry.reason if entry is not None else None
     if reason is None or not reason.startswith(HH_QUOTE):
-        return None
-    return reason[len(HH_QUOTE) :] or None
+        return None, None
+    lines = [line for line in reason[len(HH_QUOTE) :].splitlines() if line.strip()]
+    visibility = [line for line in lines if mentions_visibility(line)]
+    rest = [line for line in lines if not mentions_visibility(line)]
+    return "\n".join(visibility) or None, "\n".join(rest) or None
 
 
 def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candidate]:
@@ -330,6 +360,7 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
             ),
             actor=Actor.AGENT,
         )
+        visibility, warning = _hh_words_in(previous)
         candidates.append(
             Candidate(
                 vacancy_id=item.vacancy_id,
@@ -337,13 +368,14 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
                 company=item.company,
                 url=item.url,
                 letter=letter,
-                hh_warning=_hh_warning_in(previous),
+                hh_warning=warning,
                 # Carried straight from the queue to the card. This package
                 # neither computes a score nor edits an explanation; it shows
                 # what the backend said, so the person approving can disagree
                 # with it.
                 score=item.score,
                 score_explanation=item.score_explanation,
+                hh_visibility=visibility,
             )
         )
     return candidates
@@ -355,13 +387,13 @@ def _requeue(journal: Journal, vacancy_ids: Sequence[str]) -> int:
     The move this performs — ``needs_manual`` or ``failed`` back to ``queued`` —
     is one ``agent.state.TRANSITIONS`` reserves for a human, and until this
     existed nothing in the package performed it. That left two holes at once. A
-    vacancy hh had refused («поменяйте видимость резюме…») stayed at
-    ``needs_manual`` for ever, so fixing the thing hh named changed nothing; and
-    the warning hh gave about it could never reach a confirmation card, because
-    a card is only built for a row at ``queued``. hh's sentence is the most
-    specific thing anybody has about that application — it names the unmet
-    requirement — so carrying it is the point, and the reason column is written
-    back rather than dropped.
+    vacancy set aside for a person stayed at ``needs_manual`` for ever, so
+    dealing with whatever it was set aside for changed nothing; and anything the
+    journal remembered about it could never reach a confirmation card, because a
+    card is only built for a row at ``queued``. The reason column is therefore
+    written back rather than dropped — when it holds hh's own sentence it is the
+    most specific thing anybody has about that application, and the card quotes
+    it as hh's.
 
     The actor is the person typing this command, which is what the state machine
     requires and what makes this different from a retry loop. Nothing is opened,
@@ -524,7 +556,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     # A mandate whose row the journal refuses is dropped from the run. Sending
     # it would mean sending without a `confirmed` row, which is the state the
     # `sent` write below is defined against.
-    carried = {candidate.vacancy_id: candidate.hh_warning for candidate in candidates}
+    carried = {
+        candidate.vacancy_id: "\n".join(
+            line for line in (candidate.hh_visibility, candidate.hh_warning) if line
+        )
+        for candidate in candidates
+    }
     confirmed: list[SendMandate] = []
     for mandate in mandates:
         warning = carried.get(mandate.vacancy_id)
@@ -584,6 +621,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     sent_count = sum(1 for r in results if r.status == Status.SENT.value)
     print(f"\nОтправлено: {sent_count}")
+    _say_what_hh_said_about_the_resume(results)
     if books.refused:
         # The journal and this loop disagree about what happened to somebody's
         # application. Nothing here can repair that, and a run that ends 0 says
@@ -596,6 +634,47 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  {note}", file=sys.stderr)
         return 1
     return 0
+
+
+def _say_what_hh_said_about_the_resume(results: Sequence[Result]) -> None:
+    """One line for the whole batch when hh objected to the resume's visibility.
+
+    The per-vacancy lines are printed as each application goes out, and twelve of
+    them scroll past looking like twelve opinions about twelve jobs. They are
+    not: hh shows that sentence because of a setting on the resume, so it is one
+    statement about the whole batch. Somebody who has just sent twelve
+    applications should be told that hh thinks all twelve are limited — once,
+    where they will read it, in hh's own words.
+
+    Printed after «Отправлено: N» rather than instead of anything, and it reports
+    rather than acts. The applications are sent, hh accepted them, and whether to
+    change the setting is the owner's call to make with hh's sentence in front of
+    them. Nothing here decides anything: that is the whole point of the change
+    this function came with.
+    """
+    said = [
+        result.hh_warning
+        for result in results
+        if result.status == Status.SENT.value
+        and result.hh_warning
+        and mentions_visibility(result.hh_warning)
+    ]
+    if not said:
+        return
+    # hh's own line, out of the first application that carried it. They are the
+    # same sentence on every vacancy — it is about the resume — so quoting one is
+    # quoting all of them, and quoting all of them would be twelve copies.
+    quoted = next(line for line in (said[0] or "").splitlines() if mentions_visibility(line))
+    print(
+        f"\nВНИМАНИЕ. hh показал это предупреждение на {len(said)} из "
+        f"{sum(1 for r in results if r.status == Status.SENT.value)} отправленных откликов:"
+    )
+    print(f"  | {printable(quoted)}")
+    print(
+        "  Отклики ушли: hh их принимает, это измерено. Но предупреждение — про само\n"
+        "  резюме, а не про эти вакансии, поэтому оно верно и для всех следующих\n"
+        "  откликов, пока настройка видимости не изменится."
+    )
 
 
 def _apply_each(
@@ -676,36 +755,29 @@ def _apply_each(
                 IdempotencyUnknownError,
                 CaptchaPresentedError,
                 WrongVacancyError,
-                # hh read the application and said it will not take it, or the
-                # letter has to go into a field nobody has measured. Neither is
-                # a breakage: both are a vacancy for a person, with a sentence
-                # saying what would change the answer.
-                RefusedByHHError,
+                # The letter has to go into a field nobody has measured. Not a
+                # breakage: a vacancy for a person, with a sentence saying what
+                # would change the answer.
+                #
+                # ``RefusedByHHError`` was on this list until 2026-09-07 and is
+                # gone with the class. Nothing hh writes in the response form
+                # stops an application any more, so no branch here carries hh's
+                # words: every sentence recorded below is this agent's own
+                # conclusion and is written as such. hh's words now leave through
+                # the success path, which is where hh puts them.
                 LetterFieldUnknownError,
             ) as exc:
                 status = (
                     Status.SKIPPED if isinstance(exc, AlreadyAppliedError) else Status.NEEDS_MANUAL
                 )
-                # hh's own sentence goes into the journal tagged as hh's, so the
-                # next confirmation card can quote it as hh's; everything else
-                # is this agent's own conclusion and is written as such.
-                said = exc.said if isinstance(exc, RefusedByHHError) else ""
                 # Through ``books``: this write is the one that was measured
                 # raising ``IllegalTransitionError`` and taking the whole run's
                 # record with it, on a run that had already sent something.
                 books.remember(
-                    Entry(
-                        mandate.vacancy_id,
-                        status,
-                        reason=f"{HH_QUOTE}{said}" if said else str(exc),
-                    ),
+                    Entry(mandate.vacancy_id, status, reason=str(exc)),
                     actor=Actor.AGENT,
                 )
-                results.append(
-                    Result(mandate.vacancy_id, status.value, str(exc), hh_warning=said or None)
-                )
-                if said:
-                    print(f"  {mandate.vacancy_id}: hh не принимает этот отклик — {said}")
+                results.append(Result(mandate.vacancy_id, status.value, str(exc)))
                 # A skip is a normal outcome; the others are not. A captcha in
                 # particular is the case the brief calls stop-and-wait, and this
                 # used to be a no-op assignment on that branch — so hh could
@@ -723,24 +795,28 @@ def _apply_each(
                 results.append(Result(mandate.vacancy_id, Status.FAILED.value, str(exc)))
                 consecutive_failures += 1
                 continue
-            # The application left. hh's soft warning about it — «Такой отклик
-            # может получить отказ» and the requirement it names — is kept
-            # rather than dropped: it is hh's own analysis of why this one is
-            # likely to fail, it is more specific than any score computed here,
-            # and it arrives free with the form that was already open.
-            soft = warnings.soft
+            # The application left. Everything hh said while its form was open
+            # is kept rather than dropped, and since 2026-09-07 that is both
+            # families rather than one: «Такой отклик может получить отказ» and
+            # the requirement it names, which is hh's own analysis of why this
+            # one is likely to fail and is more specific than any score computed
+            # here; and «поменяйте видимость резюме…», which used to stop the
+            # send and is now advice about the resume — so it is true of every
+            # application in this batch, not only of this one, and the owner has
+            # to be able to see that.
+            said = "\n".join(warnings.said)
             books.remember(
                 Entry(
                     mandate.vacancy_id,
                     Status.SENT,
                     letter_digest=digest(mandate.letter),
-                    reason=f"{HH_QUOTE}{soft}" if soft else None,
+                    reason=f"{HH_QUOTE}{said}" if said else None,
                 ),
                 actor=Actor.AGENT,
             )
-            results.append(Result(mandate.vacancy_id, Status.SENT.value, hh_warning=soft))
-            if soft:
-                print(f"  {mandate.vacancy_id}: hh предупреждает — {soft}")
+            results.append(Result(mandate.vacancy_id, Status.SENT.value, hh_warning=said or None))
+            for line in warnings.said:
+                print(f"  {mandate.vacancy_id}: hh предупреждает — {line}")
             consecutive_failures = 0
 
 

@@ -74,12 +74,13 @@ the flow has to recognise both, and — corrected 2026-09-07 — both are in
 file verifies what can be clicked rather than what is meant to be clicked.
 
 *The warning line has one name and several meanings.* ``hidden-resume-warning``
-carried, on the same account on the same day, a hard refusal — hh will not
-accept the application until the resume's visibility changes — and a soft
-prediction that the application may be rejected, naming the specific
-requirement the resume misses. They must be told apart by their text; the
-measured strings are :data:`RESUME_HIDDEN_REFUSAL` and
-:data:`LIKELY_REJECTION_WARNING`.
+carried, on the same account on the same day, a notice that the resume's
+visibility should be changed and a prediction that the application may be
+rejected, naming the specific requirement the resume misses. They must be told
+apart by their text; the measured strings are :data:`RESUME_VISIBILITY_NOTICE`
+and :data:`LIKELY_REJECTION_WARNING`. Neither of them stops an application —
+corrected 2026-09-07, when the first one was measured not to; see that constant
+and :data:`SEND_UNDER_VISIBILITY_EVIDENCE`.
 """
 
 import json
@@ -104,10 +105,45 @@ EVIDENCE_DIR: Final[Path] = Path(__file__).parent / "evidence"
 #: failure rather than a check that silently finds nothing and passes.
 EVIDENCE_SCHEMA: Final[str] = "hh-agent-selector-evidence/1"
 
-#: hh's exact words when the resume's visibility blocks the application. A hard
-#: stop: do not send, hand the vacancy to the owner, and show them this line
-#: rather than a paraphrase. Measured 2026-09-06 in ``hidden-resume-warning``,
-#: dumped to ``agent/probe/_warn.json``.
+#: The other kind of file in :data:`EVIDENCE_DIR`: a measurement that is not
+#: about a selector. Same directory and the same redaction rule — nothing about
+#: the owner or their applications — and a schema of its own, so that
+#: :func:`assert_ready_to_apply` can never mistake one for proof of a selector
+#: and the test that walks the directory can tell which contract to hold a file
+#: to.
+MEASUREMENT_SCHEMA: Final[str] = "hh-agent-measurement/1"
+
+#: What was measured on 2026-09-07: an application sent while hh's
+#: resume-visibility notice was on the card. It is the evidence for the rule that
+#: is no longer here — until that day the notice was treated as a refusal and
+#: nothing could be sent at all — so it is committed rather than left in a
+#: gitignored probe report where only the owner's laptop could see it.
+#:
+#: **It is hand-written, and it says so inside itself.** No probe produced it:
+#: the run was driven over CDP against the owner's real Chrome, and its artefact
+#: is ``agent/probe/_cdp_send.json``, which cannot be committed because it names
+#: the vacancy the owner applied to. This file is a redaction of that artefact
+#: typed by a person, and its ``produced_by`` says exactly that. Presenting it as
+#: a machine's output would be the failure this whole module is about — a claim
+#: about provenance is not provenance, and the one thing worse than a hand-made
+#: record is a hand-made record wearing a machine's name.
+SEND_UNDER_VISIBILITY_EVIDENCE: Final[str] = "20260907-send-under-visibility-notice"
+
+#: hh's exact words about the resume's visibility. Measured 2026-09-06 in
+#: ``hidden-resume-warning``, dumped to ``agent/probe/_warn.json``.
+#:
+#: **Renamed 2026-09-07 from ``RESUME_HIDDEN_REFUSAL``, because it is not one.**
+#: The old name said "refusal" and the old comment said "a hard stop: do not
+#: send", and both came from a guess in a brief rather than from anything
+#: anybody had measured. On 2026-09-07 an application was sent in real Chrome,
+#: on the owner's account, with this exact sentence on the card:
+#: ``negotiations.total`` went 0 -> 1 and the apply control became
+#: ``vacancy-response-link-top-again``. The measurement is committed in
+#: :data:`SEND_UNDER_VISIBILITY_EVIDENCE` and it is asserted against this
+#: constant by a test, so the two cannot drift apart. Because the rule blocked
+#: every application this package could make, its own falsification was the one
+#: experiment it forbade — the lesson is written up in
+#: ``agent/state_page.py``, beside the words that do the matching.
 #:
 #: Corrected 2026-09-07. hh writes U+00A0 after both «на», and this constant had
 #: them retyped as ordinary spaces — in the one file whose whole discipline is
@@ -119,7 +155,7 @@ EVIDENCE_SCHEMA: Final[str] = "hh-agent-selector-evidence/1"
 #: the matching, normalises hh's typographic spaces away first, and anchors on a
 #: few words rather than the sentence, because the sentence is hh's to reword.
 #: This constant is the record of what hh said, exactly, on the day it was read.
-RESUME_HIDDEN_REFUSAL: Final[str] = (
+RESUME_VISIBILITY_NOTICE: Final[str] = (
     "Чтобы откликнуться на\u00a0эту вакансию, поменяйте видимость резюме "
     "на\u00a0«Видно компаниям-клиентам HeadHunter»"
 )

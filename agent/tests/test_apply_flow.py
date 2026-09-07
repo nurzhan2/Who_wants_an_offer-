@@ -46,6 +46,7 @@ from typing import Any
 import pytest
 
 from agent import (
+    human,
     login,
     prefilter,
     probe_apply,
@@ -61,7 +62,7 @@ from agent.human import CONFIRM_WORD, CancelledError, Candidate, confirm
 from agent.journal import Entry, Journal
 from agent.letter import check as check_letter
 from agent.mandate import SendMandate, mint
-from agent.queue import QueueFormatError, QueueItem
+from agent.queue import QueueFormatError, QueueItem, Result
 from agent.selectors import LetterFieldUnknownError, Scope, Selector
 from agent.state import (
     Actor,
@@ -74,7 +75,6 @@ from agent.submit import (
     AlreadyAppliedError,
     CaptchaPresentedError,
     IdempotencyUnknownError,
-    RefusedByHHError,
 )
 
 pytestmark = pytest.mark.unit
@@ -105,11 +105,16 @@ HH_ERROR_DICTIONARY = (
 )
 
 #: The response modal exactly as it was measured on 2026-09-06 (vacancy
-#: 136131345, ``agent/probe/_warn.json``). It carries both warnings at once: the
-#: refusal and hh's own analysis of why the application would likely fail. The
-#: non-breaking spaces are hh's, and they are the reason a comparison typed with
-#: ordinary spaces misses this text entirely.
-BLOCKED_MODAL = (
+#: 136131345, ``agent/probe/_warn.json``). It carries both of hh's sentences at
+#: once: the resume-visibility notice and hh's own analysis of why the
+#: application would likely fail. The non-breaking spaces are hh's, and they are
+#: the reason a comparison typed with ordinary spaces misses this text entirely.
+#:
+#: Renamed 2026-09-07 from ``BLOCKED_MODAL``. Nothing on it blocks: an
+#: application was sent under this exact notice in real Chrome that day —
+#: ``agent/evidence/20260907-send-under-visibility-notice.json`` — and the tests
+#: below that used to assert it stopped the send now assert the opposite.
+VISIBILITY_MODAL = (
     "Отклик на вакансию\n"
     "Python Backend Trainee\n"
     "Чтобы откликнуться на эту вакансию, поменяйте видимость резюме "
@@ -122,9 +127,10 @@ BLOCKED_MODAL = (
     "Откликнуться"
 )
 
-#: The same modal with the refusal gone: hh will take this application and says
-#: it will probably be turned down. Not a reason to stop.
-WARNED_MODAL = (
+#: The same modal without the visibility notice: hh says only that this
+#: application will probably be turned down, and names the requirement it
+#: misses. Never was a reason to stop.
+REJECTION_MODAL = (
     "Отклик на вакансию\n"
     "Python Backend Trainee\n"
     "Python-разработчик\n"
@@ -492,7 +498,7 @@ def test_an_application_can_actually_be_sent(ready: None) -> None:
         selectors.SUBMIT_BUTTON.query,
     ]
     assert page.filled == {selectors.LETTER_FIELD.query: "Здравствуйте!"}
-    assert (warnings.blocking, warnings.soft) == (None, None)
+    assert (warnings.visibility, warnings.likely_rejection) == (None, None)
     # Two application-shaped requests for one application: the form, then the send.
     assert len(gate.allowed) == 2
     gate.assert_no_escapes()
@@ -693,29 +699,46 @@ def test_the_submitter_opens_the_page_the_human_was_shown(ready: None) -> None:
     assert page.visited == [PAGE_URL, PAGE_URL]
 
 
-def test_an_application_hh_will_not_take_is_never_sent(ready: None) -> None:
-    """The measured refusal, quoted back in hh's own words.
+def test_the_visibility_notice_does_not_stop_the_application(ready: None) -> None:
+    """Rewritten 2026-09-07 from ``test_an_application_hh_will_not_take_is_never_sent``.
 
-    The form is the first and only place hh says this, the vacancy page says
-    nothing about it, and the submit button stays enabled underneath the
-    sentence — so nothing about the page's shape can be read as permission.
+    That test drove this exact card and asserted ``RefusedByHHError``, no click
+    on the submit button and ``not page.sent``. It pinned a rule that came from
+    a guess in a brief and was never measured — and because the rule blocked
+    every application this package could make, it also forbade the one
+    experiment that refutes it. The experiment was run on 2026-09-07 in real
+    Chrome on the owner's account: the notice was on the card, the button was
+    clicked, hh created the application. See
+    ``agent/evidence/20260907-send-under-visibility-notice.json``.
+
+    So the same card, down the same path, now asserts the opposite of what it
+    used to — and asserts that hh's sentence comes back out with the result,
+    because advice that does not reach the owner is advice nobody gave.
     """
     gate = SubmitGate()
-    page = FakePage(gate, a_state(), modal_text=BLOCKED_MODAL)
+    page = FakePage(
+        gate,
+        a_state(),
+        state_after_send=a_state(applied=True),
+        modal_text=VISIBILITY_MODAL,
+    )
 
-    with pytest.raises(RefusedByHHError) as excinfo:
-        submit.submit(page, a_mandate(letter=None), gate)
+    warnings = submit.submit(page, a_mandate(letter=None), gate)
 
-    assert "видимость резюме" in excinfo.value.said
-    assert "Видно компаниям-клиентам HeadHunter" in excinfo.value.said
-    assert "видимость резюме" in str(excinfo.value)
-    # It got as far as opening the form and no further.
+    assert page.sent, "hh accepts these applications; the agent must be able to send one"
     assert page.used_control == qa_of(selectors.APPLY_LINK)
-    assert page.clicks == []
-    assert not page.sent
+    assert selectors.SUBMIT_BUTTON.query in page.clicks
+    assert warnings.visibility is not None
+    assert "видимость резюме" in warnings.visibility
+    assert "Видно компаниям-клиентам HeadHunter" in warnings.visibility
+    # And the other sentence on the same card is not lost behind it.
+    assert warnings.likely_rejection is not None
+    assert "Английский язык" in warnings.likely_rejection
 
 
-def test_the_soft_warning_is_carried_out_of_the_send_rather_than_dropped(ready: None) -> None:
+def test_the_likely_rejection_warning_is_carried_out_of_the_send_rather_than_dropped(
+    ready: None,
+) -> None:
     """«Такой отклик может получить отказ» does not block, and must not vanish.
 
     It is hh's own analysis of why this application will probably fail and it
@@ -728,16 +751,16 @@ def test_the_soft_warning_is_carried_out_of_the_send_rather_than_dropped(ready: 
         gate,
         a_state(),
         state_after_send=a_state(applied=True),
-        modal_text=WARNED_MODAL,
+        modal_text=REJECTION_MODAL,
     )
 
     warnings = submit.submit(page, a_mandate(letter=None), gate)
 
     assert page.sent
-    assert warnings.blocking is None
-    assert warnings.soft is not None
-    assert "может получить отказ" in warnings.soft
-    assert "Английский язык" in warnings.soft
+    assert warnings.visibility is None
+    assert warnings.likely_rejection is not None
+    assert "может получить отказ" in warnings.likely_rejection
+    assert "Английский язык" in warnings.likely_rejection
 
 
 def test_whichever_apply_control_the_page_carries_is_the_one_used(ready: None) -> None:
@@ -924,7 +947,7 @@ def test_hhs_warning_reaches_the_results_and_the_journal(
         journal,
         a_state(),
         a_state(applied=True),
-        modal_text=WARNED_MODAL,
+        modal_text=REJECTION_MODAL,
     )
 
     results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
@@ -937,27 +960,58 @@ def test_hhs_warning_reaches_the_results_and_the_journal(
     assert "hh предупреждает" in capsys.readouterr().out
 
 
-def test_a_refusal_is_recorded_as_hhs_words_and_needs_a_person(
-    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_a_whole_run_sends_under_the_visibility_notice_and_carries_hhs_words(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Not ``failed``: nothing is broken, hh stated a condition a person can meet."""
+    """The Definition of Done, driven through ``run.main`` rather than the classifier.
+
+    Rewritten 2026-09-07 from ``test_a_refusal_is_recorded_as_hhs_words_and
+    _needs_a_person``, which asserted this run left the vacancy at
+    ``needs_manual`` and sent nothing. It is the whole point of the change and it
+    is deliberately not a unit test of ``read_form_warnings``: a classifier that
+    returns the right dataclass proves nothing about whether ``run.main`` can get
+    an application out of the door, and the rule this replaces lived in four
+    places between the two.
+
+    So this drives the real ``main()`` against the fakes, and asserts the three
+    things that have to be true together: the application went out, the journal
+    says ``sent``, and hh's sentence arrived with it — in the results file, in
+    the journal tagged as hh's, and on screen — because it is now advice for a
+    person rather than an instruction for the agent.
+    """
     journal = _prepared_journal(tmp_path)
-    _run_one(
+    page = _run_one(
         ready,
         tmp_path,
         monkeypatch,
         journal,
         a_state(),
         a_state(applied=True),
-        modal_text=BLOCKED_MODAL,
+        modal_text=VISIBILITY_MODAL,
     )
 
+    assert page.sent
     entry = journal.get(VACANCY)
     assert entry is not None
-    assert entry.status is Status.NEEDS_MANUAL
+    assert entry.status is Status.SENT
     assert entry.reason is not None
     assert entry.reason.startswith(run.HH_QUOTE)
     assert "видимость резюме" in entry.reason
+    # Both of hh's sentences, one per line, in the one column the journal has.
+    assert "Английский язык" in entry.reason
+
+    results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
+    assert results["results"][0]["status"] == Status.SENT.value
+    warning = results["results"][0]["hh_warning"]
+    assert warning is not None and "видимость резюме" in warning
+
+    printed = capsys.readouterr().out
+    assert "Отправлено: 1" in printed
+    # Once for the batch, saying what the per-vacancy line cannot: this is about
+    # the resume, so it is true of every application and not only of this one.
+    assert "ВНИМАНИЕ" in printed
+    assert "видимость резюме" in printed
+    assert "про само" in printed
 
 
 def test_what_hh_said_last_time_is_on_the_next_confirmation_card(
@@ -987,8 +1041,11 @@ def test_what_hh_said_last_time_is_on_the_next_confirmation_card(
 
     assert [c.hh_warning for c in shown] == ["Такой отклик может получить отказ"]
     card = shown[0].render()
-    assert "hh уже предупреждал:" in card
+    assert "hh уже предупреждал об этой вакансии:" in card
     assert "Такой отклик может получить отказ" in card
+    # This one is about the vacancy, so it does not claim to be about the resume.
+    assert shown[0].hh_visibility is None
+    assert human.VISIBILITY_HEADING not in card
 
 
 def test_looking_at_a_vacancy_again_does_not_erase_what_hh_said_about_it(
@@ -1014,34 +1071,55 @@ def test_looking_at_a_vacancy_again_does_not_erase_what_hh_said_about_it(
 
 
 def test_the_card_never_attributes_this_agents_own_words_to_hh() -> None:
-    """Only text tagged as hh's is quoted as hh's."""
+    """Only text tagged as hh's is quoted as hh's, and each half lands in its own place.
+
+    The journal has one reason column and two kinds of sentence now go into it,
+    so the split back out is part of the contract: the resume-visibility notice
+    has to reach the field the card gives its own heading to, and everything
+    else has to reach the field that says "about this vacancy". Getting it
+    backwards would print «касается ВСЕХ откликов» over a remark about one
+    employer's English requirement.
+    """
     ours = Entry(VACANCY, Status.QUEUED, reason="не удалось прочитать состояние страницы")
     theirs = Entry(
         VACANCY, Status.QUEUED, reason=f"{run.HH_QUOTE}Такой отклик может получить отказ"
     )
+    both = Entry(
+        VACANCY,
+        Status.QUEUED,
+        reason=f"{run.HH_QUOTE}Поменяйте видимость резюме\nТакой отклик может получить отказ",
+    )
 
-    assert run._hh_warning_in(ours) is None
-    assert run._hh_warning_in(None) is None
-    assert run._hh_warning_in(theirs) == "Такой отклик может получить отказ"
+    assert run._hh_words_in(ours) == (None, None)
+    assert run._hh_words_in(None) == (None, None)
+    assert run._hh_words_in(theirs) == (None, "Такой отклик может получить отказ")
+    assert run._hh_words_in(both) == (
+        "Поменяйте видимость резюме",
+        "Такой отклик может получить отказ",
+    )
 
 
-def test_the_measured_modal_classifies_the_way_the_flow_relies_on() -> None:
-    """Both warnings at once, which is what the one fully measured modal carried.
+def test_the_measured_modal_reads_the_way_the_flow_relies_on() -> None:
+    """Both of hh's sentences at once, which is what the measured modal carried.
 
-    A single-valued verdict would have thrown one of them away, and the one it
-    would have thrown away is the one worth keeping.
+    Neither outranks the other and neither stops anything. The old version of
+    this test ended by asserting ``decide_on_form`` returned ``MANUAL``; that
+    stage is gone, because once the visibility notice stopped being a refusal a
+    decision function on the modal could only ever answer ``PROCEED``.
     """
     # hh writes these lines with non-breaking spaces, and they are invisible in
     # an editor: a reformat that quietly turned them into ordinary ones would
     # leave this file testing a string hh does not send.
-    assert " " in BLOCKED_MODAL, "the measured text has lost hh's own spaces"
+    assert " " in VISIBILITY_MODAL, "the measured text has lost hh's own spaces"
 
-    warnings = state_page.read_form_warnings(BLOCKED_MODAL)
+    warnings = state_page.read_form_warnings(VISIBILITY_MODAL)
 
-    assert not warnings.may_send
-    assert warnings.blocking is not None and "видимость резюме" in warnings.blocking
-    assert warnings.soft is not None and "Английский язык" in warnings.soft
-    assert prefilter.decide_on_form(warnings).verdict is prefilter.Verdict.MANUAL
+    assert warnings.visibility is not None
+    assert "видимость резюме" in warnings.visibility
+    assert warnings.likely_rejection is not None
+    assert "Английский язык" in warnings.likely_rejection
+    assert warnings.said == (warnings.visibility, warnings.likely_rejection)
+    assert not hasattr(prefilter, "decide_on_form")
 
 
 # ── driving run.main ──────────────────────────────────────────────────
@@ -1542,7 +1620,11 @@ def test_the_card_prints_on_the_console_this_actually_runs_on() -> None:
     hh could really send.
     """
     warning = "Такой отклик может получить отказ 🙃"
-    for hazard in (KAZAKH_COMPANY, EMOJI_TITLE, warning):
+    # The visibility notice is on the card too since 2026-09-07, under its own
+    # heading, and it reaches ``render`` through the journal rather than straight
+    # from ``read_form_warnings`` — so it is a field that is not ours either.
+    visibility = "Поменяйте видимость резюме 🙈"
+    for hazard in (KAZAKH_COMPANY, EMOJI_TITLE, warning, visibility):
         with pytest.raises(UnicodeEncodeError):
             # Otherwise this test proves nothing: a card assembled out of text
             # the console can already print encodes whatever render() does.
@@ -1555,16 +1637,57 @@ def test_the_card_prints_on_the_console_this_actually_runs_on() -> None:
         url=PAGE_URL,
         letter=check_letter("Здравствуйте!\nОпыт — Python, FastAPI ✨", required=False),
         hh_warning=warning,
+        hh_visibility=visibility,
     )
 
     card = candidate.render()
 
     card.encode("cp1251")
+    # Including the fixed heading this package wrote itself.
+    human.VISIBILITY_HEADING.encode("cp1251")
     # And the reader is told the card is a rendering rather than the payload:
     # the letter that will be sent still carries the characters shown as «?».
     assert "часть символов не в кодировке консоли" in card
     assert candidate.letter is not None
     assert "✨" in candidate.letter.text
+
+
+def test_what_is_said_once_for_the_batch_prints_on_that_console_too() -> None:
+    """The summary quotes hh, so it is text this program did not write.
+
+    ``render`` reduces the card it builds, but this line is printed outside any
+    card and would otherwise be the one sentence in the prompt that can end a run
+    with ``UnicodeEncodeError`` — at the moment the owner is being asked to
+    agree, which is exactly where that has happened before.
+    """
+    hazard = "Поменяйте видимость резюме 🙈"
+    with pytest.raises(UnicodeEncodeError):
+        hazard.encode("cp1251")
+    shown = io.StringIO()
+
+    confirm(
+        [Candidate(VACANCY, "Python", None, PAGE_URL, None, hh_visibility=hazard)],
+        stream_in=io.StringIO(f"\n{CONFIRM_WORD}\n"),
+        stream_out=shown,
+    )
+
+    shown.getvalue().encode("cp1251")
+
+
+def test_the_run_s_own_summary_prints_on_that_console_too(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The same for the line printed after «Отправлено: N».
+
+    It quotes hh out of the results file, which is the far end of a journey that
+    starts in an employer's browser, and the fixed half of it is this package's
+    own Russian. Both have to survive the codepage the owner's console encodes.
+    """
+    hazard = "Поменяйте видимость резюме 🙈"
+
+    run._say_what_hh_said_about_the_resume([Result(VACANCY, Status.SENT.value, hh_warning=hazard)])
+
+    capsys.readouterr().out.encode("cp1251")
 
 
 def test_a_card_that_needs_no_reduction_says_nothing_about_one() -> None:
@@ -1575,7 +1698,7 @@ def test_a_card_that_needs_no_reduction_says_nothing_about_one() -> None:
         company="Inspire",
         url=PAGE_URL,
         letter=check_letter("Здравствуйте! Опыт — Python, FastAPI…", required=False),
-        hh_warning=state_page.printable(BLOCKED_MODAL),
+        hh_warning=state_page.printable(VISIBILITY_MODAL),
     )
 
     card = candidate.render()
@@ -1835,20 +1958,25 @@ def test_a_run_that_ends_in_a_challenge_still_writes_down_what_it_did(
 # ── hh's warning, all the way to the next card ────────────────────────
 
 
-def test_what_hh_refused_comes_back_by_a_persons_hand_and_brings_hhs_words(
+def test_what_a_person_requeues_brings_hhs_words_back_to_the_next_card(
     ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The carry-over used to be unreachable, and this is the path that reaches it.
 
-    hh's refusal is recorded at ``needs_manual``; ``_to_candidates`` builds a
-    card only for a row at ``queued``; and nothing in the package performed the
-    one move between them, which ``agent.state`` reserves for a human. So the
-    lookup was never non-None outside a test, and the sentence hh gave — the
-    most specific thing anybody has about that application — could not reach the
-    person deciding whether to send it again.
+    A row set aside for a person sits at ``needs_manual``; ``_to_candidates``
+    builds a card only for a row at ``queued``; and nothing in the package
+    performed the one move between them, which ``agent.state`` reserves for a
+    human. So the lookup was never non-None outside a test, and whatever hh had
+    said about that application could not reach the person deciding whether to
+    send it again. ``--requeue`` is that human move, and it keeps the reason
+    column instead of replacing it with nothing.
 
-    ``--requeue`` is that human move, and it keeps the reason column instead of
-    replacing it with nothing.
+    Rewritten 2026-09-07, in the half that had become fiction. It used to say
+    the row got here because hh refused it over the resume's visibility; that
+    is not a refusal and no longer produces this row. The sentence is still the
+    one used, because it is the one that must land in the field the card gives
+    its own heading to — and this is the path on which an old row, written while
+    the rule still stood, comes back to a person.
     """
     journal = _prepared_journal(tmp_path)
     said = "Чтобы откликнуться, поменяйте видимость резюме"
@@ -1869,8 +1997,12 @@ def test_what_hh_refused_comes_back_by_a_persons_hand_and_brings_hhs_words(
     shown: list[Candidate] = []
     _run_one(ready, tmp_path, monkeypatch, journal, a_state(), a_state(applied=True), watch=shown)
 
-    assert [c.hh_warning for c in shown] == [said]
-    assert said in shown[0].render()
+    # Under the heading that says it is about the resume, not about this job.
+    assert [c.hh_visibility for c in shown] == [said]
+    assert [c.hh_warning for c in shown] == [None]
+    card = shown[0].render()
+    assert said in card
+    assert human.VISIBILITY_HEADING in card
 
 
 def test_a_sent_application_is_never_requeued(
@@ -1896,36 +2028,36 @@ def test_a_sent_application_is_never_requeued(
     assert "999999999: такой вакансии в журнале нет." in printed
 
 
-def test_a_refusal_hh_raises_only_after_the_letter_is_typed_still_stops_the_send(
+def test_a_warning_hh_raises_only_after_the_letter_is_typed_is_still_carried_out(
     ready: None,
 ) -> None:
-    """The card is classified before the letter exists, and the send is after it.
+    """The card is read before the letter exists, and the send is after it.
 
-    hh raises warnings in response to what is typed — a length limit, a policy
-    refusal — and the modal that was quiet when it opened is not the modal that
-    will receive the click. Reading it once and trusting that reading for the
-    rest of the flow is how a refusal arrives between the check and the send.
-
-    This is the test the review found missing: both lines that re-read the card
-    could be deleted with the whole suite green.
+    Rewritten 2026-09-07 from ``test_a_refusal_hh_raises_only_after_the_letter
+    _is_typed_still_stops_the_send``, which asserted this stopped the send. It no
+    longer does — nothing hh writes on that card does — but the reason the card
+    is read a second time survives the change, and it is what this now pins. hh
+    answers what is typed, the modal that was quiet when it opened is not the
+    modal that receives the click, and a sentence that appeared in between must
+    still reach the owner. Both lines that re-read the card could be deleted with
+    the rest of the suite green, which is why this test exists at all.
     """
     gate = SubmitGate()
     page = FakePage(
         gate,
         a_state(),
+        state_after_send=a_state(applied=True),
         modal_text=QUIET_MODAL,
-        modal_text_after_letter=BLOCKED_MODAL,
+        modal_text_after_letter=VISIBILITY_MODAL,
     )
 
-    with pytest.raises(RefusedByHHError) as excinfo:
-        submit.submit(page, a_mandate(), gate)
+    warnings = submit.submit(page, a_mandate(), gate)
 
-    # Nothing irreversible happened: the letter was typed, the send was not.
-    assert selectors.SUBMIT_BUTTON.query not in page.clicks
-    assert page.filled, "the letter was typed, which is what provoked the refusal"
-    assert not page.sent
-    # And the owner is shown hh's own sentence rather than a paraphrase of it.
-    assert "видимость" in excinfo.value.said
+    assert page.sent
+    assert page.filled, "the letter was typed, which is what provoked the warning"
+    # Read only on the second pass, and kept anyway.
+    assert warnings.visibility is not None and "видимость" in warnings.visibility
+    assert warnings.likely_rejection is not None and "Английский язык" in warnings.likely_rejection
 
 
 def test_a_card_that_stays_quiet_after_the_letter_is_still_sent(ready: None) -> None:
@@ -1942,4 +2074,4 @@ def test_a_card_that_stays_quiet_after_the_letter_is_still_sent(ready: None) -> 
     warnings = submit.submit(page, a_mandate(), gate)
 
     assert selectors.SUBMIT_BUTTON.query in page.clicks
-    assert (warnings.blocking, warnings.soft) == (None, None)
+    assert (warnings.visibility, warnings.likely_rejection) == (None, None)

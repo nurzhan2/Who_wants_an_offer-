@@ -26,34 +26,48 @@ The order below is the safety property, and every line of it earns its place:
    vacancy already applied to has no «Откликнуться» at all, only «Отклик другим
    резюме». Waiting for the first on a page that has the second is waiting for
    something that will never appear.
-7. **Read the open form and believe what it says.** hh states in the modal
-   whether it will accept an application from this account at all, and the
-   vacancy page never says so. The classification is by text, in
-   ``agent.state_page.read_form_warnings``, because the one warning element
-   carries several different messages.
+7. **Read the open form and keep what it says.** hh puts its own advice about
+   this application in the modal, and the vacancy page never carries it. The
+   reading is by text, in ``agent.state_page.read_form_warnings``, because the
+   one warning element carries several different messages. It decides nothing —
+   see below.
 8. **Type the letter from the mandate**, never from the queue. There is no
    other string in scope, which is the point of the mandate carrying it.
-9. **Read the form again after typing**, because step 7 classified a card the
-   letter has since changed and the irreversible click is still ahead. See
-   :func:`_everything_hh_said`.
+9. **Read the form again after typing**, because step 7 read a card the letter
+   has since changed, and everything hh said about this application while its
+   form was open belongs in the record of it. See :func:`_everything_hh_said`.
 10. **Confirm from the page that it went**, and only then let the caller write
     ``sent``. The gate can say a request left; only hh can say an application
     exists.
 
-**Waiting for the modal means waiting for its contents.** Corrected 2026-09-07,
-and it was the sharpest edge in this file. Step 7 used to wait for
-``selectors.RESPONSE_FORM`` — the overlay, the frame around the card — and
-classify its ``inner_text()`` the moment it attached. The card itself arrives
+**No sentence in the modal stops an application, as of 2026-09-07, and that is
+the change this file most needs its reader to know.** Until then step 7 raised
+``RefusedByHHError`` on hh's «поменяйте видимость резюме…» line, and since that
+line stands on every vacancy while the owner's resume carries that setting, the
+effect was total: this package could not send anything at all. Measured the same
+day in real Chrome on the owner's account — the notice was on the card, the
+submit button was clicked, ``negotiations.total`` went 0 -> 1 and the control
+became ``vacancy-response-link-top-again``. The rule came from a guess in a
+brief and stood for a day because the block forbade the experiment that refutes
+it; ``agent/state_page.py`` carries that lesson beside the words it matches.
+What stops an application now is only ever a checkable fact, all of them read in
+step 3: an application that already exists, an archived or closed vacancy, an
+employer's test, a required letter that is missing.
+
+**Waiting for the modal still means waiting for its contents.** Corrected
+2026-09-07 as well, for a reason that survives the change above. Step 7 used to
+wait for ``selectors.RESPONSE_FORM`` — the overlay, the frame around the card —
+and read its ``inner_text()`` the moment it attached. The card itself arrives
 separately, on ``GET /applicant/vacancy_response/popup?vacancyId=…``; that
 request is recorded in ``agent/probe/form_136131345.json``. So there is a window
-in which the overlay is up and the warning line and the submit button are not
-there yet, and a modal classified in that window reads as "hh has no objection".
-The application then goes out under «поменяйте видимость резюме», which is the
-one outcome steps 7 and 9 exist to prevent. Two things close it and both are
-needed: :func:`_open_the_form` waits for the submit control as well — which is
-what ``agent/probe_apply.py`` already did, on the same measurement — and
-:func:`_read_the_form` refuses to read an absent warning as permission unless
-the text it classified demonstrably came from the rendered card.
+in which the overlay is up and the card is not there yet, and everything read in
+that window is empty. That is no longer a way to send under a refusal — there is
+no refusal — but it is still a way to click a control on a form nobody has seen
+render, and to lose hh's advice about an application that then goes out without
+it. Both waits are kept, and :func:`_read_the_form` still requires the submit
+control's own label to be inside the text it read. That check is about whether
+the card is on screen, not about what the card says, which is why it survived a
+change that deleted every rule of the second kind.
 
 **Idempotency is a number, before and after** — ``negotiations.total`` from
 ``applicantVacancyResponseStatuses``, plus, since 2026-09-07, a non-empty
@@ -113,30 +127,34 @@ class FormUnreadableError(Exception):
 
     Deliberately its own class and deliberately **not** in the list ``run.py``
     catches by name. Everything on that list is a conclusion about one vacancy —
-    hh refused it, somebody already applied, a person has to look — and each is
-    recorded as a sentence and moved on from. This is not a conclusion about a
-    vacancy at all: it says the page did not render what it was asked for, which
-    is a fact about hh or about the browser. So it falls to ``run.py``'s general
-    handler, which is the one that takes a screenshot before recording the
-    failure, and two of these in a row stop the run so a person can look at the
-    pictures. That is the correct amount of noise for "the site changed".
+    somebody already applied, hh will not say whether they did, a person has to
+    look — and each is recorded as a sentence and moved on from. This is not a
+    conclusion about a vacancy at all: it says the page did not render what it
+    was asked for, which is a fact about hh or about the browser. So it falls to
+    ``run.py``'s general handler, which is the one that takes a screenshot before
+    recording the failure, and two of these in a row stop the run so a person can
+    look at the pictures. That is the correct amount of noise for "the site
+    changed".
+
+    **Kept through the 2026-09-07 change that deleted every text rule** (see the
+    module docstring), because it is not one. It does not read what the card says
+    and does not classify it; it asks whether the card is on screen at all, from
+    the rendered text of a control that was waited for. An application clicked
+    through a form nobody has seen render is one nobody can describe afterwards
+    — including to the owner, who is entitled to hh's advice about it.
     """
 
 
-@final
-class RefusedByHHError(Exception):
-    """hh will not accept this application as things stand, and said so.
-
-    Raised only from the open form, and only on the blocking family of
-    warnings. Carries hh's own sentence rather than a paraphrase of it: the
-    measured one names a setting by a name the owner can search for, and a
-    paraphrase sends them looking for a setting that does not exist.
-    """
-
-    def __init__(self, message: str, *, said: str) -> None:
-        #: hh's exact words, for anything that wants to quote them on their own.
-        self.said = said
-        super().__init__(message)
+# **Removed 2026-09-07: ``RefusedByHHError``.** It was raised on the blocking
+# family of form warnings, caught by name in ``agent/run.py``, and recorded as
+# ``needs_manual`` with hh's sentence attached. There is no blocking family any
+# more, so there is nothing left to raise it: hh's «поменяйте видимость
+# резюме…» is advice and applications go out under it. The class is deleted
+# rather than kept against a future refusal, because an exception nothing raises
+# is a promise the next reader believes — they would find it in ``run.py``'s
+# handler list, see a refusal being caught, and conclude the form can still stop
+# a send. If hh ever does refuse in the modal, the way to find that out is a
+# measurement, and the class costs nothing to write again once there is one.
 
 
 #: Where hh sends a visitor once it has decided they are a robot. Measured on
@@ -221,13 +239,15 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
     testable — on a machine with no browser.
 
     Returns everything hh said while the form was open, so the caller can
-    persist it — both readings of the card merged, since the letter is typed
-    between them. On the way out that is only ever the soft family: a blocking
-    warning raises. hh's «Такой отклик может получить отказ» line names a
-    specific unmet requirement — the measured one is an English level below what
-    the employer asked for — which is more precise than any score this project
-    computes, and it is worth more in the journal than in a log line nobody
-    reads.
+    persist it and show it to a person — both readings of the card merged, since
+    the letter is typed between them. Nothing in it is a refusal any more, and
+    both families are worth carrying for different reasons. «Такой отклик может
+    получить отказ» names a specific unmet requirement — the measured one is an
+    English level below what the employer asked for — which is more precise than
+    any score this project computes. «поменяйте видимость резюме…» is about the
+    resume rather than about this vacancy, so one of them is a statement about
+    every application in the batch, and the owner has to be told that rather than
+    have it end up in a log line nobody reads.
     """
     selectors.assert_ready_to_apply()
     if mandate.letter is not None:
@@ -271,16 +291,16 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
             page.click(selectors.ADD_COVER_LETTER.query)
             page.wait_for_selector(selectors.LETTER_FIELD.query, timeout=FORM_TIMEOUT_MS)
             page.fill(selectors.LETTER_FIELD.query, mandate.letter)
-            # The card was classified before any of that happened, and the send
-            # is still ahead of it. See :func:`_everything_hh_said` for why the
-            # card is read again here rather than trusted.
+            # The card was read before any of that happened, and hh answers what
+            # is typed. See :func:`_everything_hh_said` for why both readings are
+            # kept rather than the later one replacing the earlier.
             warnings = _everything_hh_said(warnings, _read_the_form(page, mandate))
-            _refuse_what_hh_will_not_take(warnings)
 
         # The irreversible step. Counting the window before and after says
         # whether this click put anything on the wire; the button's own disabled
-        # state says nothing at all, because it was measured staying enabled on
-        # a form hh had already refused.
+        # state says nothing at all, because it was measured staying enabled
+        # under hh's visibility notice — on a form that then accepted the
+        # application, which is the measurement this whole file turns on.
         before = gate.requests_in_window()
         page.click(selectors.SUBMIT_BUTTON.query)
         page.wait_for_timeout(SEND_SETTLE_MS)
@@ -327,6 +347,10 @@ def _open_the_vacancy(page: Any, mandate: SendMandate) -> dict[str, Any]:
 def _open_the_form(page: Any, mandate: SendMandate) -> FormWarnings:
     """Click the apply control, wait for the modal's card, and read what hh says.
 
+    Reads and returns; it does not judge. Until 2026-09-07 it ended by refusing
+    the whole application on one of the sentences it had just read, which was
+    the block this package could never get past — see the module docstring.
+
     The control is whichever of the two this page carries, and which one it is
     decides nothing: hh permits a repeat application, so «Отклик другим резюме»
     is not a statement that an application exists. That question was answered
@@ -359,23 +383,21 @@ def _open_the_form(page: Any, mandate: SendMandate) -> FormWarnings:
     # same measurement.
     page.wait_for_selector(selectors.SUBMIT_BUTTON.query, timeout=FORM_TIMEOUT_MS)
 
-    warnings = _read_the_form(page, mandate)
-    _refuse_what_hh_will_not_take(warnings)
-    return warnings
+    return _read_the_form(page, mandate)
 
 
 def _read_the_form(page: Any, mandate: SendMandate) -> FormWarnings:
     """The open modal's own words, or a refusal to guess at what it did not say.
 
-    ``read_form_warnings`` cannot tell "hh raised no objection" from "there was
-    no text to read": both come back as no warning, and one of them is a reason
-    to send while the other is a reason to stop. The distinction has to be made
-    here, where the page is, and it is made from the page rather than from a
-    Russian phrase hh is free to reword: the submit control's own label must
-    appear in the text being classified. That control was waited for, it lives
-    inside the modal, and Playwright's ``inner_text`` returns "" for an element
-    that is attached but not rendered — so a label that is missing from the card
-    means the card is not on screen and nothing read out of it means anything.
+    ``read_form_warnings`` cannot tell "hh said nothing" from "there was no text
+    to read": both come back as no warning, and the second one means the card is
+    not on screen. The distinction has to be made here, where the page is, and it
+    is made from the page rather than from a Russian phrase hh is free to reword:
+    the submit control's own label must appear in the text being read. That
+    control was waited for, it lives inside the modal, and Playwright's
+    ``inner_text`` returns "" for an element that is attached but not rendered —
+    so a label missing from the card means the card is not up and nothing read
+    out of it means anything.
 
     Measured: ``submit_text`` was «Откликнуться» on both modals dumped on
     2026-09-06 (``agent/probe/_warn.json``, ``agent/probe/send_136638256.json``).
@@ -401,28 +423,16 @@ def _everything_hh_said(before: FormWarnings, after: FormWarnings) -> FormWarnin
     the text — and it can equally drop a line it showed before the letter existed
     («может получить отказ: нет сопроводительного письма» is the obvious one).
     Neither direction is measured, so the rule is chosen by what being wrong
-    costs: a warning hh has shown at any point while this form was open is kept,
-    a stop from either reading stops, and the worst case is one vacancy handed to
-    the owner with a sentence hh has since withdrawn. The other rule — believing
-    only the last reading — has a worst case of sending under a refusal.
+    costs, and since 2026-09-07 that cost is only ever a line on a card: a
+    sentence hh showed at any point while this form was open is kept, and the
+    worst case is that the owner reads one hh has since withdrawn. Dropping it
+    instead would mean an application going out under advice nobody was given,
+    which is the more expensive half.
     """
     return FormWarnings(
-        blocking=after.blocking or before.blocking,
-        soft=after.soft or before.soft,
+        visibility=after.visibility or before.visibility,
+        likely_rejection=after.likely_rejection or before.likely_rejection,
     )
-
-
-def _refuse_what_hh_will_not_take(warnings: FormWarnings) -> None:
-    """Stop on the blocking family, carrying hh's own sentence out with it.
-
-    Nothing is clicked to close the modal. A best-effort click here would have
-    to swallow its own failure to avoid masking this refusal, and it buys
-    nothing: the next vacancy starts with a navigation, and the last one is
-    followed by the context closing.
-    """
-    decision = prefilter.decide_on_form(warnings)
-    if decision.verdict is not Verdict.PROCEED:
-        raise RefusedByHHError(decision.reason, said=warnings.blocking or "")
 
 
 def _confirm_the_application_exists(page: Any, mandate: SendMandate) -> None:

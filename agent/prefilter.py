@@ -31,14 +31,31 @@ day hh changes that key, quietly, to every vacancy at once. Since 2026-09-06 the
 applied signal itself is measured and lives in ``agent/state_page.py``; this
 module reads the conditions around it.
 
-**Three stages, not one, because they know different things.**
+**Two stages, not one, because they know different things.**
 :func:`decide_before_opening` runs on the queue, before a page load is spent.
 :func:`decide` runs on the vacancy page, where the letter requirement, the
-employer's test and the idempotency reading actually live. :func:`decide_on_form`
-runs on the response modal, which is the first and only place hh says whether it
-will accept an application from this account at all. Collapsing any two of them
+employer's test and the idempotency reading actually live. Collapsing them
 produces a decision made on facts that were not knowable yet, which is a bug
 unit tests do not catch because the missing fact simply reads as ``None``.
+
+**Removed 2026-09-07: ``decide_on_form``, and there is no third stage now.** It
+ran on the open response modal and it existed to turn one sentence — hh's
+«поменяйте видимость резюме…» — into a ``MANUAL`` verdict that stopped the
+send. That sentence is advice, not a refusal: measured on 2026-09-07 in real
+Chrome on the owner's account, an application went out with it on screen and
+``negotiations.total`` went 0 -> 1. See :data:`~agent.state_page.VISIBILITY_WORDS`
+for the measurement and for how a guess got to stand as a fact for a day.
+
+Nothing replaced it, deliberately. Everything that can stop an application is a
+checkable fact and every one of them is knowable before the modal opens —
+``negotiations.total``, ``status.archived``, ``closedForApplicants``, an
+employer's test, a required letter that is missing — so :func:`decide` is where
+they are all decided. A stage that reads a card and can only ever answer
+``PROCEED`` would be a decision function shaped like a guard with nothing behind
+it, and the next person to read this file would believe it. What the modal is
+still good for is hh's own words, which ``agent/submit.py`` hands back to the
+caller and the caller shows to a person; that is a reading, not a decision, and
+it lives in ``agent/state_page.py`` with the rest of the reading.
 """
 
 from dataclasses import dataclass
@@ -46,7 +63,7 @@ from enum import StrEnum
 from typing import Any, final
 
 from agent.state import Status
-from agent.state_page import FormWarnings, printable
+from agent.state_page import printable
 
 
 class Verdict(StrEnum):
@@ -370,35 +387,3 @@ def _test_reason(questions: tuple[str, ...]) -> str:
         return f"{head}; вопросы hh на странице не отдал, откройте вакансию"
     listed = "; ".join(f"{number}) {text}" for number, text in enumerate(questions, start=1))
     return f"{head}; вопросы: {listed}"
-
-
-def decide_on_form(warnings: FormWarnings) -> Decision:
-    """What the open response modal says, once it has been read.
-
-    This is a separate stage because it is the first moment hh states whether it
-    will accept an application from this account for this vacancy at all — the
-    vacancy page itself says nothing about it. :func:`decide` has already run by
-    then and cannot be given this input without pretending it was knowable
-    earlier.
-
-    A blocking warning is never sent through, and hh's own sentence is carried
-    into the reason verbatim rather than paraphrased. The measured one is a
-    demand to change the resume's visibility, and a paraphrase of it would send
-    the owner looking for a setting under a name hh does not use.
-
-    A soft warning never blocks. It is hh's own analysis of why this application
-    is likely to be refused, it names a specific unmet requirement — the
-    measured one is an English level below what the employer set — and that is
-    more precise than any similarity score this project computes. It belongs
-    next to the match score on the confirmation card, and it belongs in the
-    journal, so it is returned in the reason of a ``PROCEED`` rather than
-    dropped.
-
-    Both can be present at once; that is what the one fully measured modal
-    carried.
-    """
-    if warnings.blocking is not None:
-        return Decision(Verdict.MANUAL, f"hh не принимает отклик: {warnings.blocking}")
-    if warnings.soft is not None:
-        return Decision(Verdict.PROCEED, f"можно откликаться; hh предупреждает: {warnings.soft}")
-    return Decision(Verdict.PROCEED, "можно откликаться")

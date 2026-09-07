@@ -474,13 +474,18 @@ def test_which_apply_control_is_on_the_page_still_decides_nothing() -> None:
 
 
 def test_the_warning_line_is_one_name_with_two_measured_meanings() -> None:
-    """Classified by text, never by presence — both were seen under one data-qa."""
-    assert selectors.RESUME_HIDDEN_REFUSAL != selectors.LIKELY_REJECTION_WARNING
-    assert "видимость резюме" in selectors.RESUME_HIDDEN_REFUSAL
+    """Read by text, never by presence — both were seen under one data-qa.
+
+    And neither of them stops an application. That was true of the second from
+    the start and became true of the first on 2026-09-07, when somebody measured
+    it instead of assuming it; see the test two below.
+    """
+    assert selectors.RESUME_VISIBILITY_NOTICE != selectors.LIKELY_REJECTION_WARNING
+    assert "видимость резюме" in selectors.RESUME_VISIBILITY_NOTICE
     assert selectors.HIDDEN_RESUME_WARNING.usable_for_applying
 
 
-def test_the_refusal_is_what_hh_wrote_and_not_what_somebody_remembered() -> None:
+def test_the_notice_is_what_hh_wrote_and_not_what_somebody_remembered() -> None:
     """Corrected 2026-09-07: hh writes U+00A0 and the constant had plain spaces.
 
     Documented as "hh's exact words", in the file whose entire discipline is
@@ -494,24 +499,97 @@ def test_the_refusal_is_what_hh_wrote_and_not_what_somebody_remembered() -> None
     owner's machine and the property runs everywhere. That is the same split the
     evidence files exist for.
     """
-    assert selectors.RESUME_HIDDEN_REFUSAL.count("\u00a0") == 2
-    assert "на\u00a0эту вакансию" in selectors.RESUME_HIDDEN_REFUSAL
-    assert "на\u00a0«Видно" in selectors.RESUME_HIDDEN_REFUSAL
+    assert selectors.RESUME_VISIBILITY_NOTICE.count("\u00a0") == 2
+    assert "на\u00a0эту вакансию" in selectors.RESUME_VISIBILITY_NOTICE
+    assert "на\u00a0«Видно" in selectors.RESUME_VISIBILITY_NOTICE
     # U+00A0 is 0xA0 in cp1251, so being exact costs the console nothing.
-    selectors.RESUME_HIDDEN_REFUSAL.encode("cp1251")
+    selectors.RESUME_VISIBILITY_NOTICE.encode("cp1251")
 
     dump = REPO_ROOT / "agent" / "probe" / "_warn.json"
     if dump.is_file():
         measured = json.loads(dump.read_text(encoding="utf-8"))["warnings"][0]["text"]
-        assert measured == selectors.RESUME_HIDDEN_REFUSAL
+        assert measured == selectors.RESUME_VISIBILITY_NOTICE
+
+
+def test_the_measurement_that_removed_the_hard_stop_is_in_the_repository() -> None:
+    """The evidence for a deletion, committed, and checked the way selectors are.
+
+    Until 2026-09-07 this package treated hh's resume-visibility sentence as a
+    refusal, and since that sentence stands on every vacancy while the owner's
+    resume carries that setting, it could not send anything at all. The rule came
+    from a guess in a brief and stood for a day because it forbade the one
+    experiment that refutes it. Deleting it on the strength of a sentence in a
+    commit message would be the same mistake pointed the other way, so the
+    measurement lives here: every number, hh's own string, and how it was taken.
+
+    Held to three things. The record has to exist and be readable, or the claim
+    is back to being something somebody typed. hh's string in it has to be the
+    string the code carries, exactly, so the record and
+    :data:`~agent.selectors.RESUME_VISIBILITY_NOTICE` cannot drift apart. And it
+    must not dress itself up: ``produced_by`` has to say in words that a person
+    wrote it. No probe produced this — the probe does not press the submit button
+    — and a hand-made record wearing a machine's name is worse than no record.
+    """
+    path = selectors.EVIDENCE_DIR / f"{selectors.SEND_UNDER_VISIBILITY_EVIDENCE}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+
+    assert record["schema"] == selectors.MEASUREMENT_SCHEMA
+    assert record["measured_on"] == "2026-09-07"
+    # The measured numbers: no application before, one after, and the control
+    # left on the page afterwards is the repeat-application one.
+    assert record["applications_before"] == 0
+    assert record["applications_after"] == 1
+    assert record["repeat_apply_controls_after"] == 1
+    assert record["warning_shown"] == selectors.RESUME_VISIBILITY_NOTICE
+    produced_by = record["produced_by"].casefold()
+    assert "человек" in produced_by, "a hand-made record has to say a person made it"
+    assert "не вывод" in produced_by, "and has to say which machine did not"
+    assert record["source_artefact"].startswith("agent/probe/_cdp_send.json")
+
+    # On the owner's machine the unredacted artefact is there and the numbers
+    # have to agree with it. Everywhere else this half is skipped, exactly as it
+    # is for the selector dumps: the artefact names the vacancy applied to.
+    artefact = REPO_ROOT / "agent" / "probe" / "_cdp_send.json"
+    if artefact.is_file():
+        cdp = json.loads(artefact.read_text(encoding="utf-8"))
+        assert cdp["total_before"] == record["applications_before"]
+        assert cdp["total_after"] == record["applications_after"]
+        assert cdp["again_button"] == record["repeat_apply_controls_after"]
+        assert cdp["warning"] == record["warning_shown"]
+
+
+def test_nothing_in_the_package_turns_a_form_warning_into_a_refusal() -> None:
+    """The rule is gone from every place it lived, not only from the classifier.
+
+    It lived in four: an exception class in ``agent/submit.py``, the call site
+    that raised it, a ``decide_on_form`` branch in ``agent/prefilter.py``, and a
+    handler in ``agent/run.py`` that caught it by name. Removing the branch and
+    leaving the class would leave the next reader with a refusal that is caught
+    and never raised, which reads exactly like a rule that still exists — and the
+    properties on ``FormWarnings`` that answered "may I send" would read like a
+    permission check with nothing behind it.
+    """
+    from agent import prefilter, run, state_page, submit
+
+    assert not hasattr(submit, "RefusedByHHError")
+    assert not hasattr(prefilter, "decide_on_form")
+    assert not hasattr(run, "RefusedByHHError"), "run.py still imports the refusal it cannot get"
+    quiet = state_page.FormWarnings(visibility=None, likely_rejection=None)
+    for gone in ("may_send", "verdict"):
+        assert not hasattr(quiet, gone)
 
 
 # ── evidence that survives a gitignored directory ─────────────────────
 
-#: Everything a probe report knows that an evidence file must not repeat.
+#: Everything an artefact of the owner's own session knows that a committed file
+#: in ``agent/evidence/`` must not repeat. The two real vacancy ids are the ones
+#: the artefacts behind these files name: 136131345 for the 2026-09-06 selector
+#: dumps, and 136638256 for the 2026-09-07 send measurement. Both are vacancies
+#: the owner applied to, which is exactly the kind of fact a redaction drops.
 PRIVATE_TO_THE_OWNER = (
     VACANCY,
     "136131345",
+    "136638256",
     "https://",
     "negotiations",
     "applicantVacancyResponseStatuses",
@@ -534,19 +612,33 @@ def test_the_evidence_directory_is_committable() -> None:
 
 
 def test_every_evidence_file_says_what_produced_it_and_carries_nothing_private() -> None:
-    """A redaction is only worth something if it is checked, so it is checked."""
+    """A redaction is only worth something if it is checked, so it is checked.
+
+    Widened 2026-09-07, when a second kind of file arrived in this directory: a
+    measurement that is not about a selector. Two rules are held over every file
+    whatever its schema — it says where it came from, and it carries nothing that
+    belongs to the owner — because those are the two that make the directory
+    committable at all. The selector contract is then held over the files that
+    claim it, and a file claiming neither schema fails rather than passing
+    quietly, which is the failure mode this whole check exists to avoid.
+    """
     files = sorted(selectors.EVIDENCE_DIR.glob("*.json"))
 
     assert files, "no evidence at all means no selector can be verified"
     for path in files:
         text = path.read_text(encoding="utf-8")
         payload = json.loads(text)
-        assert payload["schema"] == selectors.EVIDENCE_SCHEMA, path.name
         assert str(payload.get("produced_by") or "").strip(), path.name
-        assert payload["stage"] in {"inspect", "open-form"}, path.name
-        assert isinstance(payload["data_qa_seen"], list), path.name
         for secret in PRIVATE_TO_THE_OWNER:
             assert secret not in text, f"{path.name} carries {secret!r}"
+
+        assert payload["schema"] in {
+            selectors.EVIDENCE_SCHEMA,
+            selectors.MEASUREMENT_SCHEMA,
+        }, path.name
+        if payload["schema"] == selectors.EVIDENCE_SCHEMA:
+            assert payload["stage"] in {"inspect", "open-form"}, path.name
+            assert isinstance(payload["data_qa_seen"], list), path.name
 
 
 def test_the_redaction_is_a_whitelist_and_not_a_deletion() -> None:
@@ -823,7 +915,7 @@ def test_every_refusal_this_stage_prints_survives_a_cp1251_console() -> None:
 
     # hh's own words, kept exactly, have to reach the console too — the
     # non-breaking space in them is 0xA0 in cp1251 and survives.
-    selectors.RESUME_HIDDEN_REFUSAL.encode("cp1251")
+    selectors.RESUME_VISIBILITY_NOTICE.encode("cp1251")
     selectors.LIKELY_REJECTION_WARNING.encode("cp1251")
 
     both = set(login.AUTH_MARKERS)

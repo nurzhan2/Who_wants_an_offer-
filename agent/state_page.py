@@ -55,13 +55,19 @@ stops, and this one shape resolved toward the irreversible act. A list of
 conversations hh remembers against this vacancy is now read as an application
 too. Note the direction — the list can only ever *add* an application, never take
 one away, so this cannot turn a stop into a send.
+
+**Corrected 2026-09-07: no sentence in the modal stops an application any more,
+and the reason this file is where that is written down.** Until this change
+:func:`read_form_warnings` sorted the modal into two families, and one of them —
+hh's «поменяйте видимость резюме…» — was a hard refusal that no application
+could get past. It was wrong, it was wrong for a full day, and the way it was
+wrong is the lesson worth more than the fix. See :data:`VISIBILITY_WORDS`.
 """
 
 import html as html_lib
 import json
 import re
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import Any, Final, final
 
 #: The same marker the crawler reads. Duplicated rather than imported: see the
@@ -105,10 +111,12 @@ CONSOLE_ENCODING: Final[str] = "cp1251"
 #: them into ordinary spaces before anything was compared. The constant now holds
 #: what ``split()`` genuinely leaves behind. Note the direction of the change:
 #: removing an invisible character can only make a substring match where it did
-#: not before, never take a match away, so this can only ever add a stop.
+#: not before, never take a match away, so this can only ever add a line of hh's
+#: own words to what a person is shown. It used to be able to add a stop; since
+#: 2026-09-07 nothing matched here stops anything.
 _INVISIBLES: Final[str] = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
 
-#: Every word of hh's demand that the resume be made visible, as stems. Measured
+#: Every word of hh's notice about the resume's visibility, as stems. Measured
 #: in full on 2026-09-06:
 #:
 #:     «Чтобы откликнуться на эту вакансию, поменяйте видимость резюме
@@ -118,26 +126,49 @@ _INVISIBLES: Final[str] = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
 #: rather than whole words, so that «видимость», «видимости» and
 #: «видимостью» all count.
 #:
-#: **Widened 2026-09-07.** This was ``BLOCKING_ANCHOR = "видимость резюме"``,
-#: an exact bigram matched inside a single line, while :func:`read_form_warnings`
-#: promised in its own docstring to read "any mention of resume visibility
-#: anywhere in the modal" as the demand. It did not, and the gap was one word
-#: wide: «поменяйте видимость вашего резюме» did not match, and neither did
-#: «поменяйте настройки видимости резюме». The code was made to keep the
-#: promise rather than the promise trimmed to fit the code, because of the
-#: asymmetry this module turns on: a false positive costs one vacancy handed to
-#: the owner, a false negative sends an application hh will not show to the
-#: employer.
-BLOCKING_WORDS: Final[tuple[str, ...]] = ("видимост", "резюме")
+#: **This sentence is advice. It is not a refusal, and treating it as one made
+#: the agent unable to send anything at all.** Measured 2026-09-07 in real
+#: Chrome, on the owner's own account, on a vacancy carrying exactly this line:
+#: the submit button was clicked, ``negotiations.total`` went 0 -> 1, and the
+#: apply control turned into ``vacancy-response-link-top-again``. hh accepted
+#: the application with the notice on screen. The committed record of that run
+#: is ``agent/evidence/20260907-send-under-visibility-notice.json``; the
+#: unredacted artefact it was taken from is ``agent/probe/_cdp_send.json``,
+#: which is gitignored because it is the owner's own account state. The owner
+#: also applies by hand, regularly, with the same notice showing.
+#:
+#: **Where the wrong rule came from, because that is the part worth inheriting.**
+#: It was a guess in an earlier brief. It then survived a full day of being
+#: treated as a measured fact — and it survived precisely *because* it was a
+#: block: the rule forbade the one experiment that would have refuted it, so
+#: nothing in a day of running the agent could ever produce evidence against it.
+#: A rule that blocks an action has to arrive with a way to check that the block
+#: is real. Without that check it is a hypothesis wearing a fact's clothes, and
+#: it is unfalsifiable by construction rather than by accident. Every other
+#: measured claim in this package names the artefact it came from; this one
+#: named a brief, and nobody noticed for a day because the code did what the
+#: brief said and the brief was the only witness.
+#:
+#: **Why the net is still cast this wide, now that a match costs a line rather
+#: than an application.** The old reason was an asymmetry between one vacancy
+#: handed to a person and one application hh would hide. That asymmetry is gone
+#: — nothing here stops anything — and the new one runs the same way: a missed
+#: notice means the owner sends a batch without being told hh thinks the whole
+#: batch is limited, while a spurious one costs an extra quoted line on a
+#: confirmation card. Missing it is still the more expensive mistake, so the
+#: stems stay stems and the words stay unordered.
+VISIBILITY_WORDS: Final[tuple[str, ...]] = ("видимост", "резюме")
 
 #: The stable half of «Такой отклик может получить отказ», which is followed by
 #: hh's own reason. Measured reason on the same modal: «Английский язык в резюме
 #: «Python-разработчик» ниже обязательного уровня, который указал работодатель.»
-SOFT_ANCHOR: Final[str] = "может получить отказ"
+#: Advice as well, and always was; it now sits beside the visibility notice
+#: rather than under a family that outranked it.
+REJECTION_ANCHOR: Final[str] = "может получить отказ"
 
 #: Lines of the modal that are controls, not prose. Used only to stop reading
-#: the soft warning's reason at the bottom of the card; getting this list wrong
-#: costs one extra line of quoted text, never a wrong verdict.
+#: the «может получить отказ» reason at the bottom of the card; getting this
+#: list wrong costs one extra line of quoted text and nothing else.
 _CONTROL_LABELS: Final[tuple[str, ...]] = (
     "добавить сопроводительное",
     "откликнуться",
@@ -176,154 +207,147 @@ def _normalised(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-class FormWarning(StrEnum):
-    """What the response modal is warning about, if anything."""
-
-    #: Neither of the two known warnings is in the text.
-    NONE = "none"
-    #: hh's own «этот отклик может получить отказ» analysis. Shown, never acted on.
-    SOFT = "soft"
-    #: hh will not accept an application in this state. Never send.
-    BLOCKING = "blocking"
-
-
 @final
 @dataclass(frozen=True, slots=True)
 class FormWarnings:
-    """What the modal said, in hh's words, sorted by what it means.
+    """What the modal said, in hh's words, sorted by what it is about.
 
     Both fields can be set at once, and on the one modal measured in full they
-    were: vacancy 136131345 carried the visibility demand *and* the
-    English-level warning in the same card. A single-valued verdict would have
-    thrown one of them away, and the one it would have thrown away is the one
-    worth keeping — hh naming a specific unmet requirement is more precise than
-    any similarity score this project computes.
+    were: vacancy 136131345 carried the visibility notice *and* the
+    English-level warning in the same card. Neither outranks the other and
+    neither stops anything — they are two different pieces of advice, and a
+    person deciding needs both, so this class has two fields and no single
+    summary value.
+
+    **Removed 2026-09-07: ``verdict``, ``may_send`` and the ``FormWarning``
+    enum.** ``may_send`` answered "is the blocking warning absent", and after
+    this change there is no blocking warning: it would have been a property that
+    returns ``True`` for ever, sitting in the path of the irreversible click and
+    reading, to anyone skimming, like a permission check. ``verdict`` collapsed
+    the two fields into one and preferred the visibility line, which is the
+    exact loss the paragraph above says must not happen. A guard that cannot
+    refuse and a summary that hides half its input are both worse than nothing,
+    because the next reader believes them.
     """
 
-    #: hh's exact demand, when it will not accept an application as things
-    #: stand. ``None`` when no such line was found.
-    blocking: str | None
-    #: hh's exact «может получить отказ» line together with its reason.
-    soft: str | None
+    #: hh's exact sentence about the resume's visibility, when the card carried
+    #: one. ``None`` when it did not. This is a property of the *resume*, not of
+    #: the vacancy: hh shows it on every vacancy while the setting stands, so one
+    #: of these is a statement about every application in the batch.
+    visibility: str | None
+    #: hh's exact «может получить отказ» line together with its reason. About
+    #: this one application: it names a requirement this vacancy asks for and the
+    #: resume does not meet.
+    likely_rejection: str | None
 
     @property
-    def verdict(self) -> FormWarning:
-        """The single value a caller that only wants one can branch on."""
-        if self.blocking is not None:
-            return FormWarning.BLOCKING
-        if self.soft is not None:
-            return FormWarning.SOFT
-        return FormWarning.NONE
+    def said(self) -> tuple[str, ...]:
+        """Everything hh said, in hh's own words, in the order the card had it.
 
-    @property
-    def may_send(self) -> bool:
-        """Whether the blocking warning is absent. The soft one never blocks."""
-        return self.blocking is None
+        The one thing every caller wants: the journal writes it, the results
+        file carries it, and the next confirmation card quotes it. Returning the
+        lines rather than one joined string leaves the joining to whoever knows
+        what they are joining for — a card indents each line under a gutter, a
+        journal column does not.
+        """
+        return tuple(line for line in (self.visibility, self.likely_rejection) if line)
+
+
+def mentions_visibility(text: str) -> bool:
+    """Whether this text carries every word of hh's resume-visibility notice.
+
+    Public because two callers need the same rule and must not each have their
+    own. :func:`read_form_warnings` uses it to classify a line of the open card;
+    ``agent/run.py`` uses it on a sentence that came back out of the journal,
+    where hh's words are stored in one column and have to be told apart again
+    before a card can label them.
+    """
+    return all(word in _normalised(text) for word in VISIBILITY_WORDS)
 
 
 def read_form_warnings(modal_text: str) -> FormWarnings:
-    """Classify the response modal by what it says, not by which elements exist.
+    """Read what the response modal says, by its text and not by its elements.
 
     The modal's one warning element — ``hidden-resume-warning``, named in
     ``agent/selectors.py`` because selectors live there and nowhere else —
-    carries several different messages. So "the element is present" both
-    false-positives, since the soft warning uses that same element and the soft
-    warning is not a reason to stop, and misses, since hh is free to put the
-    next warning somewhere else. The text is the thing that means something, so
+    carries several different messages, so "the element is present" says nothing
+    about which one is on screen. The text is the thing that means something, so
     the text is what is read.
+
+    **Nothing this function returns stops an application** (2026-09-07). It used
+    to: a line matching :data:`VISIBILITY_WORDS` was a refusal, raised out of
+    ``agent/submit.py``, and no application in this package could get past it.
+    hh accepts those applications — measured, see :data:`VISIBILITY_WORDS` — so
+    the rule blocked every send the agent could ever make and nothing else. What
+    is left here is a reader: it hands the caller hh's own sentences so a person
+    can be shown them, and it decides nothing.
+
+    That also settles what happens when hh rewords the card, which it eventually
+    will. Missing a sentence now costs the owner one piece of advice they would
+    have liked; inventing a meaning for a sentence nobody has measured costs
+    them a card full of text hh did not write. So this still errs generously
+    *within* the two measured families and refuses to guess outside them: every
+    word of :data:`VISIBILITY_WORDS`, as a stem, in any order, with anything
+    between them — first inside one line, so the person gets hh's own sentence
+    to read, and failing that anywhere in the card, so a notice hh has split over
+    two lines still reaches them.
 
     **This reads a card, and says nothing about a card it was not given.** An
     empty or half-rendered ``modal_text`` produces ``FormWarnings(None, None)``,
-    which is indistinguishable from a modal hh had nothing to say in. That is not
-    a defect to fix here — a classifier cannot tell "no warning" from "no text"
-    — but it is a trap for the caller, and the caller has to close it before
-    reading "no warning" as permission. ``agent/submit.py`` does: it waits for the
-    submit control inside the modal, then requires that control's own label to be
-    inside the text it classifies, and refuses to send when it is not.
-
-    **What happens when hh rewords it entirely**, which it eventually will. The
-    two directions cost different amounts and are not symmetric:
-
-    * Missing a blocking warning is cheap and self-correcting. The agent opens
-      the form and clicks send; hh refuses; ``negotiations.total`` is re-read
-      afterwards, still says no application exists, and the run reports a
-      failure to a person. One slot out of a small daily budget, and nothing
-      irreversible — because hh is enforcing its own rule, not us.
-    * Treating anything unrecognised as blocking is expensive and permanent.
-      The first time hh adds a line to that card, every vacancy goes to a human
-      and the agent stops being one. Nobody would reword the card back.
-
-    So this errs generously *within* the known family and refuses to guess
-    outside it. Generously now means what the sentence above it always claimed:
-    every word of :data:`BLOCKING_WORDS`, as a stem, in any order, with anything
-    between them — first inside one line, so the person gets hh's own sentence
-    to read, and failing that anywhere in the card, so a demand hh has split over
-    two lines is still a demand. Until 2026-09-07 this said "any mention of
-    resume visibility anywhere in the modal" and matched an exact two-word bigram
-    inside a single line; one word between the two and the hard stop was gone.
-
-    What makes an unrecognised wording *safe* is still not this function: it is
-    that the irreversible step is guarded by hh itself and confirmed afterwards
-    against ``negotiations.total``. A string comparison against a site somebody
-    else rewrites is a courtesy to the human reading the card, and treating it as
-    a safety control would be building a guard that reads as protection and is
-    not.
-
-    The soft family gets the opposite treatment — a short anchor, matched
-    widely — because a false positive there costs one extra line on a
-    confirmation card and a false negative loses hh's own analysis of why the
-    application will fail.
+    which is indistinguishable from a modal hh had nothing to say in. A
+    classifier cannot tell "no warning" from "no text", and the caller has to
+    close that gap rather than reading silence as anything. ``agent/submit.py``
+    does: it waits for the submit control inside the modal and then requires that
+    control's own label to be inside the text it classified. That check survives
+    this change, and it is not a text rule — it asks whether the card rendered at
+    all, which is a fact about the browser rather than an opinion about a
+    warning.
     """
     lines = [line.strip() for line in modal_text.splitlines()]
-    blocking: str | None = None
-    soft: str | None = None
+    visibility: str | None = None
+    likely_rejection: str | None = None
 
     for index, line in enumerate(lines):
         if not line:
             continue
-        normalised = _normalised(line)
-        if blocking is None and _is_the_visibility_demand(normalised):
-            blocking = printable(line)
+        if visibility is None and mentions_visibility(line):
+            visibility = printable(line)
             continue
-        if soft is None and SOFT_ANCHOR in normalised:
-            soft = printable(" ".join([line, *_reason_after(lines, index)]).strip())
+        if likely_rejection is None and REJECTION_ANCHOR in _normalised(line):
+            likely_rejection = printable(" ".join([line, *_reason_after(lines, index)]).strip())
 
-    if blocking is None:
-        blocking = _visibility_demand_split_over_lines(lines)
+    if visibility is None:
+        visibility = _visibility_notice_split_over_lines(lines)
 
-    return FormWarnings(blocking=blocking, soft=soft)
-
-
-def _is_the_visibility_demand(normalised_line: str) -> bool:
-    """Whether one normalised line carries every word of the demand."""
-    return all(word in normalised_line for word in BLOCKING_WORDS)
+    return FormWarnings(visibility=visibility, likely_rejection=likely_rejection)
 
 
-def _visibility_demand_split_over_lines(lines: list[str]) -> str | None:
-    """The demand when hh has broken it across more than one line of the card.
+def _visibility_notice_split_over_lines(lines: list[str]) -> str | None:
+    """The notice when hh has broken it across more than one line of the card.
 
     The measured sentence is one line, and this is the branch for the day it is
     not — a heading and a body, a bullet list, a line wrapped around an inline
     link. Nobody has seen that, so the price of being wrong is what decides the
-    design, and it is the usual asymmetry: this can only ever *add* a stop, and
-    the vacancy it stops goes to the owner with hh's words attached.
+    design, and being wrong here now adds a quoted line to a confirmation card
+    rather than taking a vacancy away from the run.
 
-    Because no single line is the demand in this branch, no single line can be
+    Because no single line is the notice in this branch, no single line can be
     quoted as it: every line that mentions any of the words is handed over
     together. On the measured card that would also pull in hh's «может получить
-    отказ» reason, which names «резюме» — an extra sentence on a card that is
-    already stopping, which is the cheapest way this can be wrong.
+    отказ» reason, which names «резюме» — the same sentence twice on one card,
+    which is the cheapest way this can be wrong and the reason the branch is
+    kept rather than tightened.
     """
-    if not all(word in _normalised(" ".join(lines)) for word in BLOCKING_WORDS):
+    if not mentions_visibility(" ".join(lines)):
         return None
-    carrying = [line for line in lines if line and _mentions_the_demand(line)]
+    carrying = [line for line in lines if line and _mentions_any_visibility_word(line)]
     return printable(" ".join(carrying)) or None
 
 
-def _mentions_the_demand(line: str) -> bool:
-    """Whether one line carries any of the demand's words, not necessarily all."""
+def _mentions_any_visibility_word(line: str) -> bool:
+    """Whether one line carries any of the notice's words, not necessarily all."""
     normalised = _normalised(line)
-    return any(word in normalised for word in BLOCKING_WORDS)
+    return any(word in normalised for word in VISIBILITY_WORDS)
 
 
 def _reason_after(lines: list[str], index: int) -> list[str]:

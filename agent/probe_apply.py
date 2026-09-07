@@ -423,8 +423,17 @@ def _modal_text(page: Any) -> str:
     """The modal's own words, or why they could not be read.
 
     ``Any`` for the page, as everywhere here. Recorded because
-    ``hidden-resume-warning`` carries a hard refusal and a soft prediction under
-    the same name, and the only thing that separates them is this text.
+    ``hidden-resume-warning`` carries two different messages under the same
+    name — hh's notice about the resume's visibility and its prediction that
+    this application may be turned down — and the only thing that separates them
+    is this text.
+
+    Corrected 2026-09-07: this said "a hard refusal and a soft prediction".
+    Neither of them refuses anything. The first was treated as a refusal on a
+    guess, was measured that day not to be one, and the measurement is in
+    ``agent/evidence/20260907-send-under-visibility-notice.json``. Nothing about
+    this function changed — it records the text and judges none of it, which is
+    why it needed a corrected sentence rather than a corrected line of code.
     """
     try:
         text = page.locator(RESPONSE_FORM.query).first.inner_text()
