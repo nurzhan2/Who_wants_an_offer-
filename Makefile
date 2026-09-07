@@ -3,7 +3,7 @@ UV ?= uv
 COMPOSE ?= docker compose
 
 .DEFAULT_GOAL := help
-.PHONY: help install install-embeddings dev test test-fast verify-embeddings embed-backlog parse-resume bench-ollama lint fmt typecheck check migrate revision up down logs seed fixtures
+.PHONY: help install install-embeddings queue apply dev test test-fast verify-embeddings embed-backlog parse-resume bench-ollama lint fmt typecheck check migrate revision up down logs seed fixtures
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -47,6 +47,12 @@ agent-check: ## The agent's own gates. No browser, no network, no account.
 
 agent-run: ## Dry run by default; add s=--send to reach the confirmation
 	$(UV) run python -m agent.run $(s)
+
+queue: ## What is ready to apply to, and why the rest is not
+	$(UV) run python -m wwao queue
+
+apply: ## Show each card and send what you confirm. Needs you at the keyboard.
+	$(UV) run python -m wwao apply $(s)
 
 verify-embeddings: ## Load the real bge-m3 model and prove it works
 	$(UV) run --extra embeddings python scripts/verify_embeddings.py

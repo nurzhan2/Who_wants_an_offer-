@@ -63,6 +63,39 @@ npm --prefix frontend install && npm --prefix frontend run dev
 
 With `make` available, the same thing is `make install && make up && make dev`.
 
+## From a crawl to an application
+
+One entry point, five subcommands, in the order you use them:
+
+```bash
+uv run python -m wwao crawl                # walk the sources (hh, arbeitnow, remotive, …)
+uv run python -m wwao match                # score what was found against the profile
+uv run python -m wwao letters --limit 20   # write cover letters for the top N by score
+uv run python -m wwao queue                # what is ready to apply to, and why the rest is not
+uv run python -m wwao apply                # show each card and send what you confirm
+```
+
+The first four need no account and no human, which is what makes them the parts
+worth running overnight. `queue` is the one to read afterwards: it prints the
+reason each vacancy is *not* ready — no letter, an employer test, a closed
+posting, an application already sent — because that list is what you would
+otherwise reconstruct by hand.
+
+`apply` is the only subcommand that sends anything, and it needs a person at the
+keyboard. It opens **your** hh account in a visible browser window, shows a card
+per vacancy — the id, the link, the employer, the match score with its reasoning,
+the letter in full, and any warning hh itself raises — and sends only what you
+confirm by typing a word. There is no flag that answers that prompt: a closed
+stdin, a pipe or a cron job is a refusal, not a default yes. It is a dry run
+unless you pass `--send`, and `--send` still only gets you as far as the prompt.
+
+The agent is a separate package with a separate risk profile, and the two do not
+import each other: `backend/` is anonymous, read-only and safe on a server;
+`agent/` acts under your login on your own machine. `wwao` spans both without
+fusing them — each subcommand loads only the side it needs, and a test checks
+that by looking at `sys.modules` after a real invocation. Details and the first-run
+setup are in [agent/README.md](agent/README.md).
+
 ## Parsing a resume
 
 ```bash
