@@ -214,15 +214,55 @@ def stubbed_run(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     return calls
 
 
+#: The crawl no longer answers on the connection that asked for it — it hands
+#: back a job to poll, because an hh slice takes about twenty minutes. The
+#: counters these tests are about did not go away; they moved one level down,
+#: into ``report``, and ``wait_seconds`` is the endpoint's own way of getting
+#: them in one request for the sources that are bounded feeds. Using it here
+#: keeps each test about the thing it was written for.
+WAITED_RUN_URL = f"{RUN_URL}?wait_seconds=5"
+
+
+async def _counters(client: AsyncClient) -> dict[str, Any]:
+    """Run to completion in one request and hand back the counters.
+
+    Asserts the synchronous path really did finish, so a test below can never
+    read ``None`` and quietly compare nothing.
+    """
+    response = await client.post(WAITED_RUN_URL)
+
+    assert response.status_code == 200, "wait_seconds should have finished the stubbed run"
+    body = response.json()
+    assert body["status"] == "success"
+    assert body["report"] is not None, "a finished job carries its report"
+    return dict(body["report"])
+
+
+async def test_the_crawl_is_accepted_rather_than_awaited(
+    async_client: AsyncClient, stubbed_run: list[dict[str, Any]]
+) -> None:
+    """The shape change itself: 202 and a job to poll, not 200 and a wait.
+
+    An hh slice is roughly twenty minutes at its own polite rate, and nothing
+    holds an HTTP connection open for that.
+    """
+    response = await async_client.post(RUN_URL)
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] in {"queued", "running", "success"}
+    # The URL to poll is where a caller finds out; it must be handed over, not
+    # left to be assembled from the id by whoever reads the docs.
+    assert response.headers["Location"].endswith(body["id"])
+
+
 async def test_run_reports_what_each_source_did(
     async_client: AsyncClient, stubbed_run: list[dict[str, Any]]
 ) -> None:
-    """The counters are the product of a run; a bare 200 tells nobody whether
+    """The counters are the product of a run; a bare 202 tells nobody whether
     the crawl was worth making."""
-    response = await async_client.post(RUN_URL)
+    body = await _counters(async_client)
 
-    assert response.status_code == 200
-    body = response.json()
     assert body["found"] == 10
     assert body["new"] == 6
     assert body["duplicates"] == 2
@@ -234,7 +274,7 @@ async def test_run_reports_a_skipped_source_with_its_reason(
     async_client: AsyncClient, stubbed_run: list[dict[str, Any]]
 ) -> None:
     """A source that sat the run out is not a source that found nothing."""
-    body = (await async_client.post(RUN_URL)).json()
+    body = await _counters(async_client)
     jsearch = next(item for item in body["sources"] if item["slug"] == "jsearch")
 
     assert jsearch["skipped"]["code"] == SourceUnavailable.MISSING_CREDENTIALS.value
@@ -246,7 +286,7 @@ async def test_run_reports_the_embedding_step(
 ) -> None:
     """ "How many vectors did we not have to recompute" is the number that says
     whether the change detection is working at all."""
-    body = (await async_client.post(RUN_URL)).json()
+    body = await _counters(async_client)
 
     assert body["embedding"] == {
         "considered": 10,
@@ -261,7 +301,7 @@ async def test_the_plan_is_summarised_without_the_queries(
 ) -> None:
     """The searches are built from the candidate's own skills, and this response
     is the one part of the pipeline a browser renders."""
-    body = (await async_client.post(RUN_URL)).json()
+    body = await _counters(async_client)
 
     assert body["plan"]["groups"] == ["backend"]
     assert "queries" in body["plan"]
