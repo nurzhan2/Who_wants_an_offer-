@@ -103,12 +103,8 @@ def show(report: RunReport, quota: dict[str, tuple[int, int | None]]) -> None:
         # that stopped on the row cap with eleven thousand rows outstanding
         # printed exactly what a run that finished the corpus printed, which is
         # how a corpus source came to look drained while it was not.
-        if step.backlog_known:
-            print(f"  осталось посчитать: {step.backlog}")
-        else:
-            print("  сколько осталось — неизвестно, см. scripts/embed_backlog.py")
-        if step.stopped:
-            print(f"  остановлено: {step.stopped}")
+        print(f"  осталось посчитать: {step.backlog}")
+        print(f"  остановлено: {step.stopped}")
 
     print()
     print(RULE)

@@ -1023,3 +1023,47 @@ async def test_a_contract_version_the_backend_does_not_speak_is_refused(
     )
 
     assert response.status_code == 409
+
+
+@pytest.mark.db
+async def test_a_seeded_row_is_never_offered_to_the_agent(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """``scripts/seed.py`` writes rows under ``source_slug = "hh"`` like real ones.
+
+    The database this was written against held 17 of them beside 100 genuine
+    postings. Without a rule they reach the apply queue and the agent opens
+    ``example.test`` under the owner's account.
+
+    The seed's URL happens not to survive ``_url_names`` today, so these were
+    already dropped — but by accident of how the seed writes URLs rather than by
+    a rule, and a seed producing hh-shaped URLs would be served. This gives the
+    row an hh-shaped URL that passes that check, so what is under test is the
+    rule and not the accident.
+    """
+    profile = await profiles.create(make_profile())
+    seeded = await _posting(
+        vacancies,
+        seed="queue-seeded",
+        external_id="hh-dev-000",
+        url="https://almaty.hh.kz/vacancy/hh-dev-000",
+    )
+    real = await _posting(vacancies, seed="queue-real", external_id=HH_ID, url=HH_URL)
+    await matches.bulk_upsert(
+        [
+            make_match(profile.id, seeded, Decimal("99")),
+            make_match(profile.id, real, Decimal("80")),
+        ]
+    )
+    _letter(db_session, seeded)
+    _letter(db_session, real)
+    await db_session.flush()
+
+    queue = await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)
+
+    assert [item.vacancy_id for item in queue.items] == [HH_ID], (
+        "the seeded row scored higher and would have come first"
+    )

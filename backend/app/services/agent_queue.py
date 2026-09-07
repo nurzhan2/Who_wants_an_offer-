@@ -67,7 +67,7 @@ time-to-answer measurement needs.
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlsplit
 from uuid import UUID
 
@@ -275,6 +275,26 @@ async def active_profile_id(session: AsyncSession) -> UUID | None:
 # ── the queue ─────────────────────────────────────────────────────────
 
 
+#: The middle of how ``scripts/seed.py`` names the rows it invents: its
+#: ``external_id`` is ``f"{slug}-{name}"`` with ``name = f"dev-{index:03d}"``, so
+#: an hh seed row is ``hh-dev-000``. The pattern is built from the configured
+#: slug rather than hardcoded, because the queue is scoped to one source and a
+#: bare ``dev-%`` would match nothing at all — which is how this line was first
+#: written, and it would have looked like it worked.
+#:
+#: They
+#: carry ``source_slug = "hh"`` like a real posting, so without this they reach
+#: the apply queue beside genuine vacancies and the agent opens ``example.test``
+#: under the owner's account.
+#:
+#: They are excluded here rather than left to ``_url_names``, which does drop
+#: them today — their URL is ``https://example.test/hh/dev-000`` and its path
+#: does not end in ``hh-dev-000``. That is an accident of how the seed writes
+#: URLs, not a rule: a seed that produced hh-shaped URLs would be served. A rule
+#: that holds for the reason you think it holds is worth the one line.
+SEED_ID_MARKER: Final[str] = "-dev-"
+
+
 def _queue_statement(
     *, profile_id: UUID, min_score: Decimal, require_letter: bool, limit: int
 ) -> Select[Any]:
@@ -334,6 +354,7 @@ def _queue_statement(
         .where(Match.profile_id == profile_id)
         .where(Match.score >= min_score)
         .where(Vacancy.is_spam.is_(False))
+        .where(~VacancySource.external_id.like(f"%{SEED_ID_MARKER}%"))
         .where(~acted_on)
         .order_by(Match.score.desc(), Vacancy.id, VacancySource.external_id)
         .limit(limit)
