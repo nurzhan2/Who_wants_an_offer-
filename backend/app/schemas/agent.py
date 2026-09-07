@@ -23,12 +23,25 @@ page hh redirects. See ``app/services/agent_queue.py`` for the check that keeps
 this true.
 
 The additions to ``agent/queue.py``'s shape are :attr:`QueueItem.match`,
-:attr:`QueueItem.source` and the two extra advisory flags, plus the four result
-fields below. They are additive: ``QueueItem.from_json`` reads by key and
+:attr:`QueueItem.source` and the two extra advisory flags, plus the result
+fields ``hh_blocking_warning``, ``negotiations_total``, ``last_state`` and
+``sent_letter``. They are additive: ``QueueItem.from_json`` reads by key and
 ignores what it does not know, so an agent built against the older shape still
 parses these payloads. Everything the agent *does* read is pinned against its
 own source by ``backend/tests/test_agent_queue.py``, which parses
 ``agent/queue.py`` rather than importing it.
+
+Additive in that direction only. A field the backend accepts and the agent
+never sends is a column that stays NULL — honest, and visibly empty. A field
+the agent sends and the backend has not declared is a 422 on a result
+describing an application that has already gone out, which is why the drift
+test asserts ``agent`` ⊆ ``backend`` and why anything removed from this file
+has to be removed from ``agent/queue.py`` first.
+
+``sent_letter`` is the one addition the agent side has to grow before it can
+carry anything: ``agent.queue.Result`` has no such field, so today every
+result leaves ``application.sent_letter`` NULL. Nothing here fills that gap
+from ``cover_letter``, and the reason is under the field itself.
 """
 
 from decimal import Decimal
@@ -55,6 +68,17 @@ ExternalId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=
 #: hh's own sentences, quoted. Long enough for the whole modal line and capped
 #: so a broken page cannot post a megabyte into the tracker.
 WarningText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
+
+#: The letter as it was typed. Not stripped and not otherwise touched: this is
+#: the evidence of what an employer read under the owner's name, and a schema
+#: that quietly trims it is a schema that stores something nobody sent.
+#:
+#: The ceiling is twice hh's measured ``letterMaxLength`` of 10 000
+#: (``agent/letter.py``) rather than equal to it. A cap that exactly matches
+#: another site's current limit turns hh raising that limit into a 422 on a
+#: result describing an application that has already gone out — the same
+#: mistake :attr:`ApplicationResult.last_state` is written to avoid.
+SentLetterText = Annotated[str, StringConstraints(max_length=20000)]
 
 
 class AgentStatus(StrEnum):
@@ -170,6 +194,27 @@ class ApplicationResult(BaseModel):
     status: AgentStatus
     #: Why the agent ended where it did, written for a person to read.
     reason: str | None = Field(default=None, max_length=2000)
+
+    #: The letter the agent actually typed into the form, character for
+    #: character.
+    #:
+    #: It is asked for here rather than copied from ``application.cover_letter``
+    #: at the other end because the two can differ, and silently. That column
+    #: holds the letter *as it stands now*: ``app/letters/store.save_letter``
+    #: overwrites it in place, so a regeneration run between the queue being
+    #: taken and this result arriving replaces the evidence with something no
+    #: employer ever saw. And where one vacancy carries two tracker rows, the
+    #: queue reads its letter from the oldest row holding one while the result
+    #: lands on the oldest row of any kind — which need not be the same row.
+    #: Both cases are rare and neither announces itself, and "usually right"
+    #: is not a property a record of what was sent under somebody's name is
+    #: allowed to have.
+    #:
+    #: ``None`` means the agent did not report it — an older agent, or a
+    #: result that never reached the typing. ``""`` means it reported that
+    #: nothing was typed, which hh permits on some vacancies. The two are not
+    #: the same fact and are not stored as the same value.
+    sent_letter: SentLetterText | None = None
 
     # ── hh's own words, kept apart from ours ─────────────────────────────
     #: The soft «Такой отклик может получить отказ» line together with the

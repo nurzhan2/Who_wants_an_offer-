@@ -109,6 +109,10 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/tests/test_sources_registry.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_runner.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_end_to_end.py" = ["RUF001", "RUF002"]
+# Its fixtures are notes a person typed into a tracker, in Russian, next to a
+# block the agent rendered in Russian — telling those two apart is the whole
+# subject of the file.
+"backend/tests/test_migration_0008_notes.py" = ["RUF001", "RUF002"]
 # Its docstring argues about company forms and city names in the two languages
 # this market writes them in, so the examples are necessarily Cyrillic.
 "backend/app/normalize/fingerprint.py" = ["RUF001", "RUF002"]

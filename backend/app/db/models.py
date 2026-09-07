@@ -373,7 +373,50 @@ class Match(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 
 class Application(UUIDPrimaryKeyMixin, TimestampMixin, Base):
-    """Personal tracker entry for a vacancy the candidate acted on."""
+    """Personal tracker entry for a vacancy the candidate acted on.
+
+    Three groups of columns, and the group a column belongs to decides who is
+    allowed to write it.
+
+    **The person's.** ``status``, ``applied_at``, ``notes``, ``cover_letter``.
+    A kanban position, a date, free text, the letter as it currently stands.
+    ``notes`` in particular is *theirs*: nothing in this codebase writes it.
+    Until 2026-09-07 the apply agent's report was rendered into a marked block
+    inside it, which the session that shipped that called the weakest part of
+    the change in its own commit message — a text blob cannot be filtered,
+    grouped or counted, and rewriting somebody's notes column on every result
+    put machine output where a person's sentences live. Migration
+    ``0008_application_send_record`` moved that block into the columns below
+    and parsed the existing text forward.
+
+    **What the agent recorded at send time** (``sent_*``, ``agent_*``,
+    ``match_*``, ``vacancy_key_skills``). A snapshot, deliberately duplicating
+    data that lives elsewhere in normalised form, because everything it
+    duplicates is mutable: ``match`` rows are re-upserted by every scoring run,
+    ``cover_letter`` is overwritten by every regeneration, and a re-crawl
+    rewrites the posting. Without the snapshot, the question a feedback loop
+    exists to answer — *what did the employer actually read, and what did we
+    believe when we sent it* — has no answer a month later. This is the one
+    place in the schema where a copy is the point rather than a smell.
+
+    **What hh said** (``hh_*``). Quoted from somebody else's site, never
+    parsed into a verdict of ours, and prefixed so that no reader mistakes
+    hh's count of applications for one this project computed.
+
+    NULL is never zero and never "no" in this table. ``sent_at IS NULL`` means
+    the agent never reported a send for this row, which is what separates a
+    tracker entry a person typed from an application that actually went out;
+    ``match_score IS NULL`` means nothing scored this pairing, while ``0.00``
+    would be a verdict; ``hh_negotiations_total IS NULL`` means nobody
+    measured, while ``0`` is hh saying there are none. There are two sent
+    applications on this account, and a dashboard that turns "not recorded"
+    into a number would be inventing the only statistics it has.
+
+    No index on any of them. This is one person's tracker — tens of rows, not
+    millions — and what makes ``WHERE sent_at IS NOT NULL GROUP BY
+    hh_last_state`` possible is that the values are columns at all, not that
+    they are indexed.
+    """
 
     __tablename__ = "application"
 
@@ -382,14 +425,124 @@ class Application(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         nullable=False,
         index=True,
     )
+    #: Whose resume this was written from. Nullable because a row typed into the
+    #: tracker by hand has no profile, and because rows predating migration 0009
+    #: cannot be attributed. NULL is read as "not evidence about any resume":
+    #: past letters are fed back as few-shot examples, and one written from a
+    #: different resume would teach the model to claim experience this candidate
+    #: does not have. SET NULL on delete — removing a resume must not remove the
+    #: record that an application was sent.
+    profile_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("candidate_profile.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     status: Mapped[ApplicationStatus] = mapped_column(
         pg_enum(ApplicationStatus, "application_status"),
         default=ApplicationStatus.SAVED,
         nullable=False,
     )
+    #: The person's own date on their own kanban, editable through the tracker
+    #: API. :attr:`sent_at` is the machine's; the two are kept apart so that
+    #: correcting a date by hand cannot move a measurement.
     applied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: What a person typed. Nothing in this codebase writes it.
     notes: Mapped[str | None] = mapped_column(Text)
+    #: The letter as it stands now — written and rewritten by
+    #: ``app/letters/store.save_letter``. Not evidence of what was sent: a
+    #: regeneration after a send replaces it in place. See :attr:`sent_letter`.
     cover_letter: Mapped[str | None] = mapped_column(Text)
+
+    # ── the send, as the agent reported it ────────────────────────────
+    #: When an application actually went out, from the report that said so.
+    #: Written once and never by a person. NULL means this row was never sent
+    #: by the agent, which includes every row a person created by hand.
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The exact text typed into hh's form, as the agent reported it — not a
+    #: copy of :attr:`cover_letter`, which by then may have been regenerated,
+    #: and which for a vacancy carrying two tracker rows may never have been
+    #: the row this result landed on. Only the process that did the typing
+    #: knows this string, so only its report may write it. NULL means the
+    #: agent did not report one; ``""`` means it reported that nothing was
+    #: typed, which hh allows.
+    sent_letter: Mapped[str | None] = mapped_column(Text)
+    #: Where the agent left this application: ``app.schemas.agent.AgentStatus``.
+    #: A string rather than a native enum, unlike every other closed
+    #: vocabulary here, because this set is not ours to freeze — it mirrors the
+    #: state machine in ``agent/state.py``, a package this one may not import,
+    #: and a state added there would need ``ALTER TYPE`` here before a result
+    #: that has already happened in the world could be recorded. Validated by
+    #: Pydantic at the boundary, which is where the module docstring's rule
+    #: about open-ended vocabularies puts that job.
+    agent_status: Mapped[str | None] = mapped_column(String(20))
+    #: Why the agent ended where it did, in the words it wrote for a person.
+    #: Ours, not hh's: "letter field not found on the page" is this program
+    #: explaining itself.
+    agent_reason: Mapped[str | None] = mapped_column(Text)
+
+    # ── what this project believed when it sent ───────────────────────
+    #: The match score as of the send, on the project's 0-100 scale. Copied
+    #: out of ``match`` because that row is rewritten by the next scoring run,
+    #: and correlating outcomes against a score that has since moved measures
+    #: nothing. NULL means no match row existed for the active profile, not a
+    #: score of zero.
+    match_score: Mapped[Decimal | None] = mapped_column(Score)
+    #: The bucket that went with it. A column of its own rather than a key
+    #: inside :attr:`match_explanation` because it is the natural GROUP BY for
+    #: "did the strong ones answer more often than the stretches".
+    match_bucket: Mapped[MatchBucket | None] = mapped_column(pg_enum(MatchBucket, "match_bucket"))
+    #: The whole explanation behind that score, shaped as
+    #: ``app.schemas.agent.MatchExplanation``: matched skills, what was
+    #: missing, red flags, the verdict sentence. JSONB because nothing filters
+    #: on it — it is read whole, by a person or by a renderer. The Russian
+    #: one-liner the confirmation card printed is not stored beside it; it is
+    #: ``agent_queue.render_explanation`` of this value, and keeping one source
+    #: is what stops the sentence and the structure drifting apart.
+    match_explanation: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    #: The requirements the posting listed at send time, canonical names, in
+    #: the order the vacancy gave them. The posting is re-crawled and hh's
+    #: ``keySkills`` change; this is what the employer was asking for on the
+    #: day, which is the half of the feedback loop that says which missing
+    #: skill actually costs an answer. NULL means not recorded; ``[]`` means
+    #: recorded, and the posting named none.
+    vacancy_key_skills: Mapped[list[str] | None] = mapped_column(JSONB)
+
+    # ── hh's own words and hh's own numbers ───────────────────────────
+    #: The soft line hh shows beside the response form — «Такой отклик может
+    #: получить отказ», followed by the requirement it names. It is hh's
+    #: analysis of this application against this vacancy, and it names one
+    #: unmet requirement, which is more specific than any similarity this
+    #: project computes. Text, verbatim, never parsed into a verdict of ours:
+    #: a vacancy page is somebody else's site. NULL means hh did not show it.
+    hh_warning: Mapped[str | None] = mapped_column(Text)
+    #: hh's other line, historically the one that stopped a send — the
+    #: resume-visibility demand. Since 2026-09-07 neither line blocks: hh
+    #: accepts those applications, measured, and ``agent/state_page.py``
+    #: carries the record. The two are still separate columns because they say
+    #: different things: this one is about the account and is therefore true of
+    #: every application sent while that setting stands, while
+    #: :attr:`hh_warning` is about this vacancy alone. Merging them would lose
+    #: exactly the distinction that makes either worth reading.
+    hh_blocking_warning: Mapped[str | None] = mapped_column(Text)
+    #: ``negotiations.total`` read off the page after the send: hh's own count
+    #: of applications on this vacancy, and therefore the measured answer to
+    #: "did this send actually happen once". NULL means unmeasured; ``0`` is
+    #: hh saying there are none, and the two must not be added together.
+    hh_negotiations_total: Mapped[int | None] = mapped_column(Integer)
+
+    # ── the outcome, which arrives later and separately ───────────────
+    #: ``topicList[].lastState`` as hh last reported it — ``DISCARD`` was
+    #: observed live. The outcome of the application, in hh's vocabulary
+    #: rather than a verdict of ours: that set is open and hh's, so
+    #: enumerating it here would turn hh adding a state into a failure to
+    #: record something that already happened. An outcome learned some other
+    #: way — a phone call, an email — is not this column; it is
+    #: :attr:`notes`, and it belongs to the person who heard it.
+    hh_last_state: Mapped[str | None] = mapped_column(String(100))
+    #: When that state was read off hh. Set together with it, so the pair is
+    #: always "this outcome, seen on this date" and a dashboard can measure
+    #: time-to-answer from :attr:`sent_at` without guessing.
+    hh_last_state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     vacancy: Mapped[Vacancy] = relationship(back_populates="applications")
 

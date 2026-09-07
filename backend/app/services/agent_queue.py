@@ -32,6 +32,36 @@ deliberately, since a person may track two attempts at the same job — so
 ``app/letters/store.py`` already follows for the same reason. A transaction-
 scoped advisory lock closes the read-then-insert window, so two results posted
 at the same instant cannot both decide the row is missing.
+
+**Where a result is written, since 2026-09-07.** Onto columns of its own. It
+used to be rendered into a marked block inside ``application.notes``, because
+the columns did not exist; the session that shipped that said in its own commit
+message that it was the weakest part of the change. Two things were wrong with
+it. A text blob cannot be filtered, grouped or counted, so the feedback loop
+this data exists for — did the high scores answer more often, which missing
+requirement costs a reply — could not be written at all. And ``notes`` is the
+person's column: rewriting it on every result put machine output in the place
+their own sentences live. Migration ``0008_application_send_record`` added the
+columns and parsed the existing blocks forward. Nothing in this module writes
+``notes`` any more, and nothing else in the backend ever did.
+
+**Two write rules, and the difference between them is the whole design.**
+
+*The send is recorded once.* ``sent_at``, ``sent_letter``, the match snapshot
+and ``vacancy_key_skills`` describe one moment that has already passed. The
+first result reporting ``sent`` writes them; no later result changes them,
+because "what we believed when we sent" cannot be improved by learning more
+afterwards — that is the thing being measured. A column still NULL may be
+filled by a later report, since filling a hole records something that was never
+recorded; a value already there is never overwritten.
+
+*hh's fields are news, and news updates.* ``hh_last_state`` in particular
+arrives days after the send and changes when it does. Each hh column is
+overwritten whenever a result carries a value for it, and left alone when the
+result carries none: a report that did not look is not a report that hh
+withdrew the line. ``hh_last_state_at`` moves only when the state itself
+changes, so it stays the date an outcome was *first* seen, which is what a
+time-to-answer measurement needs.
 """
 
 from collections.abc import Iterable
@@ -49,7 +79,14 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import uuid7
 from app.db.enums import ApplicationStatus, MatchBucket
-from app.db.models import Application, CandidateProfile, Match, Vacancy, VacancySource
+from app.db.models import (
+    Application,
+    CandidateProfile,
+    Match,
+    Vacancy,
+    VacancySkill,
+    VacancySource,
+)
 from app.schemas.agent import (
     CONTRACT_VERSION,
     AgentStatus,
@@ -68,11 +105,12 @@ logger = get_logger(__name__)
 #: ``app/letters/store.py`` reads; see ``app/sources/hh.py`` for what is in it.
 DERIVED_KEY = "_derived"
 
-#: The block :func:`record_results` owns inside ``application.notes``. Anything
-#: the owner wrote above it is left alone; everything from this line down is
-#: rewritten on every result, so posting the same result twice leaves the same
-#: text rather than appending a second copy.
-NOTES_MARKER = "--- агент ---"
+#: The requirement list inside that block, as ``app/sources/hh.py`` writes it
+#: from hh's ``keySkills``. Read by key rather than assumed present: whether the
+#: key is there at all is what separates "the posting listed no requirements"
+#: from "this connector never derived any", and those become ``[]`` and ``NULL``
+#: respectively in the snapshot.
+KEY_SKILLS_KEY = "key_skills"
 
 #: Ceiling on the rendered explanation, and on how many names it lists. The
 #: card the agent prints is a terminal, not a page.
@@ -151,14 +189,19 @@ async def record_results(
     Only ``sent`` moves an application forward, and only ever to ``applied``:
     a row a person has already dragged to ``interview`` is not demoted because
     a later run reported a failure against the same vacancy. Everything else
-    the agent saw — its own status, both of hh's warnings, the negotiation
-    count, the last state — is recorded in the notes block; see
-    :data:`NOTES_MARKER` and the module docstring's note about where that
-    really belongs.
+    the agent saw — its own status and reason, both of hh's lines, hh's
+    negotiation count, hh's last state — lands on a column of its own, and the
+    first ``sent`` also snapshots what this project believed at that moment.
+    The two write rules are in the module docstring; :func:`_upsert` applies
+    them.
+
+    The profile is resolved once for the whole batch rather than per result:
+    it is the same answer every time, and the snapshot needs it.
     """
     acks: list[ResultAck] = []
     unknown: list[str] = []
     accepted = 0
+    profile_id = await active_profile_id(session)
 
     for result in results:
         vacancy_id = await _resolve(session, result.vacancy_id)
@@ -181,7 +224,7 @@ async def record_results(
             )
             continue
 
-        application, created = await _upsert(session, vacancy_id, result)
+        application, created = await _upsert(session, vacancy_id, result, profile_id)
         accepted += 1
         acks.append(
             ResultAck(
@@ -197,10 +240,12 @@ async def record_results(
             application_id=str(application.id),
             created=created,
             status=result.status.value,
-            # hh's sentences are not logged: they quote a page about this
-            # person's own application and belong in the row, not in a log file.
+            # Neither hh's sentences nor the letter is logged. Both are about
+            # one person's own application to one employer, and they belong in
+            # the row rather than in a file that gets pasted into a bug report.
             has_blocking_warning=result.hh_blocking_warning is not None,
             has_soft_warning=result.hh_warning is not None,
+            has_sent_letter=result.sent_letter is not None,
         )
 
     await session.commit()
@@ -469,9 +514,16 @@ async def _resolve(session: AsyncSession, external_id: str) -> UUID | None:
 
 
 async def _upsert(
-    session: AsyncSession, vacancy_id: UUID, result: ApplicationResult
+    session: AsyncSession,
+    vacancy_id: UUID,
+    result: ApplicationResult,
+    profile_id: UUID | None,
 ) -> tuple[Application, bool]:
-    """Update this vacancy's tracker row, or create the first one."""
+    """Update this vacancy's tracker row, or create the first one.
+
+    ``notes`` is not touched here, or anywhere else in this codebase. It is the
+    person's column.
+    """
     await _lock(session, vacancy_id)
     application = await session.scalar(
         select(Application)
@@ -484,6 +536,8 @@ async def _upsert(
         application = Application(id=uuid7(), vacancy_id=vacancy_id)
         session.add(application)
 
+    _record_agent(application, result)
+    _record_hh(application, result)
     if result.status is AgentStatus.SENT:
         # The only forward move this endpoint makes, and only forward: a row
         # somebody already dragged to "interview" stays there.
@@ -494,10 +548,173 @@ async def _upsert(
             # in the same transaction, and an unevaluated SQL expression sitting
             # on a mapped attribute is a value nothing downstream can compare.
             application.applied_at = datetime.now(UTC)
+        await _record_send(session, application, result, vacancy_id, profile_id)
 
-    application.notes = merge_notes(application.notes, render_outcome(result))
     await session.flush()
     return application, created
+
+
+def _record_agent(application: Application, result: ApplicationResult) -> None:
+    """Where the agent left this application, and why.
+
+    ``sent`` is terminal here for the same reason ``interview`` is terminal on
+    the kanban: a run that reports a failure against a vacancy already sent to
+    is reporting on an attempt, not undoing an application that exists in
+    somebody's inbox. Anything short of ``sent`` may be replaced by a later
+    report, because ``queued`` → ``failed`` → ``needs_manual`` is a real
+    progression through one vacancy.
+    """
+    if application.agent_status != AgentStatus.SENT.value:
+        application.agent_status = result.status.value
+    if result.reason is not None:
+        application.agent_reason = result.reason
+
+
+def _record_hh(application: Application, result: ApplicationResult) -> None:
+    """hh's own lines and hh's own numbers, as of this report.
+
+    A field the result does not carry leaves the stored value alone. The agent
+    reports what it saw on one page at one moment; silence in a report is "I
+    did not look" far more often than "hh took the line down", and erasing a
+    warning the owner read is the more expensive of the two mistakes.
+    """
+    if result.hh_warning is not None:
+        application.hh_warning = result.hh_warning
+    if result.hh_blocking_warning is not None:
+        application.hh_blocking_warning = result.hh_blocking_warning
+    if result.negotiations_total is not None:
+        application.hh_negotiations_total = result.negotiations_total
+    if result.last_state is not None and result.last_state != application.hh_last_state:
+        # Stamped only on a change, so the pair reads "this outcome, first seen
+        # on this date". Re-stamping on every identical report would turn
+        # time-to-answer into time-since-the-last-run.
+        application.hh_last_state = result.last_state
+        application.hh_last_state_at = datetime.now(UTC)
+
+
+async def _record_send(
+    session: AsyncSession,
+    application: Application,
+    result: ApplicationResult,
+    vacancy_id: UUID,
+    profile_id: UUID | None,
+) -> None:
+    """The send itself: the moment, the letter, and what we believed.
+
+    Written once. A column still empty may be filled by a later report — that
+    records something never recorded — but a value already there is never
+    replaced, because these five answer "what was true when this went out" and
+    that answer does not improve with hindsight. Re-posting a result, which
+    happens for real whenever a run dies between sending and reporting,
+    therefore changes nothing.
+
+    The snapshot is read at this moment rather than carried on the wire, and
+    that is a known and bounded imprecision: a scoring run between the queue
+    being taken and this result arriving would move ``match`` under us, and
+    what is stored is then the score as of the report rather than the score on
+    the card the human approved. Minutes, against a loop measured in months.
+    The alternative — the agent echoing our own score back at us — would let a
+    float that has been through JSON define a ``Numeric(5, 2)`` of ours, which
+    is a worse thing to be wrong about.
+    """
+    if application.sent_at is None:
+        application.sent_at = datetime.now(UTC)
+    if application.sent_letter is None and result.sent_letter is not None:
+        application.sent_letter = result.sent_letter
+
+    if application.match_score is None and application.match_explanation is None:
+        explanation = await _match_snapshot(session, vacancy_id, profile_id)
+        if explanation is not None:
+            application.match_score = explanation.score
+            application.match_bucket = explanation.bucket
+            # mode="json" so the Decimal scores and the bucket enum become
+            # JSON scalars. The default dump keeps them as Python objects,
+            # which asyncpg refuses to encode into JSONB, and the stored keys
+            # have to be the field names ``MatchExplanation`` reads back.
+            application.match_explanation = explanation.model_dump(mode="json")
+    if application.vacancy_key_skills is None:
+        application.vacancy_key_skills = await _key_skills(session, vacancy_id)
+
+
+async def _match_snapshot(
+    session: AsyncSession, vacancy_id: UUID, profile_id: UUID | None
+) -> MatchExplanation | None:
+    """This project's verdict on this pairing, or None if it never had one.
+
+    None rather than a zero score: an unscored application and a badly scored
+    one must not read the same, which is the same rule the confirmation card
+    follows for the same reason.
+    """
+    if profile_id is None:
+        return None
+    row = (
+        await session.execute(
+            select(
+                Match.score,
+                Match.bucket,
+                Match.verdict,
+                Match.application_angle,
+                Match.component_scores,
+                Match.matched_skills,
+                Match.missing_required,
+                Match.missing_nice,
+                Match.red_flags,
+                Match.experience_gap_years,
+            )
+            .where(Match.profile_id == profile_id)
+            .where(Match.vacancy_id == vacancy_id)
+            .limit(1)
+        )
+    ).first()
+    return None if row is None else _explanation(row)
+
+
+async def _key_skills(session: AsyncSession, vacancy_id: UUID) -> list[str] | None:
+    """What the posting was asking for on the day, or None if nothing said.
+
+    Normalised ``vacancy_skill`` rows first, because that is the schema of
+    record; the connector's derived block second, because nothing writes those
+    rows yet and hh's ``keySkills`` are where the requirement list actually
+    lives today. The same two places, in the same order, that
+    ``app/letters/store._required_skills`` reads — duplicated rather than
+    imported for the reason :func:`active_profile_id` is duplicated: that
+    module's queries answer questions about writing a letter, and this one is
+    not writing one.
+
+    ``[]`` and ``None`` are different answers. ``[]`` is a posting that listed
+    no requirements; ``None`` is a payload that never carried the key, which is
+    what a source other than hh would leave behind, and a dashboard counting
+    "applications where I was missing a listed skill" must not read the second
+    as the first.
+    """
+    rows = (
+        await session.scalars(
+            select(VacancySkill.canonical_name)
+            .where(VacancySkill.vacancy_id == vacancy_id)
+            .order_by(VacancySkill.is_required.desc(), VacancySkill.canonical_name)
+        )
+    ).all()
+    if rows:
+        return [str(name) for name in rows]
+
+    payloads = (
+        await session.scalars(
+            select(VacancySource.raw)
+            .where(VacancySource.vacancy_id == vacancy_id)
+            .order_by(VacancySource.created_at, VacancySource.id)
+        )
+    ).all()
+    stated = False
+    names: list[str] = []
+    for payload in payloads:
+        block = _derived(payload)
+        if KEY_SKILLS_KEY not in block:
+            continue
+        stated = True
+        for item in _iterable(block[KEY_SKILLS_KEY]):
+            if isinstance(item, str) and item.strip() and item.strip() not in names:
+                names.append(item.strip())
+    return names if stated else None
 
 
 async def _lock(session: AsyncSession, vacancy_id: UUID) -> None:
@@ -513,39 +730,3 @@ async def _lock(session: AsyncSession, vacancy_id: UUID) -> None:
     await session.execute(
         text("SELECT pg_advisory_xact_lock(:high, :low)"), {"high": high, "low": low}
     )
-
-
-def render_outcome(result: ApplicationResult) -> str:
-    """The agent's report as labelled lines, in the language the UI speaks.
-
-    Prose because there is nowhere better today: ``application`` holds a status,
-    a timestamp, a note and a letter, and hh's warning is none of those. It
-    wants a column of its own — hh naming one unmet requirement is a fact worth
-    querying, not just reading — and adding one is a model change plus a
-    migration, which this task does not own. Written as one field per line with
-    fixed labels so that the day the column exists, backfilling it is a parse
-    rather than an archaeology.
-    """
-    lines = [NOTES_MARKER, f"статус: {result.status.value}"]
-    if result.reason:
-        lines.append(f"причина: {result.reason}")
-    if result.hh_blocking_warning:
-        lines.append(f"hh, блокирующее требование: {result.hh_blocking_warning}")
-    if result.hh_warning:
-        lines.append(f"hh, предупреждение: {result.hh_warning}")
-    if result.negotiations_total is not None:
-        lines.append(f"откликов по данным hh (negotiations.total): {result.negotiations_total}")
-    if result.last_state:
-        lines.append(f"состояние отклика (lastState): {result.last_state}")
-    return "\n".join(lines)
-
-
-def merge_notes(existing: str | None, block: str) -> str:
-    """Put the agent's block into the notes, replacing its previous one.
-
-    Whatever the owner typed stays above the marker untouched; everything from
-    the marker down is this function's. Replacing rather than appending is what
-    makes a re-posted result idempotent in the text as well as in the row.
-    """
-    kept = (existing or "").split(NOTES_MARKER)[0].rstrip()
-    return f"{kept}\n\n{block}" if kept else block
