@@ -36,6 +36,7 @@ The defects with a test each below, so none can come back quietly:
 
 import io
 import json
+import sys
 import time as time_module
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -88,6 +89,23 @@ SEND_URL = f"https://hh.kz/applicant/vacancy_response?vacancyId={VACANCY}&lux=tr
 #: project's crawler on 2026-09-06 as the target of a 302 answering a plain
 #: ``GET /vacancy/<id>``.
 CHALLENGE_URL = f"https://hh.kz/account/captcha?backurl=%2Fvacancy%2F{VACANCY}&state=7f3c1a"
+
+#: hh's own requests that carry a vacancy id without being an application, in
+#: the shapes measured in ``agent/probe/20260906-181519/probe.json`` — a run
+#: recorded at ``stage: open-form``, which opened the response form and stopped
+#: before submitting. Twenty of that run's twenty-one requests were one of these,
+#: and every one of them used to consume the armed window — and be aborted on
+#: repeat, in the middle of the apply flow.
+#:
+#: Trimmed to the parameters the gate reads: the recorded URLs also carry the
+#: owner's hh id and a browser fingerprint, ``agent/probe/`` is gitignored for
+#: that reason, and this file is committed.
+FURNITURE = (
+    f"https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId={VACANCY}",
+    f"https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId={VACANCY}",
+    f"https://almaty.hh.kz/applicant/blacklist/state?vacancyId={VACANCY}",
+    f"https://almaty.hh.kz/shards/vacancies/feedback/roulette?vacancyId={VACANCY}",
+)
 
 #: The real capture that broke the old detector: an ordinary hh page, 1.18 MB,
 #: taken from the owner's signed-in session. Not committed — it is a logged-in
@@ -194,6 +212,20 @@ def a_state(
     }
 
 
+def a_contradictory_state(vacancy_id: str = VACANCY) -> dict[str, Any]:
+    """hh answering the idempotency question two ways at once.
+
+    ``negotiations.total`` says nothing was sent; ``topicList`` lists a
+    conversation about this very vacancy. Nobody has measured what that means —
+    ``state_page.Negotiations.exists`` says so in as many words — which is why
+    ``exists`` resolves it toward stopping and why, since 2026-09-07, the stop is
+    recorded as a disagreement rather than as an application.
+    """
+    state = a_state(applied=True, vacancy_id=vacancy_id)
+    state["applicantVacancyResponseStatuses"][vacancy_id]["negotiations"]["total"] = 0
+    return state
+
+
 def a_page_html(state: dict[str, Any]) -> str:
     """A vacancy page carrying that state, the way hh boots its frontend."""
     blob = json.dumps(state, ensure_ascii=False).replace("&", "&amp;").replace("<", "&lt;")
@@ -234,6 +266,10 @@ class FakeLocator:
         self.page.used_control = self.control
         if self.page.navigate(f"https://hh.kz{self.page.controls[self.control]}"):
             self.page.visible.update(self.page.modal_parts())
+            # hh talks to itself while its own modal opens. Inside the armed
+            # window, which is where these used to be aborted as repeats.
+            for beacon in self.page.beacons:
+                self.page.navigate(beacon)
 
     def inner_text(self) -> str:
         """The modal's own words, which is what the classifier reads."""
@@ -268,6 +304,17 @@ class FakePage:
     #: The page comes back without hh's boot state at all — a redesign, an error
     #: page, an interstitial. Never guessed at, always a stop.
     blank: bool = False
+    #: What the submit click puts on the wire, if anything this gate can see.
+    #: The default is an application-shaped URL because that is the shape a
+    #: reader expects; ``None`` is the case **nobody has measured** — hh's submit
+    #: going out as an XHR to a path this package does not recognise, or from a
+    #: context ``context.route`` reports differently. It is a scenario rather
+    #: than a claim, and it exists because the flow used to fail the whole
+    #: application on it.
+    send_url: str | None = SEND_URL
+    #: hh's own beacons, fired once the response modal is open — i.e. inside the
+    #: armed window. Measured shapes; see :data:`FURNITURE`.
+    beacons: tuple[str, ...] = ()
     #: What the response modal says once it is open.
     modal_text: str = QUIET_MODAL
     #: What the modal says once «Добавить сопроводительное» has been clicked.
@@ -370,7 +417,8 @@ class FakePage:
                 self.modal_text = self.modal_text_after_letter
             return
         self.sent = True
-        self.navigate(SEND_URL)
+        if self.send_url is not None:
+            self.navigate(self.send_url)
 
     def wait_for_timeout(self, ms: int) -> None:
         """The settle after the irreversible click. Nothing to wait for here."""
@@ -504,6 +552,145 @@ def test_an_application_can_actually_be_sent(ready: None) -> None:
     gate.assert_no_escapes()
 
 
+def test_a_send_hh_confirms_is_not_failed_because_the_gate_did_not_recognise_it(
+    ready: None,
+) -> None:
+    """The blocker fixed on 2026-09-07, in the flow rather than on the gate alone.
+
+    Nothing in this repository records what request hh's «Откликнуться» emits.
+    ``require_progress`` refused when it saw none it recognised — after the click
+    — so an application hh accepted through an unfamiliar request came back as a
+    failure, ``run.py`` wrote ``failed``, and the owner was invited to send it a
+    second time. That is the one mistake that cannot be undone.
+
+    The page here sends nothing the gate can see and hh's own count then says an
+    application exists. Restore the raise and this test fails.
+    """
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), state_after_send=a_state(applied=True), send_url=None)
+
+    submit.submit(page, a_mandate(), gate)
+
+    assert page.sent
+    # The gate saw the form open and nothing else, and says exactly that.
+    assert [click.allowed for click in gate.submit_clicks] == [()]
+    assert gate.submit_clicks[0].refused == ()
+    assert gate.submit_clicks[0].vacancy_id == VACANCY
+
+
+def test_hh_saying_nothing_arrived_is_still_the_thing_that_stops_a_send(ready: None) -> None:
+    """The other direction of the same change, so this is not a check deleted.
+
+    The authority moved to hh's own count rather than being removed. A page whose
+    count does not move after the click is unconfirmed — and unconfirmed says the
+    request may well have gone out, because it may have.
+    """
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), send_url=None)
+
+    with pytest.raises(IdempotencyUnknownError) as raised:
+        submit.submit(page, a_mandate(), gate)
+
+    assert str(raised.value) == submit.UNCONFIRMED
+
+
+def test_hhs_own_beacons_do_not_interfere_with_the_flow_they_arrive_in(ready: None) -> None:
+    """Measured over-match, driven through the real flow.
+
+    ``looks_like_an_application`` answers True for hh's beacon, its blacklist
+    check and its feedback survey, because each carries ``vacancyId``. Inside the
+    armed window that used to mean the first of them consumed a slot, a repeat
+    was aborted as «a second application» in the middle of a real apply flow, and
+    the count that was supposed to say whether the submit click sent anything
+    could be satisfied by a beacon.
+    """
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), state_after_send=a_state(applied=True), beacons=FURNITURE)
+
+    submit.submit(page, a_mandate(), gate)
+
+    assert page.aborted == [], f"the gate refused hh's own page: {gate.refused_because}"
+    # Two application requests — the form and the send — and hh's four beacons
+    # allowed beside them without being counted as either.
+    assert gate.requests_in_window() == 2
+    assert len(gate.allowed) == 2 + len(FURNITURE)
+    assert gate.submit_clicks[0].allowed == (SEND_URL,)
+    gate.assert_no_escapes()
+
+
+def test_a_beacon_with_no_confirmation_behind_it_is_still_refused(ready: None) -> None:
+    """The narrowing must not have become permission. Nothing is armed here."""
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), beacons=FURNITURE)
+
+    page.navigate(FURNITURE[0])
+
+    assert page.aborted == [FURNITURE[0]]
+
+
+def test_hh_contradicting_itself_stops_the_send_and_says_which_answer_it_gave(
+    ready: None,
+) -> None:
+    """The unmeasured half of ``exists`` must not be filed as a measured fact.
+
+    A count of zero beside a list of conversations stops the agent — that is
+    right and it is unchanged. What changed on 2026-09-07 is that it no longer
+    borrows «отклик уже отправлен», which is a claim about something that may not
+    exist, on a shape whose own docstring says nobody has measured it.
+
+    Revert it and this fails on the last two assertions: the sentence becomes the
+    one a genuinely applied vacancy gets, and the vacancy is skipped for ever
+    instead of going to a person who can look.
+    """
+    gate = SubmitGate()
+    page = FakePage(gate, a_contradictory_state())
+
+    with pytest.raises(IdempotencyUnknownError) as raised:
+        submit.submit(page, a_mandate(), gate)
+
+    said = str(raised.value)
+    assert page.clicks == []
+    assert VACANCY in said
+    # Both halves of hh's answer, because the next person to meet this shape is
+    # the one who can measure it.
+    assert "0" in said and "переписка" in said
+    assert "отклик уже отправлен" not in said
+
+
+def test_the_two_ways_hh_can_say_applied_are_recorded_differently(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same stop, two records, and a person can tell which rule produced which.
+
+    The measured answer — hh's own count — skips the vacancy. The disagreement
+    goes to a person, because a skip is terminal (``--requeue`` moves
+    ``needs_manual`` and ``failed`` and nothing else) and burning a vacancy for
+    ever on a shape nobody has measured is not a decision this code is entitled
+    to make.
+    """
+
+    def outcome(name: str, state: dict[str, Any]) -> Entry:
+        """One whole run against one page, in its own directory."""
+        room = tmp_path / name
+        room.mkdir()
+        journal = _prepared_journal(room)
+        gate = SubmitGate()
+        _install(room, monkeypatch, journal, [FakePage(gate, state)])
+        monkeypatch.setattr(run, "SubmitGate", lambda: gate)
+        _confirms(monkeypatch, None)
+        assert run.main(["--send", "--queue", str(room / "queue.json")]) == 0
+        entry = journal.get(VACANCY)
+        assert entry is not None
+        return entry
+
+    measured = outcome("measured", a_state(applied=True))
+    odd = outcome("odd", a_contradictory_state())
+
+    assert measured.status is Status.SKIPPED
+    assert odd.status is Status.NEEDS_MANUAL
+    assert measured.reason != odd.reason
+
+
 def test_a_sent_application_is_recorded_rather_than_crashing(
     ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -525,8 +712,19 @@ def test_a_sent_application_is_recorded_rather_than_crashing(
     assert entry is not None
     assert entry.status is Status.SENT
     results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
+    # Every key of the contract, including the four this run has nothing to put
+    # in: the letter it typed (nothing reports that yet), and hh's outcome
+    # fields, which are filled by ``python -m agent.outcomes`` days later.
     assert results["results"] == [
-        {"vacancy_id": VACANCY, "status": "sent", "reason": None, "hh_warning": None}
+        {
+            "vacancy_id": VACANCY,
+            "status": "sent",
+            "reason": None,
+            "sent_letter": None,
+            "hh_warning": None,
+            "negotiations_total": None,
+            "last_state": None,
+        }
     ]
     assert "Отправлено: 1" in capsys.readouterr().out
 
@@ -1881,7 +2079,10 @@ def test_a_confirmation_the_journal_will_not_record_is_never_acted_on(
             "vacancy_id": VACANCY,
             "status": Status.FAILED.value,
             "reason": "журнал не принял подтверждение — отправка не начиналась",
+            "sent_letter": None,
             "hh_warning": None,
+            "negotiations_total": None,
+            "last_state": None,
         }
     ]
     assert "журнал не принял" in capsys.readouterr().err
@@ -2075,3 +2276,138 @@ def test_a_card_that_stays_quiet_after_the_letter_is_still_sent(ready: None) -> 
 
     assert selectors.SUBMIT_BUTTON.query in page.clicks
     assert (warnings.visibility, warnings.likely_rejection) == (None, None)
+
+
+# ── that run.main asks a person at all ────────────────────────────────
+#
+# Every other test in this file that drives ``run.main(["--send", …])`` goes
+# through ``_confirms``, which replaces ``run.confirm`` with a stub that mints a
+# mandate for every candidate. That stub is right for those tests — they are
+# about what happens after a person has said yes — but it means the property the
+# whole package exists for was covered by nothing: ``run.main`` could stop
+# calling ``confirm`` altogether and the suite would stay green, because the real
+# prompt was only ever driven in isolation in ``test_boundaries.py``.
+#
+# The tests below drive ``run.main`` with the real :func:`agent.human.confirm`
+# over a scripted stdin. Nothing is stubbed between the typed word and the click.
+
+
+def _run_with_a_person(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    journal: Journal,
+    typed: str,
+) -> FakePage:
+    """``run.main`` with a real confirmation and a scripted person at the keyboard.
+
+    ``confirm`` reads ``sys.stdin`` when it is called with no stream of its own,
+    which is exactly how ``run.main`` calls it — so replacing the module's stdin
+    is what makes this the real prompt rather than a second stub.
+    """
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), state_after_send=a_state(applied=True))
+    _install(tmp_path, monkeypatch, journal, [page])
+    monkeypatch.setattr(run, "SubmitGate", lambda: gate)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(typed))
+    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+    return page
+
+
+def test_run_main_sends_only_after_a_person_types_the_word(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The word is typed, and only then does anything leave.
+
+    Delete the ``confirm`` call from ``run.main`` and this fails: with nobody
+    asked there is no mandate, and without a mandate the gate aborts the
+    navigation that opens the form.
+    """
+    journal = _prepared_journal(tmp_path)
+
+    # An empty line keeps every card, then the word.
+    page = _run_with_a_person(tmp_path, monkeypatch, journal, f"\n{CONFIRM_WORD}\n")
+
+    assert page.sent
+    entry = journal.get(VACANCY)
+    assert entry is not None
+    assert entry.status is Status.SENT
+
+
+@pytest.mark.parametrize(
+    ("typed", "why"),
+    [
+        ("\n\n", "Enter instead of the word"),
+        ("\nда\n", "a different word"),
+        ("\nотправляем это\n", "the word with something after it"),
+        ("", "stdin closed before the drop line — a pipe, a cron job, nobody there"),
+        ("\n", "stdin closed at the confirmation itself"),
+        ("1\n", "every card dropped, so there is nothing left to confirm"),
+    ],
+)
+def test_run_main_sends_nothing_when_the_word_is_not_typed(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, typed: str, why: str
+) -> None:
+    """Every way of not answering, driven through the whole program.
+
+    Each of these ends the run at zero — not answering is a normal outcome, not a
+    failure — with the browser never opened, nothing clicked, and the row left at
+    ``queued`` so the next run offers the vacancy again.
+    """
+    journal = _prepared_journal(tmp_path)
+
+    page = _run_with_a_person(tmp_path, monkeypatch, journal, typed)
+
+    assert not page.sent, why
+    assert page.clicks == []
+    # Not even the session health check: a refusal ends the run before the
+    # browser is opened at all.
+    assert page.visited == []
+    entry = journal.get(VACANCY)
+    assert entry is not None
+    assert entry.status is Status.QUEUED
+
+
+def test_the_cards_a_person_answers_are_the_ones_run_main_built(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What was on screen, and that the answer bound itself to it.
+
+    A prompt that asked for a word without printing what it is a word about would
+    satisfy the test above. So this one reads the transcript: the vacancy id and
+    the letter that will be typed into hh's form both have to be on it before the
+    question is asked.
+    """
+    journal = _prepared_journal(tmp_path)
+
+    _run_with_a_person(tmp_path, monkeypatch, journal, f"\n{CONFIRM_WORD}\n")
+
+    shown = capsys.readouterr().out
+    asked = shown.index(CONFIRM_WORD)
+    assert VACANCY in shown[:asked]
+    assert "Здравствуйте!" in shown[:asked]
+
+
+def test_dropping_the_only_card_leaves_the_vacancy_for_next_time(
+    ready: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """«с возможностью выбросить любую», through the program rather than the prompt.
+
+    Dropping the last card cancels the run, and a cancelled run must leave the
+    journal alone: a row written here would be a row no later run could offer
+    again, on a vacancy nobody decided anything about.
+    """
+    journal = _prepared_journal(tmp_path, count=2)
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), state_after_send=a_state(applied=True))
+    _install(tmp_path, monkeypatch, journal, [page])
+    monkeypatch.setattr(run, "SubmitGate", lambda: gate)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"1 2\n{CONFIRM_WORD}\n"))
+
+    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+
+    assert not page.sent
+    assert page.visited == []
+    for offset in (0, 1):
+        entry = journal.get(str(int(VACANCY) + offset))
+        assert entry is not None
+        assert entry.status is Status.QUEUED

@@ -37,8 +37,16 @@ The order below is the safety property, and every line of it earns its place:
    has since changed, and everything hh said about this application while its
    form was open belongs in the record of it. See :func:`_everything_hh_said`.
 10. **Confirm from the page that it went**, and only then let the caller write
-    ``sent``. The gate can say a request left; only hh can say an application
-    exists.
+    ``sent``. Only hh can say an application exists — and as of 2026-09-07 the
+    gate no longer offers a second opinion, because it never had one. It used to
+    raise here when the submit click put no request it recognised on the wire,
+    which required knowing the shape of the request that click emits, which
+    nobody has ever recorded: the only run that clicked submit
+    (``agent/probe/_cdp_send.json``) kept four numbers and no traffic. A guess in
+    that position fails on the far side of the irreversible act — a successful
+    application recorded ``failed``, and a person invited to send it a second
+    time. It is now written down instead of judged; the page re-read below is
+    the answer, and it already tells "sent" from "cannot tell".
 
 **No sentence in the modal stops an application, as of 2026-09-07, and that is
 the change this file most needs its reader to know.** Until then step 7 raised
@@ -70,11 +78,32 @@ the card is on screen, not about what the card says, which is why it survived a
 change that deleted every rule of the second kind.
 
 **Idempotency is a number, before and after** — ``negotiations.total`` from
-``applicantVacancyResponseStatuses``, plus, since 2026-09-07, a non-empty
-``topicList`` beside a zero count, which can only add a stop. Not the presence of
-an apply button, which is there on vacancies that already have an application,
-and not the key spelled ``alreadyApplied``, which was measured ``false`` on one
-that had one. See ``agent/state_page.py``, which owns that reading.
+``applicantVacancyResponseStatuses``. Not the presence of an apply button, which
+is there on vacancies that already have an application, and not the key spelled
+``alreadyApplied``, which was measured ``false`` on one that had one. See
+``agent/state_page.py``, which owns that reading.
+
+**The two things that can say "applied" are told apart before the send and not
+after it, and the asymmetry is deliberate.** ``Negotiations.exists`` is true on
+either a ``total`` of one or more — measured, twice, on 2026-09-06 — or a
+non-empty ``topicList`` beside a ``total`` of zero, which its own docstring says
+nobody has measured. Both stop the agent, and that is right. But before
+2026-09-07 they stopped it with the same sentence, «отклик уже отправлен», so a
+person reading the journal could not tell a vacancy hh says was applied to from
+a vacancy where hh contradicted itself and this code chose the cautious reading.
+That is a statistic presented as a measurement. Step 4 now separates them: the
+measured count skips the vacancy, and the disagreement goes to a person with
+:data:`CONTRADICTORY_COUNT`, which says what hh actually answered. It is routed
+to a person rather than skipped because a skip is terminal — ``--requeue`` moves
+``needs_manual`` and ``failed`` and nothing else — and burning a vacancy forever
+on an unmeasured shape is a decision this code is not entitled to make.
+
+After the send the same disagreement is *believed*, in
+:func:`_confirm_the_application_exists`, and that is not an inconsistency. There
+the question is no longer "may we send" but "did the thing we just sent arrive",
+the request has already left the browser, and any trace hh keeps of this vacancy
+is enough to say so. Telling somebody nothing happened is how a vacancy gets
+applied to twice.
 
 **The confirmation re-opens the page rather than re-reading the open one.** hh
 boots its frontend from a JSON blob baked into the document, so an in-page
@@ -186,6 +215,21 @@ UNCONFIRMED = (
     "быть создан — проверьте вакансию руками, прежде чем отправлять снова."
 )
 
+#: Said when hh answers the idempotency question two ways at once: no
+#: applications on this vacancy, and a conversation about this vacancy, in the
+#: same payload. Nobody has measured what that means — see
+#: :attr:`agent.state_page.Negotiations.exists` — so it is neither reported as
+#: an application («отклик уже отправлен» would be a claim about something that
+#: may not exist) nor sent under. It names both halves, because the next person
+#: to meet this shape is the one who can measure it, and a sentence that says
+#: only "hh contradicted itself" tells them nothing they can look up.
+CONTRADICTORY_COUNT = (
+    "hh отвечает про вакансию {vacancy_id} двумя способами сразу: откликов — 0, "
+    "но переписка по этой вакансии у hh есть ({count}). Что это значит, никто не "
+    "проверял, поэтому агент не отправляет и не записывает отклик как уже "
+    "сделанный. Откройте вакансию сами и посмотрите."
+)
+
 #: Said when the modal was open and what was read out of it does not look like
 #: hh's card. Nothing has been sent at this point, and the sentence says so
 #: first: the previous message a person saw in this position was about a request
@@ -263,12 +307,26 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
     # knowable from the queue.
     status = prefilter.read_status(state)
     negotiations = read_negotiations(state, mandate.vacancy_id)
+    if negotiations is not None and negotiations.total == 0 and negotiations.applications:
+        # hh's two answers disagree. ``Negotiations.exists`` resolves that toward
+        # stopping, which is right, but it resolves it *silently* — the vacancy
+        # would be filed under the same sentence as one hh plainly says was
+        # applied to. Asked before ``decide`` because ``decide`` asks
+        # ``already_applied`` first, so this keeps hh's own order of precedence.
+        raise IdempotencyUnknownError(
+            CONTRADICTORY_COUNT.format(
+                vacancy_id=mandate.vacancy_id, count=len(negotiations.applications)
+            )
+        )
     decision = prefilter.decide(
         facts=prefilter.read(state, mandate.vacancy_id),
         closed_for_applicants=status.closed_for_applicants,
         archived=status.archived,
         # A count, not a flag and not an element. ``None`` when the shape was
         # not one this code recognises, which is a stop and not a zero.
+        # Equivalent to ``total >= 1`` by the time this line runs — the other
+        # thing ``exists`` answers true on was raised above — and written as
+        # ``exists`` anyway, so that a rule added to it later still lands here.
         already_applied=None if negotiations is None else negotiations.exists,
         has_letter=mandate.letter is not None,
         letter_field_known=selectors.letter_field_is_known(),
@@ -296,15 +354,19 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
             # kept rather than the later one replacing the earlier.
             warnings = _everything_hh_said(warnings, _read_the_form(page, mandate))
 
-        # The irreversible step. Counting the window before and after says
-        # whether this click put anything on the wire; the button's own disabled
-        # state says nothing at all, because it was measured staying enabled
-        # under hh's visibility notice — on a form that then accepted the
-        # application, which is the measurement this whole file turns on.
-        before = gate.requests_in_window()
+        # The irreversible step. What the gate saw of it is written down and
+        # nothing is concluded from it — see :meth:`SubmitGate.note_submit_click`
+        # and step 10 above. Until 2026-09-07 this line raised when the click had
+        # put no request the gate recognised on the wire, and since nobody has
+        # ever recorded what request hh's «Откликнуться» emits, that was a guess
+        # able to report a **successful** application as a failure and invite the
+        # owner to send it again. The button's own disabled state says nothing
+        # either: it was measured staying enabled under hh's visibility notice,
+        # on a form that then accepted the application.
+        mark = gate.mark()
         page.click(selectors.SUBMIT_BUTTON.query)
         page.wait_for_timeout(SEND_SETTLE_MS)
-        gate.require_progress(mandate, since=before)
+        gate.note_submit_click(mandate, since=mark)
 
     _confirm_the_application_exists(page, mandate)
     return warnings
@@ -446,6 +508,11 @@ def _confirm_the_application_exists(page: Any, mandate: SendMandate) -> None:
     "not sent" — including a challenge, which at this moment would arrive as an
     unreadable page. The request has already left the browser and a caller told
     that nothing happened is a caller that offers this vacancy again tomorrow.
+
+    ``exists`` is used whole here, unmeasured half included, and the pre-send
+    check above deliberately does not. Same reason both ways round: a trace hh
+    keeps of this vacancy, whatever it turns out to mean, is not a reason to tell
+    the owner their application never left. See the module docstring.
     """
     try:
         open_hh_page(page, mandate.url, expect_vacancy=mandate.vacancy_id)

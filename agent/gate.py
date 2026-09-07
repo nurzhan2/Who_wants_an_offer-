@@ -13,10 +13,12 @@ seen because stage 0 has not been run yet. Guarding the button means enumerating
 them. Guarding the request means there is one place to be right.
 
 So the rule is: **no request whose URL looks like an application may leave
-unless a human-confirmed mandate for that exact vacancy is armed.** Everything
-else on hh proceeds untouched.
+unless a human-confirmed mandate for that exact vacancy is armed.** Anything
+that does not look like one proceeds untouched — which, measured, is most of hh
+but not all of it: see "It refuses more than it counts" below for what that
+sentence used to claim and what it actually does.
 
-Four things this module gets right that the obvious version does not.
+Six things this module gets right that the obvious version does not.
 
 **It matches on the URL, not on the verb.** The first draft of this design
 aborted every non-GET during reconnaissance, on the reasoning that a write is a
@@ -25,13 +27,22 @@ POST. It is not: the apply control measured on 2026-09-06 is
 document navigation, and a method-based guard waves the one dangerous request
 through while blocking harmless telemetry.
 
-**It reads the vacancy id from the whole request, not from the query string.**
-An earlier version parsed ``?vacancyId=`` and treated "no id found" as "fine".
-Measured against the real class it was written to stop, three of four
-cross-vacancy spellings walked through it: the id in a JSON post body, the id in
-a path segment, and the id percent-encoded. :func:`vacancy_ids_in` now unquotes
-and scans the URL *and* the body, and **any** id that is not the mandate's is a
-refusal.
+**Once a request is application-shaped, its vacancy is read from the whole of
+it, not from the query string.** An earlier version parsed ``?vacancyId=`` and
+treated "no id found" as "fine". Measured against the real class it was written
+to stop, three of four cross-vacancy spellings walked through it: the id in a
+JSON post body, the id in a path segment, and the id percent-encoded.
+:func:`vacancy_ids_in` now unquotes and scans the URL *and* the body, and **any**
+id that is not the mandate's is a refusal.
+
+Note the order carefully, because an earlier draft of this paragraph overstated
+it and a reader would have relied on the overstatement. :meth:`SubmitGate.handle`
+decides whether a request is application-*shaped* from its URL alone, and lets
+everything else past before the body is ever read. So the body can only ever
+narrow which vacancy an already-suspect request is about; it can never make an
+innocent-looking URL suspect. Widening that would mean reading the body of every
+request the browser makes — including requests belonging to other tabs and other
+sites — which costs more than it buys, and is not what this does.
 
 **The window is the flow, not one request.** This module used to claim it
 allowed "exactly one application-shaped request per arming", enforced by
@@ -45,8 +56,43 @@ the armed window, the gate aborted the navigation, and the form never loaded.
 
 So the honest property, and the one enforced here, is: **every application
 request happens inside a window a human opened for exactly this vacancy, no
-request repeats inside a window, and the count is reported.** How many requests
-one application takes is hh's business; whose application it is, is ours.
+application request repeats inside a window, and what each submit click put on
+the wire is written down.** How many requests one application takes is hh's
+business; whose application it is, is ours.
+
+**It refuses more than it counts, and the gap between the two is a
+measurement.** Corrected 2026-09-07. :func:`looks_like_an_application` was
+written deliberately broad — "a telemetry beacon that happens to carry a vacancy
+id is refused too, and that costs nothing" — and the first half of that is true
+while the second half is measured false. Twenty-one requests are recorded in
+``agent/probe/20260906-181519/probe.json`` — one vacancy page, opened, apply
+control clicked, stopped before submitting — and *twenty of them* carry
+``vacancyId`` in the query without being an application: hh's beacon seventeen
+times, its blacklist check, its feedback survey, its employer-reviews widget.
+The twenty-first is the response form's own card. Refusing the other twenty
+outside an armed window really is free, and that is left
+exactly as it was. Inside one it was not free at all, and in three ways: hh's
+beacons filled up the window, a repeat of the same beacon was aborted as "a
+second application" in the middle of a real apply flow, and the count that was
+supposed to say whether the submit click sent anything could be satisfied by a
+beacon that had nothing to do with it.
+
+So there are now two questions with two different answers. *Could this be an
+application?* — :func:`looks_like_an_application`, unchanged, broad, and the
+only thing a refusal is ever decided by. *Is this the application?* —
+:func:`is_the_application_itself`, which subtracts the four paths measured
+carrying a vacancy id on a page where nothing was being sent, and which decides
+only what the window counts. Nothing that used to be refused now proceeds.
+
+**It cannot tell you that an application was sent, and it no longer pretends
+to.** Also 2026-09-07; see the note where ``require_progress`` used to be. The
+shape of the request hh's «Откликнуться» emits has never been recorded by
+anybody, so a gate that raised when it saw no such request after the click was
+guessing — and the guess failed on the far side of the irreversible act, which
+is the worst place in this package to be wrong. What is left is
+:meth:`SubmitGate.note_submit_click`, which writes down what the gate saw and
+cannot fail a run. Whether an application exists is answered where it can be
+answered: ``agent/submit.py`` re-opens the vacancy and reads hh's own count.
 
 **It knows what it cannot see.** ``context.route`` does not observe requests
 issued from a service worker, and hh is a large single-page application that may
@@ -71,7 +117,7 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Protocol, final, runtime_checkable
+from typing import Final, Protocol, final, runtime_checkable
 from urllib.parse import unquote, urlsplit
 
 from agent.mandate import SendMandate, verify
@@ -82,6 +128,33 @@ from agent.mandate import SendMandate, verify
 #: answer to be no.
 RESPONSE_PATH = "/applicant/vacancy_response"
 VACANCY_PARAM = "vacancyId"
+
+#: Paths measured carrying ``vacancyId`` while no application was being sent.
+#: Every one of them is in ``requests_allowed`` of
+#: ``agent/probe/20260906-181519/probe.json``, recorded on vacancy 133542745 at
+#: ``stage: open-form`` — the response form was opened and the run stopped
+#: before submitting, so nothing here can be the request that sends.
+#: ``/anatskytics`` is hh's own beacon and accounts for seventeen of that run's
+#: twenty-one requests; the other three are a blacklist check, a feedback survey
+#: and the widget behind the employer-reviews button. The one request in that
+#: run that *is* part of applying — the form's own card, on
+#: ``/applicant/vacancy_response/popup`` — is not here and is matched by path.
+#:
+#: **Read what this list does and does not do.** It never makes a request
+#: allowed: :meth:`SubmitGate.handle` decides refusals from
+#: :func:`looks_like_an_application`, which does not consult it, so a beacon
+#: outside an armed window is aborted today exactly as it was yesterday. All it
+#: does is keep hh's furniture out of the *count* — out of the window, out of
+#: the repeat rule, out of what a submit click is credited with. Matched by
+#: exact path, not by prefix: ``/anatskytics/something`` has never been seen and
+#: a guess in the widening direction is a guess about the one thing this module
+#: is for.
+NOT_THE_APPLICATION: Final[tuple[str, ...]] = (
+    "/anatskytics",
+    "/applicant/blacklist/state",
+    "/shards/vacancies/feedback/roulette",
+    "/employer_reviews/proxy_components/complain_button",
+)
 
 #: ``vacancyId=123``, ``vacancy_id: "123"``, ``"vacancyId":123`` — the spellings
 #: a query string, a form body and a JSON body use for the same thing.
@@ -123,9 +196,15 @@ class Route(Protocol):
         ...
 
 
-@final
-class UnmandatedRequestError(Exception):
-    """Something tried to send an application with no consent armed for it."""
+# **Removed 2026-09-07: ``UnmandatedRequestError``.** Despite the name, nothing
+# unmandated ever raised it — an unmandated request is aborted, silently and by
+# design, because raising in a route handler happens on playwright's thread and
+# would not stop anything. Its one raiser was ``require_progress``, and that is
+# gone (see :meth:`SubmitGate.note_submit_click`). The class is deleted rather
+# than left standing, for the reason ``submit.py`` deleted ``RefusedByHHError``
+# the same day: an exception nothing raises is a promise the next reader
+# believes. Somebody would find it, conclude the gate stops a send by raising,
+# and write code that waits for that.
 
 
 @final
@@ -139,16 +218,54 @@ class InterceptionEscapedError(Exception):
 
 
 def looks_like_an_application(url: str) -> bool:
-    """Whether this URL is the shape hh sends applications through.
+    """Whether this URL *could* be the shape hh sends applications through.
 
-    Deliberately broad. A telemetry beacon that happens to carry a vacancy id
-    is refused too, and that costs nothing; the opposite mistake costs somebody
+    Deliberately broad, and the only question a refusal is ever decided by. A
+    telemetry beacon that happens to carry a vacancy id is refused too; outside
+    an armed window that costs nothing, and the opposite mistake costs somebody
     an application they did not agree to send.
+
+    Left exactly as it was on 2026-09-07 when the over-matching it does was
+    measured, because the over-matching is not the part that was wrong. What was
+    wrong was using this answer for a second question it cannot answer; that
+    question now has :func:`is_the_application_itself`.
     """
     parts = urlsplit(url)
     if parts.path.startswith(RESPONSE_PATH):
         return True
     return f"{VACANCY_PARAM}=" in parts.query
+
+
+def is_the_application_itself(url: str) -> bool:
+    """Whether this request is part of *sending* one, as far as anyone has measured.
+
+    The narrow half of the pair. It decides nothing about whether a request
+    leaves — see :func:`looks_like_an_application` for that — only whether the
+    armed window counts it, which is what the no-repeats rule and every number
+    this module reports are built out of.
+
+    Two clauses, one measured each way. A path under :data:`RESPONSE_PATH` is an
+    application: the apply control measured on 2026-09-06 is
+    ``<a href="/applicant/vacancy_response?vacancyId=…">`` and the card inside
+    the modal arrives on ``GET /applicant/vacancy_response/popup?vacancyId=…``
+    (``agent/probe/form_136131345.json``). Anything else naming a vacancy is
+    treated as an application too — because the request the submit button emits
+    has never been recorded and might be any shape at all — *unless* its path is
+    one of the four in :data:`NOT_THE_APPLICATION`, which were measured carrying
+    a vacancy id on a page where nothing was sent.
+
+    The asymmetry is the point. Being wrong here in the "yes" direction costs a
+    beacon a slot in a report nobody's application depends on. Being wrong in
+    the "no" direction would mean a real second application not being recognised
+    as a repeat, so the exemptions are four exact paths from one recorded run
+    and not a pattern.
+    """
+    parts = urlsplit(url)
+    if parts.path.startswith(RESPONSE_PATH):
+        return True
+    if f"{VACANCY_PARAM}=" not in parts.query:
+        return False
+    return parts.path not in NOT_THE_APPLICATION
 
 
 def post_body(request: Request) -> str | None:
@@ -195,6 +312,49 @@ def vacancy_id_in(url: str) -> str | None:
 
 
 @final
+@dataclass(frozen=True, slots=True)
+class GateMark:
+    """Where the gate's own records stood at one instant.
+
+    Taken immediately before the irreversible click and handed back afterwards,
+    so that what is reported about that click is what happened *during* it
+    rather than everything the process has done since it started. The previous
+    version of this took a bare integer, which is the same idea with one of its
+    two halves missing: it could say how many application requests the click
+    produced but not whether the gate had refused anything while it ran.
+    """
+
+    #: How many application requests the open window had counted.
+    window: int
+    #: How many refusals the gate had recorded, over the whole run.
+    refusals: int
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class SubmitClick:
+    """What the gate saw of one press of hh's «Откликнуться». A record, not a verdict.
+
+    Nothing decides anything from this. It exists because the shape of the
+    request that click emits is the one measurement this package is missing, and
+    an agent that runs on the owner's own account is the only thing in a
+    position to take it. Every field is what the gate observed; none of it is an
+    inference about whether an application exists.
+    """
+
+    vacancy_id: str
+    #: Application URLs the click put through, in order. **Empty does not mean
+    #: nothing was sent.** hh's submit may well be an XHR to a path this module
+    #: does not recognise, and reading an empty tuple as failure is exactly the
+    #: mistake ``require_progress`` made.
+    allowed: tuple[str, ...]
+    #: Refusals recorded while the click was in flight. Unlike the field above,
+    #: this one *is* unambiguous: the gate aborting something in the middle of a
+    #: send is the gate interfering with it, and a person should see that.
+    refused: tuple[str, ...]
+
+
+@final
 @dataclass
 class SubmitGate:
     """Refuses every application-shaped request that has no consent behind it.
@@ -217,6 +377,11 @@ class SubmitGate:
     #: Every application URL the page reported, whether or not it reached
     #: :meth:`handle`. The difference is what :meth:`assert_no_escapes` checks.
     observed: list[str] = field(default_factory=list)
+    #: One entry per submit click, in order. Written by
+    #: :meth:`note_submit_click` and read by nothing here: it is the record of a
+    #: measurement nobody has taken, kept so that the first person to run this
+    #: against hh can read the answer off a finished run instead of guessing.
+    submit_clicks: list[SubmitClick] = field(default_factory=list)
 
     @contextmanager
     def armed(self, mandate: SendMandate) -> Iterator[None]:
@@ -242,8 +407,17 @@ class SubmitGate:
             self._mandate = None
 
     def requests_in_window(self) -> int:
-        """How many application requests the open window has allowed so far."""
+        """How many application requests the open window has allowed so far.
+
+        Counts what :func:`is_the_application_itself` recognises, not everything
+        :meth:`handle` let through: hh puts seventeen beacons on one vacancy page
+        and a count they can move is a count that means nothing.
+        """
         return len(self._window)
+
+    def mark(self) -> GateMark:
+        """Where the records stand right now, to compare against afterwards."""
+        return GateMark(window=len(self._window), refusals=len(self.refused_because))
 
     def _refuse(self, route: Route, url: str, reason: str) -> None:
         """Record why, then abort. Every refusal goes through here."""
@@ -270,12 +444,20 @@ class SubmitGate:
             # link in a "similar vacancies" block. Consent is for one job.
             self._refuse(route, url, f"чужие вакансии в запросе: {sorted(strangers)}")
             return
-        if url in self._window:
-            # Inside one confirmation the same URL is a retry, and a retry of an
-            # application is a second application.
-            self._refuse(route, url, "повтор запроса внутри одного подтверждения")
-            return
-        self._window.append(url)
+        if is_the_application_itself(url):
+            if url in self._window:
+                # Inside one confirmation the same URL is a retry, and a retry of
+                # an application is a second application. Asked only of requests
+                # that could be one: hh repeats its own beacon several times per
+                # page, and this rule used to abort the repeats — real traffic,
+                # aborted in the middle of a real apply flow, because the beacon
+                # carried a vacancy id.
+                self._refuse(route, url, "повтор запроса внутри одного подтверждения")
+                return
+            self._window.append(url)
+        # Everything allowed goes in here, hh's furniture included, because this
+        # list is what :meth:`assert_no_escapes` checks ``observed`` against. The
+        # window above is the narrower record.
         self.allowed.append(url)
         route.continue_()
 
@@ -298,19 +480,45 @@ class SubmitGate:
                 f"покрывает не все пути наружу: {escaped[:3]}"
             )
 
-    def require_progress(self, mandate: SendMandate, *, since: int) -> None:
-        """Confirm the submit click actually put a request on the wire.
+    def note_submit_click(self, mandate: SendMandate, *, since: GateMark) -> SubmitClick:
+        """Write down what the gate saw of one submit click. Never raises.
 
-        Called with the window's size taken just before the click, so it answers
-        "did *that* click send something", not "has anything been sent since the
-        process started" — which is what the previous version, a truthiness test
-        on a list that was never reset, actually answered.
+        **This replaced ``require_progress`` on 2026-09-07, and deleting a check
+        was the fix rather than a shortcut past one.** That method refused —
+        raised ``UnmandatedRequestError`` — when the click had put no
+        application-shaped request through the router. Its rule needed to know
+        what request hh's «Откликнуться» emits, and *nothing in this repository
+        records that*. The only run that ever clicked submit is
+        ``agent/probe/_cdp_send.json``, which kept four numbers and no traffic;
+        the run that captured traffic (``agent/probe/send_136638256.json``)
+        stopped before submitting, and its non-GET list is hh's beacon, its
+        fingerprint endpoint and ``register_interaction``. So the rule was a
+        guess, and it was a guess evaluated on the far side of the irreversible
+        act: if hh's submit is an XHR to a path this module does not recognise —
+        which is likely, since every hh request that *was* recorded is one — then
+        after a **successful** application the raise fires, ``run.py`` records
+        ``failed``, and a person is invited to send an application hh already
+        holds. Applying twice is the one mistake the owner cannot undo, so a
+        check that manufactures it is worse than no check.
 
-        This is a diagnostic, not the authority. Whether an application exists is
-        decided by re-reading the page afterwards; see ``agent/submit.py``.
+        What replaced it is not nothing. Two lines below the old call site,
+        ``submit()`` re-opens the vacancy and reads ``negotiations.total`` out of
+        hh's own boot state — a measured fact, from the party that knows, and it
+        already distinguishes "sent" from "cannot tell" instead of collapsing
+        them into "failed". That was always the authority; the gate was a second
+        opinion with nothing behind it.
+
+        What is kept is the observation, because it is worth something the check
+        never was: run this against hh under a real mandate and
+        :attr:`submit_clicks` contains the shape of the request nobody has
+        measured, next to the vacancy it belonged to. A check that guesses
+        prevents the measurement that would settle it — which is exactly how the
+        visibility-warning refusal survived a day in ``agent/state_page.py``.
         """
-        if self.requests_in_window() <= since:
-            raise UnmandatedRequestError(
-                f"Клик по кнопке отклика на вакансию {mandate.vacancy_id} не отправил "
-                "ни одного запроса — форма изменилась, отправки не было"
-            )
+        click = SubmitClick(
+            vacancy_id=mandate.vacancy_id,
+            allowed=tuple(self._window[since.window :]),
+            refused=tuple(self.refused_because[since.refusals :]),
+        )
+        self.submit_clicks.append(click)
+        return click

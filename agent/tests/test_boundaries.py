@@ -740,6 +740,37 @@ def test_the_selector_check_tells_a_query_from_an_explanation(tmp_path: Path) ->
 # ── the gate ──────────────────────────────────────────────────────────
 
 
+@dataclasses.dataclass
+class _RecordingRoute:
+    """One playwright route, answering the little of its protocol the gate uses."""
+
+    url: str
+    action: str | None = None
+
+    @property
+    def request(self) -> "_RecordingRoute":
+        """The route is its own request here; only ``url`` and the body are read."""
+        return self
+
+    @property
+    def method(self) -> str:
+        """Recorded by the gate, never used by it to decide."""
+        return "GET"
+
+    @property
+    def post_data(self) -> str | None:
+        """No body: the measured apply control is a link."""
+        return None
+
+    def abort(self, error_code: str = "failed") -> None:
+        """Refused."""
+        self.action = "abort"
+
+    def continue_(self) -> None:
+        """Allowed through."""
+        self.action = "continue"
+
+
 def test_the_gate_matches_the_url_and_not_the_method() -> None:
     """The apply control is an ``<a href>``, so a write-blocking guard misses it.
 
@@ -751,6 +782,69 @@ def test_the_gate_matches_the_url_and_not_the_method() -> None:
 
     assert gate_module.looks_like_an_application(apply_url)
     assert not gate_module.looks_like_an_application("https://hh.kz/vacancy/136773120")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://hh.kz/applicant/vacancy_response?vacancyId=136773120",
+        "https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId=136773120",
+        "https://almaty.hh.kz/applicant/blacklist/state?vacancyId=136773120",
+        "https://almaty.hh.kz/shards/vacancies/feedback/roulette?vacancyId=136773120",
+    ],
+)
+def test_the_exemption_list_cannot_become_a_hole_in_consent(
+    url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 2026-09-07 narrowing must not be reachable from the refusal decision.
+
+    ``is_the_application_itself`` subtracts four measured paths so that hh's own
+    furniture does not fill the armed window. That list is the kind of thing a
+    later contributor extends — one more beacon, one more widget — and if a
+    refusal ever consulted it, extending it would be extending the set of
+    requests that can leave the browser with nobody's consent behind them.
+
+    Asserted by making the narrow predicate answer "not an application" for
+    *everything* and requiring an unarmed gate to abort anyway. It is the same
+    trick as the headless check below: not "the source says so" but "the
+    behaviour survives the thing that would break it".
+    """
+    monkeypatch.setattr(gate_module, "is_the_application_itself", lambda _: False)
+    gate = gate_module.SubmitGate()
+    route = _RecordingRoute(url)
+
+    gate.handle(route)
+
+    assert route.action == "abort"
+    assert gate.blocked == [url]
+
+
+def test_the_gate_records_a_submit_click_and_never_judges_it() -> None:
+    """The second job this gate was quietly given, and no longer has.
+
+    ``require_progress`` refused after the irreversible click when it had seen no
+    application-shaped request — a rule that needs to know what hh's «Откликнуться»
+    emits, which nobody has recorded. A successful application would be reported
+    ``failed`` and offered to the owner again, and applying twice is the mistake
+    that cannot be undone. Whether an application exists is hh's answer, read off
+    a re-opened page in ``submit.py``.
+
+    So: no method on the gate may raise about a send, and the record it keeps is
+    a record. Both halves are asserted, the second over an empty click, because
+    an empty click is exactly the case the old rule got wrong.
+    """
+    mandate = a_mandate()
+    gate = gate_module.SubmitGate()
+
+    assert not hasattr(gate, "require_progress")
+    assert not hasattr(gate_module, "UnmandatedRequestError")
+
+    with gate.armed(mandate):
+        click = gate.note_submit_click(mandate, since=gate.mark())
+
+    assert click.allowed == ()
+    assert click.refused == ()
+    assert dataclasses.is_dataclass(click)
 
 
 def test_no_move_out_of_a_terminal_state_is_expressible() -> None:

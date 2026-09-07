@@ -21,7 +21,14 @@ from typing import Any
 import pytest
 
 from agent import selectors, submit
-from agent.gate import SubmitGate, UnmandatedRequestError, vacancy_id_in, vacancy_ids_in
+from agent.gate import (
+    NOT_THE_APPLICATION,
+    SubmitGate,
+    is_the_application_itself,
+    looks_like_an_application,
+    vacancy_id_in,
+    vacancy_ids_in,
+)
 from agent.journal import Entry, Journal
 from agent.letter import DEFAULT_MAX_LENGTH, LetterProblem, UnsafeLetterError, check, inspect
 from agent.mandate import SendMandate, digest, mint, verify
@@ -262,6 +269,40 @@ READ_URL = "https://almaty.hh.kz/vacancy/136773120"
 SEND_URL = "https://hh.kz/applicant/vacancy_response?vacancyId=136773120&lux=true"
 
 
+def hh_furniture(vacancy_id: str) -> tuple[str, ...]:
+    """The four hh endpoints measured carrying a vacancy id with nothing being sent.
+
+    Shapes taken from ``requests_allowed`` in
+    ``agent/probe/20260906-181519/probe.json``, a run recorded at
+    ``stage: open-form``: the response form was opened and the run stopped before
+    submitting, so none of these can be the request that sends. Twenty of that
+    run's twenty-one requests were one of these; the twenty-first was the form's
+    own card, which is application-shaped and matched by path.
+
+    Trimmed to the parameters this module actually reads, and trimmed on purpose:
+    the recorded URLs also carry the owner's hh id, a request id and a browser
+    fingerprint, ``agent/probe/`` is gitignored for exactly that reason, and this
+    file is committed. The vacancy id is substituted rather than kept, so the
+    same shapes can be tested against a mandate.
+    """
+    return (
+        f"https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId={vacancy_id}",
+        f"https://almaty.hh.kz/applicant/blacklist/state?vacancyId={vacancy_id}",
+        f"https://almaty.hh.kz/shards/vacancies/feedback/roulette?vacancyId={vacancy_id}",
+        "https://employer-reviews-front.hh.kz/employer_reviews/proxy_components"
+        f"/complain_button?vacancyId={vacancy_id}",
+    )
+
+
+#: The card inside the response modal, which arrives on its own request after the
+#: apply link is followed. Measured in ``agent/probe/form_136131345.json``; the
+#: fingerprint parameter it carries is dropped for the reason above.
+POPUP_URL = (
+    "https://almaty.hh.kz/applicant/vacancy_response/popup"
+    "?vacancyId=136773120&isTest=no&withoutTest=no&lux=true&alreadyApplied=false"
+)
+
+
 def test_an_application_request_with_no_consent_armed_is_refused() -> None:
     """Including a GET, which is the shape the apply control actually uses."""
     gate = SubmitGate()
@@ -396,29 +437,147 @@ def test_a_request_that_never_reached_the_interceptor_is_reported() -> None:
         gate.assert_no_escapes()
 
 
-def test_the_gate_notices_when_the_submit_click_sent_nothing() -> None:
-    """A click that silently did nothing must not be recorded as an application."""
+def test_a_submit_click_the_gate_did_not_recognise_is_not_treated_as_a_failure() -> None:
+    """The gate does not know what hh's submit emits, so it must not judge one.
+
+    This is the shape of the blocker fixed on 2026-09-07. ``require_progress``
+    raised here, on the far side of the irreversible click, so hh accepting an
+    application through a request this module does not recognise — which is what
+    every hh request anybody *has* recorded looks like — was reported as
+    ``failed`` and the owner was invited to send it again.
+
+    Restore the raise and this test fails: it asserts the call returns, and that
+    the record it leaves says the click produced nothing rather than concluding
+    anything from that.
+    """
     gate = SubmitGate()
     mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
 
     with gate.armed(mandate):
         gate.handle(FakeRoute(APPLY_URL))
-        before = gate.requests_in_window()
-        # ...and the submit click produces nothing at all.
-        with pytest.raises(UnmandatedRequestError):
-            gate.require_progress(mandate, since=before)
+        mark = gate.mark()
+        # ...and the submit click produces nothing the gate can see.
+        click = gate.note_submit_click(mandate, since=mark)
+
+    assert click.allowed == ()
+    assert click.refused == ()
+    assert gate.submit_clicks == [click]
+    assert click.vacancy_id == "136773120"
 
 
-def test_progress_is_measured_from_the_click_not_from_the_whole_window() -> None:
-    """The form-opening request must not be mistaken for the application."""
+def test_what_a_submit_click_put_on_the_wire_is_recorded_against_that_click() -> None:
+    """The record is per click, so the form-opening request is not credited to it.
+
+    That is the whole reason the mark is taken before the click rather than the
+    window being read as a total: the apply link is application-shaped too, and a
+    number that counted it would say "something was sent" on every run.
+    """
     gate = SubmitGate()
     mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
 
     with gate.armed(mandate):
         gate.handle(FakeRoute(APPLY_URL))
-        before = gate.requests_in_window()
+        mark = gate.mark()
         gate.handle(FakeRoute(SEND_URL))
-        gate.require_progress(mandate, since=before)
+        click = gate.note_submit_click(mandate, since=mark)
+
+    assert click.allowed == (SEND_URL,)
+
+
+def test_a_refusal_during_the_send_is_recorded_with_the_click_that_caused_it() -> None:
+    """The half of the record that *is* unambiguous.
+
+    An empty ``allowed`` means nothing — hh's submit may be a shape this module
+    does not recognise. A refusal is different: the gate aborting something in
+    the middle of a send is the gate interfering with the send, and it is the one
+    thing here a person should act on.
+    """
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+
+    with gate.armed(mandate):
+        gate.handle(FakeRoute(SEND_URL))
+        mark = gate.mark()
+        gate.handle(FakeRoute(SEND_URL))  # a repeat, inside one confirmation
+        click = gate.note_submit_click(mandate, since=mark)
+
+    assert click.allowed == ()
+    assert len(click.refused) == 1
+    assert SEND_URL in click.refused[0]
+
+
+def test_hhs_own_furniture_is_still_refused_when_nothing_is_armed() -> None:
+    """The guarantee that must survive the 2026-09-07 narrowing, asserted first.
+
+    Splitting the predicate loosened nothing about refusals: outside an armed
+    window every request that *could* be an application is still aborted, hh's
+    beacons included. That is the direction the whole module is written in —
+    refusing a beacon is free, letting an application out is not.
+    """
+    gate = SubmitGate()
+
+    routes = [FakeRoute(url) for url in hh_furniture("136773120")]
+    for route in routes:
+        gate.handle(route)
+
+    assert [route.action for route in routes] == ["abort"] * 4
+    assert len(gate.blocked) == 4
+
+
+def test_hhs_own_furniture_does_not_fill_the_window_or_count_as_a_repeat() -> None:
+    """Measured: seventeen identical beacons on one page load.
+
+    Under the old rule the first one entered the window and the next sixteen were
+    aborted as «a second application» — real hh traffic, aborted in the middle of
+    a real apply flow, on a page the owner was watching. And the window then
+    reported that plenty had been sent when nothing had.
+    """
+    gate = SubmitGate()
+    mandate = mint(vacancy_id="136773120", url=READ_URL, letter=None, form_digest="d")
+    beacon = hh_furniture("136773120")[0]
+
+    with gate.armed(mandate):
+        routes = [FakeRoute(beacon) for _ in range(17)]
+        for route in routes:
+            gate.handle(route)
+        counted = gate.requests_in_window()
+
+    assert [route.action for route in routes] == ["continue"] * 17
+    assert counted == 0
+    assert gate.blocked == []
+
+
+def test_the_popup_and_the_apply_link_are_both_the_application_itself() -> None:
+    """Both halves of the flow that *was* measured still count, so repeats of them are refused."""
+    assert is_the_application_itself(APPLY_URL)
+    assert is_the_application_itself(POPUP_URL)
+    assert is_the_application_itself(SEND_URL)
+
+
+@pytest.mark.parametrize("url", hh_furniture("136773120"))
+def test_the_two_questions_disagree_exactly_where_it_was_measured(url: str) -> None:
+    """Broad enough to refuse, narrow enough not to be mistaken for a send."""
+    assert looks_like_an_application(url)
+    assert not is_the_application_itself(url)
+
+
+def test_an_hh_endpoint_nobody_measured_still_counts_as_an_application() -> None:
+    """The exemptions are four measured paths, not a rule about telemetry.
+
+    hh's submit request has never been recorded, so any unfamiliar path naming a
+    vacancy has to be treated as one — the alternative is a second application
+    that the repeat rule does not recognise.
+    """
+    unmeasured = "https://almaty.hh.kz/shards/applicant/negotiations?vacancyId=136773120"
+
+    assert is_the_application_itself(unmeasured)
+
+
+@pytest.mark.parametrize("exempt", NOT_THE_APPLICATION)
+def test_an_exemption_covers_its_own_path_and_nothing_below_it(exempt: str) -> None:
+    """Matched exactly. ``/anatskytics/send`` has never been seen and is not exempt."""
+    assert not is_the_application_itself(f"https://almaty.hh.kz{exempt}?vacancyId=136773120")
+    assert is_the_application_itself(f"https://almaty.hh.kz{exempt}/send?vacancyId=136773120")
 
 
 def test_the_vacancy_is_read_out_of_the_url_however_it_is_written() -> None:
