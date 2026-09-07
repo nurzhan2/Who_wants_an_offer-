@@ -31,10 +31,16 @@ follow that is right and stays. What changed is what it is called: a redirect
 into ``/account`` raises :class:`~app.sources.http.HHChallengedError` and stops
 the run for this source, instead of reporting that we built a URL robots.txt
 forbids, which we had not. Nothing is retried, nothing already fetched is
-thrown away, and the position stays where it was, so the next run resumes at
-the page this one was refused. What it does not do is solve the captcha, slow
-down and try again inside the same run, or come back wearing a browser's
-User-Agent.
+thrown away, and the position is written down as far as it is provably safe to
+write it — never onto the page we were refused — so the next run resumes at
+that page rather than at the top of the file. What it does not do is solve the
+captcha, slow down and try again inside the same run, or come back wearing a
+browser's User-Agent.
+
+Corrected 2026-09-07: this paragraph used to say that a challenged run leaves
+the position where it was, which was true and useless, because where it was
+was nowhere. See ``WATERMARK_LAG`` for what the run recorded instead, which
+was nothing at all, and for how many rows that cost.
 
 Only that redirect is recognised, and the gap is written down rather than
 papered over: a challenge delivered as a status code — a 403 whose body holds
@@ -227,17 +233,50 @@ MAX_MARKUP_FAILURES = 3
 #: runs. What a run could not reach is logged, never silently dropped.
 MAX_PAGES_PER_RUN = 1200
 
-#: How far the recorded position lags behind what has been yielded.
+#: How far the recorded position lags behind what has been yielded, in postings.
 #:
 #: A posting is handed to the pipeline long before the pipeline writes it: the
 #: runner accumulates a batch and commits it in one go. A mark that named the
 #: posting just yielded would therefore, after a crash, declare written what was
 #: only ever in memory — and those postings are then never fetched again,
-#: because the mark says they are done. Lagging by more than one of the runner's
-#: batches makes every entry the mark names one that has already been committed.
-#: The number is stated here rather than imported from ``pipeline/``: a
-#: connector must not know how the pipeline batches, only that this exceeds it.
-WATERMARK_LAG = 200
+#: because the mark says they are done.
+#:
+#: The safe value is derivable, so here is the derivation rather than a number
+#: to take on trust. Write ``B`` for the runner's batch size (``UPSERT_BATCH``,
+#: 100). The runner appends every posting it is handed and commits the moment
+#: the batch reaches ``B``, so once ``S`` postings have been handed over it has
+#: committed the first ``floor(S / B) * B`` of them and holds at most ``B - 1``.
+#: The walk advances the mark over an entry when ``stored - before > LAG``,
+#: which is to say when at least ``LAG`` further postings have been handed over
+#: after that entry's own. Call that posting's position in the run ``g``, so
+#: ``S - g >= LAG``. It is committed when ``floor(S / B) * B >= g``, and since
+#: ``floor(S / B) * B > S - B`` it is enough that ``S - B >= g - 1``, which
+#: follows from ``S - g >= LAG`` whenever ``LAG >= B - 1``. So ``B - 1`` is the
+#: smallest lag that cannot name an unwritten posting, and anything above it is
+#: margin. ``stored`` counts one site while the runner's batch counts the whole
+#: run, which only ever helps: sites are walked one after another, so postings
+#: handed over after an entry within its site are a subset of those handed over
+#: after it in the run, and the test the walk applies is therefore the stricter
+#: of the two.
+#:
+#: Corrected 2026-09-07, and the correction is the point. The value was 200 —
+#: two batches — on the reasoning that a connector must not know how the
+#: pipeline batches, only that this exceeds it. What that margin cost was then
+#: measured. A run advances the mark ``max(0, stored - LAG)`` times, so at 200 a
+#: run storing 10, 100, 172 or exactly 200 postings advanced it zero times, left
+#: ``lastmod`` unset, and recorded nothing at any exit. The live run of
+#: 2026-09-06 stored 172 before hh's captcha stopped it. That is why
+#: ``source_state`` was empty rather than stale, why every run re-read the file
+#: from the top, and why the corpus stood at 466 rows against some 13 557 for
+#: the city. The margin was not free; it was the whole cost.
+#:
+#: What guards this against ``UPSERT_BATCH`` growing is not slack — slack fails
+#: by silently recording nothing, which is exactly what happened —
+#: but ``test_the_lag_is_derived_from_the_pipelines_unwritten_window``, which reads
+#: both numbers and fails the build when they cross. The number stays stated
+#: here rather than imported from ``pipeline/``, so that a connector still does
+#: not depend on how the pipeline batches; only its test does.
+WATERMARK_LAG = 100
 
 #: Entries the position may advance over between two writes of it. Every entry
 #: would be a database round trip per page; never would mean a run killed near
@@ -840,6 +879,14 @@ class HHSource(BaseSource):
         # as this generator finishes: the window in which a recorded entry is
         # still unwritten is that hand-off and nothing more. A run that dies
         # earlier records none of these and re-fetches them next time.
+        #
+        # This is the one place the walk records an entry whose posting the
+        # pipeline may still be holding, and it is worth being explicit that the
+        # exception is bought rather than free. A drained file's remainder has
+        # nowhere else to go: hold it back and every future run buys those pages
+        # again, forever. A file cut short by the budget or by a challenge has
+        # somewhere else to go — the next run, which starts there — so those two
+        # exits record the lagged mark and nothing more.
         for tail in tails:
             mark = tail.mark
             for entry in tail.entries:
@@ -933,12 +980,10 @@ class HHSource(BaseSource):
                 )
                 continue
             mark = marks[name]
-            # The position lags the yields. A posting is handed to the pipeline
-            # long before the pipeline writes it — the runner batches — so a
-            # mark that named the posting just yielded would, after a crash,
-            # declare written what was only ever in memory. Lagging by more than
-            # one of those batches makes every entry the mark names one that has
-            # already been committed.
+            # The position lags the yields, by ``WATERMARK_LAG`` postings; the
+            # derivation of that number, and what happened when it was twice as
+            # large as it needed to be, are written out where it is declared.
+            #
             # Each entry is remembered with the number of postings yielded
             # before it. The lag has to be measured in POSTINGS, not in entries:
             # a stretch of entries that yield nothing — taken down, archived,
@@ -947,37 +992,61 @@ class HHSource(BaseSource):
             # corpus this size has such stretches.
             pending: deque[tuple[SitemapEntry, int]] = deque()
             unsaved = 0
-            for index, entry in enumerate(entries):
-                if stop():
-                    logger.info(
-                        "sources.hh.budget_reached",
-                        host=site.host,
-                        file=name,
-                        # What a run could not reach has to be visible, or a
-                        # truncated crawl reads as a completed one.
-                        remaining_in_file=len(entries) - index,
-                        outstanding_on_site=outstanding,
-                    )
-                    await self._save_watermark(site, name, mark)
-                    self._log_site(site, state, budget, outstanding)
-                    return
-                before = state.stored
-                if entry.external_id in state.fetched_head:
-                    # Already bought in the head pass. Walk past it so the mark
-                    # can advance; do not pay for it twice.
-                    pending.append((entry, before))
-                else:
-                    posting = await self._fetch_counted(entry, state)
-                    spend()
-                    pending.append((entry, before))
-                    if posting is not None:
-                        yield posting
-                while pending and state.stored - pending[0][1] > WATERMARK_LAG:
-                    mark = mark.advanced(pending.popleft()[0])
-                    unsaved += 1
-                if unsaved >= WATERMARK_SAVE_EVERY:
-                    await self._save_watermark(site, name, mark)
-                    unsaved = 0
+            try:
+                for index, entry in enumerate(entries):
+                    if stop():
+                        logger.info(
+                            "sources.hh.budget_reached",
+                            host=site.host,
+                            file=name,
+                            # What a run could not reach has to be visible, or a
+                            # truncated crawl reads as a completed one.
+                            remaining_in_file=len(entries) - index,
+                            outstanding_on_site=outstanding,
+                        )
+                        # Everything the lag still holds back is left for the
+                        # next run rather than recorded here, and that is the
+                        # difference between this exit and a drained file. A
+                        # drained file's remainder is held back forever if it is
+                        # not recorded, so ``search_batch`` accepts a hand-off
+                        # window to record it; a truncated file's remainder is
+                        # simply the next run's first entries, bought once more
+                        # and then walked past. A bounded re-buy is not worth a
+                        # window in which the mark names a posting the pipeline
+                        # has not written.
+                        await self._save_watermark(site, name, mark)
+                        self._log_site(site, state, budget, outstanding)
+                        return
+                    before = state.stored
+                    if entry.external_id in state.fetched_head:
+                        # Already bought in the head pass. Walk past it so the
+                        # mark can advance; do not pay for it twice.
+                        pending.append((entry, before))
+                    else:
+                        posting = await self._fetch_counted(entry, state)
+                        spend()
+                        pending.append((entry, before))
+                        if posting is not None:
+                            yield posting
+                    while pending and state.stored - pending[0][1] > WATERMARK_LAG:
+                        mark = mark.advanced(pending.popleft()[0])
+                        unsaved += 1
+                    if unsaved >= WATERMARK_SAVE_EVERY:
+                        await self._save_watermark(site, name, mark)
+                        unsaved = 0
+            except Exception:
+                # The run ends here: hh answered with a check for robots, or it
+                # moved the markup, or the transport gave up on a page. The mark
+                # is safe to write at this instant for exactly the reason it is
+                # safe at any other — it names only entries whose postings are a
+                # full batch behind what has been handed over, and how the run
+                # ends changes nothing about that. Recording it costs one row
+                # and saves the up-to-``WATERMARK_SAVE_EVERY``-minus-one
+                # advances made since the last periodic write, on a source whose
+                # every run so far has ended in precisely this clause. The
+                # exception is re-raised untouched; nothing here classifies it.
+                await self._record_while_unwinding(site, name, mark)
+                raise
             # The file is drained. Its remainder is not recorded here: the
             # postings from it are still in the pipeline's unwritten batch, and
             # a mark naming them would declare written what is only in memory.
@@ -1014,11 +1083,18 @@ class HHSource(BaseSource):
         we parse, which is the failure this connector exists to announce rather
         than absorb.
 
-        The raise leaves the position unsaved past its last periodic write, so
-        the next run re-buys at most ``WATERMARK_SAVE_EVERY`` pages. That is the
-        cheaper half of the trade: catching it here to save the mark would mean
+        Corrected 2026-09-07. This used to say that the raise leaves the
+        position unsaved past its last periodic write, costing at most
+        ``WATERMARK_SAVE_EVERY`` re-bought pages, and that this was the cheaper
+        half of the trade, because catching it to save the mark would mean
         recording progress through a file we have just decided we can no longer
-        read.
+        read. The second half of that is wrong, and the wrongness is worth
+        keeping visible: the mark does not record progress through the file, it
+        records postings already committed to the database. Whether the NEXT
+        page parses has no bearing on whether the last hundred did. So the walk
+        in ``_crawl_site`` now saves the mark as this exception unwinds, and the
+        entry that failed is never in it — the raise happens before that entry
+        is appended to ``pending``, which is the mechanism, not a coincidence.
         """
         state.fetched += 1
         try:
@@ -1377,10 +1453,45 @@ class HHSource(BaseSource):
             return FileWatermark()
 
     async def _save_watermark(self, site: HHSite, name: str, mark: FileWatermark) -> None:
-        """Record the position, if there is one to record."""
+        """Record the position, if there is one to record.
+
+        A mark with no ``lastmod`` names nothing, and writing it would store a
+        row that says "we have covered up to nowhere" — which reads, on the next
+        run, exactly like the absent row it replaced. So it is not written; but
+        it IS logged, because the state it describes is a real one that hid for
+        a month. A walk can read a thousand entries and still hold an empty mark
+        when the lag has not been cleared, and the only way to see that from
+        outside was an empty ``source_state`` table nobody was looking at.
+        """
         if mark.lastmod is None:
+            logger.debug("sources.hh.position_not_advanced", host=site.host, file=name)
             return
         await self.state_set(self._state_key(site, name), mark.model_dump(mode="json"))
+        logger.debug(
+            "sources.hh.position_saved",
+            host=site.host,
+            file=name,
+            through=mark.lastmod.isoformat(),
+            tied_ids=len(mark.ids_at_lastmod),
+        )
+
+    async def _record_while_unwinding(self, site: HHSite, name: str, mark: FileWatermark) -> None:
+        """Save the position as an exception passes through, or say it could not.
+
+        The only failure swallowed here is the position write itself, and it is
+        swallowed because letting it out would replace the exception that
+        actually stopped the run. Those two read completely differently to
+        whoever gets the report: a run stopped by a check for robots is
+        rescheduled, a run stopped by a broken connector sends somebody to read
+        this file. ``pipeline/runner.py`` makes the same trade one layer up when
+        its rescue write fails, and for the same reason. Losing the position
+        costs one file's unsaved stretch, bought again next run; losing the
+        reason costs a person an afternoon.
+        """
+        try:
+            await self._save_watermark(site, name, mark)
+        except Exception:
+            logger.exception("sources.hh.position_not_recorded", host=site.host, file=name)
 
 
 def _is_int(value: Any) -> bool:
