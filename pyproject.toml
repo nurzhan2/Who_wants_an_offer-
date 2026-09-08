@@ -94,6 +94,11 @@ known-first-party = ["app", "factories", "helpers"]
 "scripts/run_pipeline.py" = ["RUF001", "RUF002"]
 "scripts/backfill_skills.py" = ["RUF001", "RUF002"]
 "scripts/run_matching.py" = ["RUF001", "RUF002"]
+# The development seed carries the Russian a person reads on the dashboard —
+# hh's warning lines, the agent's reasons, a cover letter — and those sentences
+# name technologies in Latin, which is what makes every other letter of them
+# "ambiguous". Same reasoning as the scripts above.
+"scripts/seed.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
@@ -119,6 +124,10 @@ known-first-party = ["app", "factories", "helpers"]
 # block the agent rendered in Russian — telling those two apart is the whole
 # subject of the file.
 "backend/tests/test_migration_0008_notes.py" = ["RUF001", "RUF002"]
+# The dashboard tests assert on the Russian a person reads on it — hh's warning
+# line, a city name, a resume that mentions Rust — beside the Latin names of the
+# technologies those sentences are about.
+"backend/tests/test_dashboard.py" = ["RUF001", "RUF002"]
 # Its docstring argues about company forms and city names in the two languages
 # this market writes them in, so the examples are necessarily Cyrillic.
 "backend/app/normalize/fingerprint.py" = ["RUF001", "RUF002"]
