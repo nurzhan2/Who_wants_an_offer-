@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.db.enums import ParseStatus
 from app.db.models import CandidateProfile, ProfileSkill
 from app.schemas.ats import ATSReport
+from app.schemas.dashboard import SkillElsewhere
 from app.schemas.profile import CandidateProfileCreate, CandidateProfileUpdate, SkillCreate
 
 
@@ -56,6 +57,54 @@ class ProfileRepository:
             .options(selectinload(CandidateProfile.skills))
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def list_all(self) -> list[CandidateProfile]:
+        """Every resume ever uploaded, newest first, with its skills.
+
+        The documents screen shows all of them, not only the active one: an
+        older resume is what the "this skill is not in *this* CV" reading is
+        measured against, and a resume whose extraction failed is exactly the
+        row a person needs to see.
+        """
+        stmt = (
+            select(CandidateProfile)
+            .order_by(CandidateProfile.created_at.desc())
+            .options(selectinload(CandidateProfile.skills))
+        )
+        return list((await self.session.execute(stmt)).scalars().all())
+
+    async def skills_elsewhere(self, exclude_profile_id: UUID) -> list[SkillElsewhere]:
+        """Skills that some *other* resume of this owner lists.
+
+        The evidence behind the middle case of the vacancy card: a requirement
+        the scorer counted as missing may be something this person does, which
+        the resume in hand simply never named. An earlier CV saying so is the
+        only evidence in this database that is not the CV being scored.
+
+        Newest resume first, so the caller showing one of them shows the most
+        recent claim rather than an arbitrary one.
+        """
+        stmt = (
+            select(
+                ProfileSkill.canonical_name,
+                ProfileSkill.profile_id,
+                CandidateProfile.resume_filename,
+                CandidateProfile.name,
+            )
+            .join(CandidateProfile, CandidateProfile.id == ProfileSkill.profile_id)
+            .where(ProfileSkill.profile_id != exclude_profile_id)
+            .order_by(CandidateProfile.created_at.desc(), ProfileSkill.canonical_name)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            SkillElsewhere(
+                canonical_name=row.canonical_name,
+                profile_id=row.profile_id,
+                resume_filename=row.resume_filename,
+                profile_name=row.name,
+            )
+            for row in rows
+        ]
 
     async def update(
         self, profile_id: UUID, changes: CandidateProfileUpdate

@@ -61,6 +61,16 @@ LanguageCode = Annotated[
 ]
 
 
+#: Rows per page when the caller does not say, and the most it may ask for.
+#: Here rather than in the repository because they are part of what the API
+#: promises — the list endpoint validates ``limit`` against them and the
+#: repository clamps to them — and a contract cannot be defined inside the layer
+#: that happens to enforce it. The repository imports them back, so its own
+#: name for them keeps working.
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200
+
+
 class ReadModel(BaseModel):
     """Base for every response model; reads straight off ORM instances."""
 
