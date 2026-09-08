@@ -16,6 +16,37 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 
 
 @router.get(
+    "/active",
+    response_model=CandidateProfileRead,
+    summary="The profile everything is scored against",
+)
+async def read_active_profile(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CandidateProfileRead:
+    """The active resume, without having to know its id.
+
+    Declared **above** ``/{profile_id}``: FastAPI matches routes in order, and
+    the other way round "active" would be parsed as a UUID and answered with a
+    422 that mentions neither the profile nor the word.
+
+    It exists because every screen needs it and none of them has an id to start
+    from. v1 is single-user, so "active" is a flag rather than a session; when
+    that changes this endpoint is where the change lands, and no caller has to
+    move.
+    """
+    profile = await ProfileRepository(session).get_active()
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            # Distinct from the 404 below on purpose: "no resume has been
+            # uploaded" and "that id is not a profile" send a person to
+            # completely different places.
+            detail="No active profile. Upload a resume first.",
+        )
+    return CandidateProfileRead.model_validate(profile)
+
+
+@router.get(
     "/{profile_id}",
     response_model=CandidateProfileRead,
     summary="Profile, skills and parse status",

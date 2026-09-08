@@ -17,6 +17,8 @@ from app.db.enums import (
 )
 from app.normalize.fingerprint import VERSION as FINGERPRINT_VERSION
 from app.schemas.common import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
     CountryCode,
     CurrencyCode,
     LanguageCode,
@@ -193,6 +195,21 @@ class VacancyFilter(BaseModel):
     #: Always in USD: compared against the normalised monthly amount, never
     #: against the advertised figure, which is not comparable across currencies.
     salary_min: Decimal | None = Field(default=None, ge=0)
+    #: Whether postings that advertise no salary survive :attr:`salary_min`.
+    #:
+    #: True by default, and the default is the measured one. Five vacancies in
+    #: six on this corpus carry no salary at all — hh does not require one — so
+    #: ``salary_min >= 2000`` on its own answers with the sixth, silently, and a
+    #: person reading that list concludes the market is empty rather than that
+    #: the field is. A filter whose default hides most of the data is a filter
+    #: that lies about it.
+    #:
+    #: Set it to false to ask the other question — "only postings that state a
+    #: figure, and at least this one" — which is a real question and is simply
+    #: not the one somebody typing a floor is usually asking. It does nothing
+    #: unless :attr:`salary_min` is set; the way to see priced or unpriced rows
+    #: on their own is :attr:`has_salary`.
+    include_unpriced: bool = True
     #: Filters by the currency a posting advertises. Independent of salary_min.
     currency: CurrencyCode | None = None
     seniority: list[Seniority] | None = None
@@ -219,3 +236,42 @@ class VacancyFilter(BaseModel):
     def as_cache_key(self) -> tuple[tuple[str, Any], ...]:
         """Stable, hashable representation for caching facet counts."""
         return tuple(sorted(self.model_dump(exclude_none=True).items(), key=lambda kv: kv[0]))
+
+
+class VacancyQuery(VacancyFilter):
+    """Everything the list endpoint reads off the query string.
+
+    The filter plus the paging, in one model, and the reason is a rule of
+    FastAPI rather than a preference: a Pydantic model is expanded into
+    individual query parameters **only when it is the sole query field of the
+    handler** (``request_params_to_args``). Declared beside a ``limit`` or a
+    ``cursor``, the same model silently stops expanding and becomes one opaque
+    parameter named ``filters`` — the endpoint then answers 422 for every
+    request, or, with a default, ignores every filter it is given. Both were
+    observed here before the models were merged.
+
+    :meth:`filters` hands the repository the half it takes, so the layer below
+    keeps taking one validated filter object and knows nothing about paging.
+    """
+
+    #: Keyset position from the previous page's ``next_cursor``. Never an
+    #: offset — see ``app/db/repositories/cursor.py``.
+    cursor: str | None = None
+    limit: int = Field(default=DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE)
+    #: Both cost a second query, so both are asked for rather than assumed. The
+    #: table needs neither; the filter sidebar needs both.
+    with_total: bool = False
+    with_facets: bool = False
+
+    def filters(self) -> VacancyFilter:
+        """Just the filtering half, as the repository's own contract.
+
+        Rebuilt from the filter's own field list rather than validated from
+        ``self``: this is a *subclass* of VacancyFilter, and Pydantic hands a
+        subclass instance straight back, paging and all. That passes every type
+        check and every test that only reads filter fields, and quietly poisons
+        :meth:`VacancyFilter.as_cache_key`, where a cursor would then make every
+        page of one filter a different cache entry.
+        """
+        kept = set(VacancyFilter.model_fields)
+        return VacancyFilter.model_validate(self.model_dump(include=kept))

@@ -36,9 +36,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.base import uuid7
 from app.db.enums import MatchBucket
-from app.db.models import Application, Match, Vacancy, VacancySource
+from app.db.models import Application, Match, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.cursor import Cursor, SortableColumn, keyset_order_by, keyset_where
-from app.schemas.common import CursorPage, Facets, SortField
+from app.schemas.common import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    CursorPage,
+    Facets,
+    SortField,
+)
+from app.schemas.dashboard import HarvestedVacancy, VacancyCounts
 from app.schemas.vacancy import VacancyCreate, VacancyFilter, VacancyListItem
 
 #: Columns refreshed every time a posting is seen again. Anything not listed —
@@ -89,9 +96,6 @@ SORT_VALUE_FIELDS: dict[SortField, str] = {
 type SourceKey = tuple[str, str]
 #: One element of a bulk_upsert batch.
 type UpsertItem = tuple[VacancyCreate, str, str, str, dict[str, Any]]
-
-DEFAULT_PAGE_SIZE = 50
-MAX_PAGE_SIZE = 200
 
 
 @dataclass(frozen=True, slots=True)
@@ -458,6 +462,111 @@ class VacancyRepository:
         stmt = select(Vacancy).where(Vacancy.id == vacancy_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def counts(self, *, profile_id: UUID | None = None) -> VacancyCounts:
+        """How much corpus there is, and how much of it is usable, in one pass.
+
+        One statement over ``vacancy`` with filtered aggregates, plus two small
+        ones for the tables it cannot reach from there. Five separate COUNTs
+        would each see a slightly different database on a corpus a crawl is
+        still writing into, and the overview screen shows them side by side as
+        though they were taken at one moment — so they are.
+
+        ``needs_embedding`` uses the same predicate the embedding step selects
+        rows with, imported rather than restated: a screen that disagreed with
+        the step about which rows need work would report a backlog that never
+        drains, or none while one exists.
+        """
+        totals = (
+            await self.session.execute(
+                select(
+                    func.count().label("total"),
+                    func.count().filter(Vacancy.is_active.is_(True)).label("active"),
+                    func.count().filter(Vacancy.embedding.is_not(None)).label("embedded"),
+                    func.count().filter(_needs_embedding()).label("needs_embedding"),
+                ).select_from(Vacancy)
+            )
+        ).one()
+        skill_rows = int(
+            await self.session.scalar(select(func.count()).select_from(VacancySkill)) or 0
+        )
+        scored = 0
+        if profile_id is not None:
+            scored = int(
+                await self.session.scalar(
+                    select(func.count()).select_from(Match).where(Match.profile_id == profile_id)
+                )
+                or 0
+            )
+        return VacancyCounts(
+            total=totals.total,
+            active=totals.active,
+            embedded=totals.embedded,
+            needs_embedding=totals.needs_embedding,
+            scored=scored,
+            skill_rows=skill_rows,
+        )
+
+    async def first_seen_since(
+        self,
+        since: datetime,
+        *,
+        profile_id: UUID | None = None,
+        limit: int = 50,
+    ) -> tuple[int, list[HarvestedVacancy]]:
+        """Postings this crawl actually bought, by name, newest first.
+
+        Returns the whole count and a page of titles, because the two answer
+        different halves of one question: how much a run brought back, and
+        whether it was worth bringing. On a source that cannot be asked a query
+        — hh's sitemap carries a URL and a date and nothing else — only the
+        titles say whether the budget went on postings for this candidate or on
+        somebody else's.
+
+        ``first_seen_at`` and not ``created_at``: a posting seen again by a
+        later run keeps the date it was first bought, which is exactly the
+        distinction between what a run *found* and what it *paid for*.
+        """
+        where = Vacancy.first_seen_at >= since
+        total = int(
+            await self.session.scalar(select(func.count()).select_from(Vacancy).where(where)) or 0
+        )
+        source = (
+            select(VacancySource.source_slug)
+            .where(VacancySource.vacancy_id == Vacancy.id)
+            .correlate(Vacancy)
+            .order_by(VacancySource.source_slug)
+            .limit(1)
+            .scalar_subquery()
+        )
+        url = (
+            select(VacancySource.url)
+            .where(VacancySource.vacancy_id == Vacancy.id)
+            .correlate(Vacancy)
+            .order_by(VacancySource.source_slug)
+            .limit(1)
+            .scalar_subquery()
+        )
+        rows = (
+            await self.session.execute(
+                select(
+                    Vacancy.id,
+                    Vacancy.title,
+                    Vacancy.company,
+                    Vacancy.first_seen_at,
+                    source.label("source_slug"),
+                    url.label("url"),
+                    Match.score,
+                    Match.bucket,
+                )
+                .select_from(Vacancy)
+                .outerjoin(Match, self._match_on(profile_id))
+                .where(where)
+                .order_by(Vacancy.first_seen_at.desc(), Vacancy.id)
+                .limit(limit)
+            )
+        ).all()
+        return total, [HarvestedVacancy.model_validate(row, from_attributes=True) for row in rows]
+
     async def get_by_fingerprint(self, fingerprint: str) -> Vacancy | None:
         """Look a posting up by its deduplication key."""
         stmt = select(Vacancy).where(Vacancy.fingerprint == fingerprint)
@@ -642,7 +751,16 @@ class VacancyRepository:
         if filters.currency:
             conditions.append(Vacancy.currency == filters.currency)
         if filters.salary_min is not None:
-            conditions.append(Vacancy.salary_min_normalized >= filters.salary_min)
+            # ``>= x`` is false for NULL, so this clause on its own drops every
+            # posting that advertises nothing — which here is most of them. The
+            # OR is what keeps a salary floor from being a "has a salary" filter
+            # nobody asked for; VacancyFilter.include_unpriced argues it.
+            priced = Vacancy.salary_min_normalized >= filters.salary_min
+            conditions.append(
+                or_(priced, Vacancy.salary_min_normalized.is_(None))
+                if filters.include_unpriced
+                else priced
+            )
         if filters.has_salary is True:
             conditions.append(or_(Vacancy.salary_min.is_not(None), Vacancy.salary_max.is_not(None)))
         if filters.has_salary is False:
