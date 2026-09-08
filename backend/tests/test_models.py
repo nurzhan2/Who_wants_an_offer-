@@ -35,7 +35,11 @@ from app.db.enums import (
     MatchBucket,
     ParseStatus,
     PipelineRunStatus,
+    ReferenceKind,
     RemoteType,
+    RuleKind,
+    RuleScope,
+    RuleSeverity,
     SalaryPeriod,
     Seniority,
     SkillEvidence,
@@ -44,9 +48,11 @@ from app.db.enums import (
 from app.db.models import (
     Application,
     CandidateProfile,
+    GenerationRule,
     Match,
     PipelineRun,
     ProfileSkill,
+    ReferenceDocument,
     Vacancy,
     VacancySkill,
     VacancySource,
@@ -82,6 +88,33 @@ def make_match_row(profile_id: UUID, vacancy_id: UUID, **overrides: Any) -> Matc
     }
     values.update(overrides)
     return Match(**values)
+
+
+def make_reference_row(**overrides: Any) -> ReferenceDocument:
+    """A reference document with every non-nullable column filled in."""
+    values: dict[str, Any] = {
+        "kind": ReferenceKind.COVER_LETTER,
+        # English, unlike the strings a person would actually type here: this
+        # file is about what the database does with an enum, and the rest of it
+        # is English, so a Russian sample would only buy a homoglyph exemption.
+        "title": "A letter that got an answer",
+        "text": "Hello! Your vacancy caught my eye.",
+    }
+    values.update(overrides)
+    return ReferenceDocument(**values)
+
+
+def make_rule_row(**overrides: Any) -> GenerationRule:
+    """A rule with every non-nullable column filled in."""
+    values: dict[str, Any] = {
+        "kind": RuleKind.LENGTH,
+        "scope": RuleScope.COVER_LETTER,
+        "severity": RuleSeverity.HARD,
+        "params": {"kind": "length", "unit": "characters", "maximum": 2000},
+        "message": "No longer than 2000 characters",
+    }
+    values.update(overrides)
+    return GenerationRule(**values)
 
 
 async def persist[T](session: AsyncSession, obj: T) -> T:
@@ -168,6 +201,10 @@ ENUM_LOCATIONS: dict[str, tuple[str, str]] = {
     "pipeline_run_status": ("pipeline_run", "status"),
     "parse_status": ("candidate_profile", "parse_status"),
     "skill_evidence": ("profile_skill", "evidence"),
+    "reference_kind": ("reference_document", "kind"),
+    "rule_scope": ("generation_rule", "scope"),
+    "rule_severity": ("generation_rule", "severity"),
+    "rule_kind": ("generation_rule", "kind"),
 }
 
 ENUM_CASES = [
@@ -204,6 +241,19 @@ async def insert_row_carrying(session: AsyncSession, member: StrEnum) -> UUID:
         row = Application(vacancy_id=vacancy.id, status=member)
     elif isinstance(member, PipelineRunStatus):
         row = PipelineRun(source_slug="hh", status=member)
+    elif isinstance(member, ReferenceKind):
+        row = make_reference_row(kind=member)
+    elif isinstance(member, RuleScope):
+        row = make_rule_row(scope=member)
+    elif isinstance(member, RuleSeverity):
+        row = make_rule_row(severity=member)
+    elif isinstance(member, RuleKind):
+        # The kind is stored beside the parameters that describe it, and this
+        # test is about the enum column rather than about the pair agreeing —
+        # ``app.workshop.store.spec_of`` is what refuses a row where they do
+        # not. A bare ``{}`` here would be a row that module rejects, so the
+        # params carry the same kind the column does.
+        row = make_rule_row(kind=member, params={"kind": member.value})
     else:  # pragma: no cover - a new enum without a home here
         raise AssertionError(f"no column mapped for {type(member).__name__}")
     await persist(session, row)
@@ -241,6 +291,8 @@ async def test_enum_member_round_trips_back_into_the_python_member(
         "match": Match,
         "application": Application,
         "pipeline_run": PipelineRun,
+        "reference_document": ReferenceDocument,
+        "generation_rule": GenerationRule,
     }[table]
     row_id = await insert_row_carrying(db_session, member)
     db_session.expunge_all()

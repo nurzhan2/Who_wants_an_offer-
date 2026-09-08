@@ -3,23 +3,42 @@
  * always talks to its own origin and CORS never hides a real failure.
  */
 export class ApiError extends Error {
+  /**
+   * The server's own sentence, when it sent one.
+   *
+   * Derived from `problem` rather than stored beside it: two fields holding the
+   * same string is two things to keep in step, and this one is read by the forms
+   * that show the failure to a person.
+   */
+  readonly detail: string | undefined
+
+  /**
+   * Which fields a 422 objected to, as dotted paths ("email", "links.0.url").
+   *
+   * Kept apart from `detail` because the messages inside a validation error are
+   * written by Pydantic, in English, for a developer. The screen turns these
+   * paths into its own Russian sentence rather than showing text no user of this
+   * product should have to read.
+   */
+  readonly fields: string[] | undefined
+
   constructor(
     message: string,
     readonly status: number,
-    /** The problem document's own explanation, when there was one. */
-    readonly detail?: string,
     /**
-     * Which fields a 422 objected to, as dotted paths ("email", "links.0.url").
+     * The RFC 7807 problem document, when the server sent one.
      *
-     * Kept apart from `detail` because the messages inside a validation error
-     * are written by Pydantic, in English, for a developer. The screen turns
-     * these paths into its own Russian sentence rather than showing text no
-     * user of this product should have to read.
+     * Kept whole rather than flattened into the message because some of them
+     * carry fields a person needs: a rule refused for naming a skill the profile
+     * does not have comes back with `claims`, and "rejected" without those names
+     * is unactionable.
      */
-    readonly fields?: string[],
+    readonly problem?: unknown,
   ) {
     super(message)
     this.name = 'ApiError'
+    this.detail = detailIn(problem)
+    this.fields = fieldsIn(problem)
   }
 }
 
@@ -28,28 +47,23 @@ interface ProblemDocument {
   errors?: { loc?: unknown[] }[]
 }
 
-/**
- * Read what an RFC 7807 problem document says, as far as it says anything.
- *
- * Every error this API raises answers in that envelope. Throwing it away would
- * leave the form saying only that something went wrong, on the one screen where
- * *what* went wrong is the entire message.
- */
-async function readProblem(response: Response): Promise<Pick<ApiError, 'detail' | 'fields'>> {
-  let body: unknown
-  try {
-    body = await response.json()
-  } catch {
-    // A body that is not JSON tells us nothing; the status still does.
-    return {}
+/** The problem document's own explanation, as far as it has one. */
+function detailIn(body: unknown): string | undefined {
+  if (body && typeof body === 'object' && 'detail' in body) {
+    const detail = (body as ProblemDocument).detail
+    if (typeof detail === 'string' && detail) {
+      return detail
+    }
   }
-  if (body === null || typeof body !== 'object') {
-    return {}
-  }
+  return undefined
+}
 
-  const problem = body as ProblemDocument
-  const detail = typeof problem.detail === 'string' ? problem.detail : undefined
-  const fields = (problem.errors ?? [])
+/** The field paths a validation error names, flattened for a form to read. */
+function fieldsIn(body: unknown): string[] | undefined {
+  if (!body || typeof body !== 'object') {
+    return undefined
+  }
+  const paths = ((body as ProblemDocument).errors ?? [])
     .map((error) =>
       (error.loc ?? [])
         // The first segment is always "body" for a request payload, which says
@@ -59,8 +73,25 @@ async function readProblem(response: Response): Promise<Pick<ApiError, 'detail' 
         .join('.'),
     )
     .filter((path) => path !== '')
+  return paths.length === 0 ? undefined : paths
+}
 
-  return { ...(detail === undefined ? {} : { detail }), ...(fields.length === 0 ? {} : { fields }) }
+/** The message a person is shown for a failed request. */
+function detailOf(body: unknown, fallback: string): string {
+  return detailIn(body) ?? fallback
+}
+
+/** Parse a JSON body, tolerating an empty one (204 has no content). */
+async function parse(response: Response): Promise<unknown> {
+  const text = await response.text()
+  if (!text) {
+    return null
+  }
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    return null
+  }
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -68,24 +99,50 @@ export async function apiGet<T>(path: string): Promise<T> {
 
   // 503 is how /health reports a degraded service, and its body is the report.
   if (!response.ok && response.status !== 503) {
-    const problem = await readProblem(response)
-    throw new ApiError(`GET ${path} failed`, response.status, problem.detail, problem.fields)
+    const body = await parse(response)
+    throw new ApiError(detailOf(body, `GET ${path} failed`), response.status, body)
   }
 
   return (await response.json()) as T
 }
 
-export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+/**
+ * A JSON request that changes something.
+ *
+ * One function for POST, PATCH and DELETE because the only thing that differs
+ * between them here is the verb, and three near-identical wrappers is three
+ * places for the error handling to drift.
+ */
+export async function apiSend<T>(
+  method: 'POST' | 'PATCH' | 'DELETE',
+  path: string,
+  body?: unknown,
+): Promise<T> {
   const response = await fetch(path, {
-    method: 'PATCH',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
 
+  const parsed = await parse(response)
   if (!response.ok) {
-    const problem = await readProblem(response)
-    throw new ApiError(`PATCH ${path} failed`, response.status, problem.detail, problem.fields)
+    throw new ApiError(detailOf(parsed, `${method} ${path} failed`), response.status, parsed)
   }
+  return parsed as T
+}
 
-  return (await response.json()) as T
+/** A multipart request, for the one endpoint that takes a file. */
+export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
+  // No Content-Type header: the browser sets it, with the multipart boundary
+  // that a hand-written one would omit.
+  const response = await fetch(path, { method: 'POST', body: form, headers: { Accept: 'application/json' } })
+
+  const parsed = await parse(response)
+  if (!response.ok) {
+    throw new ApiError(detailOf(parsed, `POST ${path} failed`), response.status, parsed)
+  }
+  return parsed as T
 }

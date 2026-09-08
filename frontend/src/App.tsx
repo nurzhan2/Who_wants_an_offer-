@@ -2,11 +2,12 @@ import { useState } from 'react'
 
 import { Dashboard } from '@/pages/Dashboard'
 import { MyData } from '@/pages/MyData'
+import { Workshop } from '@/pages/Workshop'
 
 /**
  * The application shell.
  *
- * A `useState` rather than a router: there are two screens, and adding a
+ * A `useState` rather than a router: there are three screens, and adding a
  * routing dependency to switch between them would be a dependency the product
  * does not need yet. When the dashboard grows deep links — a vacancy, a match —
  * that is the moment to bring one in, and this is a component to replace rather
@@ -17,6 +18,7 @@ import { MyData } from '@/pages/MyData'
 const SCREENS = [
   { id: 'overview', title: 'Обзор' },
   { id: 'my-data', title: 'Мои данные' },
+  { id: 'workshop', title: 'Мастерская' },
 ] as const
 
 type ScreenId = (typeof SCREENS)[number]['id']
@@ -50,7 +52,11 @@ export function App() {
           </nav>
         </header>
 
-        <main>{screen === 'overview' ? <Dashboard /> : <MyData />}</main>
+        <main>
+          {screen === 'overview' && <Dashboard />}
+          {screen === 'my-data' && <MyData />}
+          {screen === 'workshop' && <Workshop />}
+        </main>
       </div>
     </div>
   )

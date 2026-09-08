@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
-import { apiGet, apiPatch } from '@/api/client'
+import { apiGet, apiSend } from '@/api/client'
 import type { ActiveProfile, ProfileContact, ProfileContactUpdate } from '@/types/contact'
 
 /**
@@ -57,7 +57,7 @@ export function useSaveContacts(profileId: string | undefined) {
 
   return useMutation({
     mutationFn: (changes: ProfileContactUpdate) =>
-      apiPatch<ProfileContact>(`/api/v1/profile/${requireId(profileId)}/contacts`, changes),
+      apiSend<ProfileContact>('PATCH', `/api/v1/profile/${requireId(profileId)}/contacts`, changes),
     onSuccess: (saved) => {
       queryClient.setQueryData(contactsKey(saved.profile_id), saved)
     },
