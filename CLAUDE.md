@@ -29,6 +29,7 @@ backend/app/
   sources/        коннекторы; base.py + один файл на источник
   normalize/      маппинг сырых данных в Vacancy, словарь скиллов, дедуп
   matching/       эмбеддинги, rule-based скоринг, LLM re-rank
+  workshop/       эталоны формы и проверяемые правила для CV и писем
   pipeline/       оркестрация запусков, планировщик
   services/       бизнес-логика между api/ и db/
 frontend/src/

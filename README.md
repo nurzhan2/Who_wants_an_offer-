@@ -21,6 +21,14 @@ explainable match score.
    with an explanation of *what exactly you are missing*.
 4. **Act** — dashboard with filters, application kanban, skill-gap analytics,
    Telegram alerts for high-score hits, AI-generated cover letters.
+5. **Steer** — a workshop screen where the owner sets how their own documents
+   are written, without touching code: reference documents to take the *shape*
+   of, and checkable rules ("at least 21 items under Skills", "never this
+   phrase", "no longer than 2 000 characters"). A hard rule is enforced by
+   reading the finished text, not by asking the model; when it cannot be kept
+   truthfully, no letter is written and the rule that stopped it is named. Rules
+   describe form and never facts: one that would have a document claim
+   experience the profile does not list is refused when it is saved.
 
 ## Match score
 
