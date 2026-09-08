@@ -43,6 +43,8 @@ from app.core.config import settings
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.enums import (
     ApplicationStatus,
+    DocumentKind,
+    DocumentSource,
     EmploymentType,
     MatchBucket,
     ParseStatus,
@@ -87,6 +89,13 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     salary_currency: Mapped[str | None] = mapped_column(CHAR(3))
     #: [{"code": "en", "level": "C1"}, ...]
     languages: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
+    #: Degrees and programmes, as ``app.schemas.llm.Education`` records them.
+    #: JSONB and on this table for exactly the reasons ``languages`` is: a short
+    #: list of flat records, read whole, never queried by field. The extraction
+    #: has always produced it and nothing stored it, which cost nothing until a
+    #: generated CV needed an education section — and a CV without one trips
+    #: this project's own ATS audit (``MISSING_SECTIONS``), correctly.
+    education: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, nullable=False)
 
     raw_text: Mapped[str | None] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
@@ -118,6 +127,12 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="profile",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+    experience: Mapped[list["ProfileExperience"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ProfileExperience.position",
     )
     matches: Mapped[list["Match"]] = relationship(
         back_populates="profile",
@@ -253,6 +268,58 @@ class ProfileSkill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     profile: Mapped[CandidateProfile] = relationship(back_populates="skills")
 
 
+class ProfileExperience(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One job from the resume, kept because a tailored CV is built out of these.
+
+    The extraction has always produced ``work_periods`` — company, title, dates,
+    the stack attributed to that job — and until now nothing stored them: they
+    were used to compute ``total_years`` and per-skill years and then dropped on
+    the floor. That was enough while the only consumers were a number and a
+    letter, and it stopped being enough the moment a CV had to be generated,
+    because a CV *is* this list.
+
+    The row is what makes the generator's central promise checkable. A tailored
+    CV may reorder these entries and choose which of them to keep; it may not
+    edit one. Company, title and dates are written into the document from these
+    columns and are never taken from the model's answer — so "the generator does
+    not change dates, company names or job titles" is a property of where the
+    strings come from rather than a rule somebody remembered to check.
+
+    Replaced wholesale on every parse, like ``profile_skill``: a re-parse of a
+    corrected resume must not leave last week's jobs behind.
+    """
+
+    __tablename__ = "profile_experience"
+    __table_args__ = (UniqueConstraint("profile_id", "position"),)
+
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("candidate_profile.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    #: Order in the resume, newest first as resumes are written. Kept so the
+    #: default arrangement is the candidate's own, and so a generated CV can be
+    #: compared against it: a reordering is only visible against an original.
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    company: Mapped[str] = mapped_column(String(300), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    #: "YYYY-MM" as the extraction normalises every date format to. Stored as
+    #: text rather than a Date because a resume that gives only a year genuinely
+    #: does not state a month, and inventing ``-01`` in the column would make
+    #: the two cases indistinguishable to anything reading it back.
+    start: Mapped[str | None] = mapped_column(String(7))
+    #: NULL while the job is current; ``is_current`` says which of the two.
+    end: Mapped[str | None] = mapped_column(String(7))
+    is_current: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    #: Technologies the resume attributes to *this* job. A tailored CV may show
+    #: a subset of it, chosen for the vacancy, and never anything outside it.
+    stack: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    #: fintech, e-commerce, gamedev... as the extraction recorded them.
+    domains: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+
+    profile: Mapped[CandidateProfile] = relationship(back_populates="experience")
+
+
 class Vacancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A job posting, deduplicated across every source that carries it."""
 
@@ -377,6 +444,11 @@ class Vacancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         lazy="selectin",
     )
     matches: Mapped[list["Match"]] = relationship(
+        back_populates="vacancy",
+        cascade="all, delete-orphan",
+        lazy="raise",
+    )
+    documents: Mapped[list["GeneratedDocument"]] = relationship(
         back_populates="vacancy",
         cascade="all, delete-orphan",
         lazy="raise",
@@ -642,6 +714,84 @@ class Application(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     hh_last_state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     vacancy: Mapped[Vacancy] = relationship(back_populates="applications")
+
+
+class GeneratedDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One CV or one cover letter, written for one vacancy, kept for ever.
+
+    **A regeneration adds a row; it never edits one.** That is the whole reason
+    this table exists rather than two more columns on ``application``. The owner
+    edits the rules a document is written under, regenerates, and has to be able
+    to see what that changed — which is impossible if the previous answer was
+    overwritten by the new one. So ``version`` counts up per
+    ``(profile, vacancy, kind)`` and every version stays readable.
+
+    **The file is not stored; the arrangement is.** ``payload`` holds the plan
+    the generator produced — which experience entries in which order, which
+    skills under which heading, the summary — and rendering it is deterministic,
+    so the .docx can be rebuilt byte for byte from this row plus the profile it
+    names. Keeping the bytes instead would double the storage and, worse, would
+    let a stored file drift from the profile it claims to describe with nothing
+    able to detect it. ``text`` is the same document as plain text: it is what
+    the audit read, so it is what has to be kept to explain the audit's answer.
+
+    **``rules_version`` is the point of comparison.** A document is written
+    under a set of hard rules, and the answer to "why is this version different"
+    is usually "because the rules changed". Storing the identity of the rule set
+    in force makes that answerable from the row rather than from memory.
+
+    Nothing here is sent anywhere. A document is generated, audited, stored and
+    handed to the person; sending an application is ``agent/``'s, from a
+    browser, under the user's own account, after a human has confirmed it.
+    """
+
+    __tablename__ = "generated_document"
+    __table_args__ = (UniqueConstraint("profile_id", "vacancy_id", "kind", "version"),)
+
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("candidate_profile.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    vacancy_id: Mapped[UUID] = mapped_column(
+        ForeignKey("vacancy.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[DocumentKind] = mapped_column(
+        pg_enum(DocumentKind, "document_kind"),
+        nullable=False,
+    )
+    #: 1 for the first document of this kind for this pair, then up. Assigned by
+    #: the store under the unique constraint above, so two concurrent
+    #: regenerations cannot both claim the same number.
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: The generator's plan: orderings, selections, the summary. Rendering is a
+    #: pure function of this and the profile.
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    #: The same document as plain text — what the audit below actually read.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: The file format the person downloads. See ``app.documents.render``.
+    file_format: Mapped[str] = mapped_column(String(10), nullable=False)
+    #: The audit of this document, as ``app.schemas.ats.ATSReport``. Not
+    #: nullable: a document that could not be audited is not handed over, so a
+    #: stored row always has the report that let it through.
+    ats_report: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    #: Which rule set the document was written under, so two versions can be
+    #: compared knowing whether the rules moved between them.
+    rules_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Whether a model arranged this document or the rule-based fallback did.
+    source: Mapped[DocumentSource] = mapped_column(
+        pg_enum(DocumentSource, "document_source"),
+        nullable=False,
+    )
+    #: What the checks caught on the way to this version, in order. Empty on a
+    #: clean first answer, and kept even when a later attempt succeeded: "the
+    #: model tried to add Kubernetes" is worth being able to read afterwards.
+    problems: Mapped[list[Any]] = mapped_column(JSONB, default=list, nullable=False)
+
+    profile: Mapped[CandidateProfile] = relationship()
+    vacancy: Mapped[Vacancy] = relationship(back_populates="documents")
 
 
 class PipelineRun(UUIDPrimaryKeyMixin, TimestampMixin, Base):

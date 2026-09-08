@@ -12,9 +12,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.enums import ParseStatus
-from app.db.models import CandidateProfile, ProfileSkill
+from app.db.models import CandidateProfile, ProfileExperience, ProfileSkill
 from app.schemas.ats import ATSReport
-from app.schemas.profile import CandidateProfileCreate, CandidateProfileUpdate, SkillCreate
+from app.schemas.profile import (
+    CandidateProfileCreate,
+    CandidateProfileUpdate,
+    ExperienceCreate,
+    SkillCreate,
+)
 
 
 class ProfileRepository:
@@ -25,9 +30,10 @@ class ProfileRepository:
 
     async def create(self, profile: CandidateProfileCreate) -> CandidateProfile:
         """Persist a freshly extracted profile together with its skills."""
-        payload = profile.model_dump(exclude={"skills"})
+        payload = profile.model_dump(exclude={"skills", "experience"})
         instance = CandidateProfile(**payload)
         instance.skills = [ProfileSkill(**skill.model_dump()) for skill in profile.skills]
+        instance.experience = [ProfileExperience(**job.model_dump()) for job in profile.experience]
         self.session.add(instance)
         await self.session.flush()
         return instance
@@ -103,6 +109,33 @@ class ProfileRepository:
         await self.session.flush()
         return instance
 
+    async def replace_experience(
+        self, profile_id: UUID, experience: Sequence[ExperienceCreate]
+    ) -> CandidateProfile | None:
+        """Swap the whole set of jobs.
+
+        Replacing rather than merging, for the reason ``replace_skills`` gives:
+        the extractor produces a complete list every run, and a merge would keep
+        a job the person has just removed from their resume — which, in a
+        document generated from these rows, is an employer the candidate no
+        longer claims still appearing on their CV.
+
+        The clear-and-flush before the reassignment is load-bearing in exactly
+        the way it is for skills: assigning the new collection in one step lets
+        the unit of work emit INSERTs before the orphan DELETEs, and any
+        ``position`` present in both sets then violates the
+        ``(profile_id, position)`` unique constraint. Re-parsing the same resume
+        overlaps completely, so that is the normal path rather than an edge case.
+        """
+        instance = await self.get(profile_id)
+        if instance is None:
+            return None
+        instance.experience.clear()
+        await self.session.flush()
+        instance.experience = [ProfileExperience(**job.model_dump()) for job in experience]
+        await self.session.flush()
+        return instance
+
     async def set_embedding(self, profile_id: UUID, embedding: Sequence[float]) -> None:
         """Store the resume embedding."""
         stmt = (
@@ -171,10 +204,11 @@ class ProfileRepository:
     ) -> None:
         """Write an extraction onto the reserved row.
 
-        Skills are handled separately by ``replace_skills``; everything else is
-        a plain column update.
+        Skills and jobs are handled separately by ``replace_skills`` and
+        ``replace_experience`` — both are relationships, and both are replaced
+        wholesale rather than merged. Everything else is a plain column update.
         """
-        values = payload.model_dump(exclude={"skills"})
+        values = payload.model_dump(exclude={"skills", "experience"})
         values["updated_at"] = func.now()
         await self.session.execute(
             sa_update(CandidateProfile).where(CandidateProfile.id == profile_id).values(**values)

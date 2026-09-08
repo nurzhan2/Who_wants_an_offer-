@@ -31,6 +31,8 @@ from app.db.base import uuid7
 from app.db.enums import (
     ENUM_TYPE_NAMES,
     ApplicationStatus,
+    DocumentKind,
+    DocumentSource,
     EmploymentType,
     MatchBucket,
     ParseStatus,
@@ -48,6 +50,7 @@ from app.db.enums import (
 from app.db.models import (
     Application,
     CandidateProfile,
+    GeneratedDocument,
     GenerationRule,
     Match,
     PipelineRun,
@@ -115,6 +118,32 @@ def make_rule_row(**overrides: Any) -> GenerationRule:
     }
     values.update(overrides)
     return GenerationRule(**values)
+
+
+async def make_document_row(session: AsyncSession, **overrides: Any) -> GeneratedDocument:
+    """A stored document with every non-nullable column filled in.
+
+    Needs a profile and a vacancy of its own because the row is meaningless
+    without both: a generated document is written for exactly one pair, and the
+    unique constraint that makes regeneration a new version is keyed on them.
+    """
+    profile = await persist(session, CandidateProfile())
+    vacancy = await persist(session, make_vacancy_row(seed=f"doc-{uuid7()}"))
+    values: dict[str, Any] = {
+        "profile_id": profile.id,
+        "vacancy_id": vacancy.id,
+        "kind": DocumentKind.CV,
+        "version": 1,
+        "payload": {},
+        "text": "Nurzhan\nBackend Developer\n",
+        "file_format": "docx",
+        "ats_report": {"score": 100, "source_format": "docx"},
+        "rules_version": "builtin:0000000000",
+        "source": DocumentSource.MODEL,
+        "problems": [],
+    }
+    values.update(overrides)
+    return GeneratedDocument(**values)
 
 
 async def persist[T](session: AsyncSession, obj: T) -> T:
@@ -205,6 +234,8 @@ ENUM_LOCATIONS: dict[str, tuple[str, str]] = {
     "rule_scope": ("generation_rule", "scope"),
     "rule_severity": ("generation_rule", "severity"),
     "rule_kind": ("generation_rule", "kind"),
+    "document_kind": ("generated_document", "kind"),
+    "document_source": ("generated_document", "source"),
 }
 
 ENUM_CASES = [
@@ -254,6 +285,10 @@ async def insert_row_carrying(session: AsyncSession, member: StrEnum) -> UUID:
         # not. A bare ``{}`` here would be a row that module rejects, so the
         # params carry the same kind the column does.
         row = make_rule_row(kind=member, params={"kind": member.value})
+    elif isinstance(member, DocumentKind):
+        row = await make_document_row(session, kind=member)
+    elif isinstance(member, DocumentSource):
+        row = await make_document_row(session, source=member)
     else:  # pragma: no cover - a new enum without a home here
         raise AssertionError(f"no column mapped for {type(member).__name__}")
     await persist(session, row)
@@ -293,6 +328,7 @@ async def test_enum_member_round_trips_back_into_the_python_member(
         "pipeline_run": PipelineRun,
         "reference_document": ReferenceDocument,
         "generation_rule": GenerationRule,
+        "generated_document": GeneratedDocument,
     }[table]
     row_id = await insert_row_carrying(db_session, member)
     db_session.expunge_all()
