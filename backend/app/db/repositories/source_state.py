@@ -1,6 +1,6 @@
 """Where a source got to last time, keyed by whatever the connector calls it.
 
-Two methods and no cleverness, on purpose. The value is JSONB the connector
+Three methods and no cleverness, on purpose. The value is JSONB the connector
 owns, so this module has nothing to validate and nothing to interpret; what it
 does own is the guarantee that a write is one statement, because two sources —
 or two slices of one crawl — can be updating neighbouring keys at the same
@@ -14,6 +14,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import SourceState
+from app.schemas.crawl import SavedState
 
 
 class SourceStateRepository:
@@ -35,6 +36,30 @@ class SourceStateRepository:
         )
         stored = (await self.session.execute(stmt)).scalar_one_or_none()
         return dict(stored) if stored is not None else None
+
+    async def all_for(self, source_slug: str) -> list[SavedState]:
+        """Every row this source owns, oldest key first.
+
+        For the overview screen, which shows a person where each crawl got to.
+        It hands the whole set to the connector — see
+        ``BaseSource.describe_position`` — rather than picking keys apart here,
+        because the keys are the connector's invention and this module is the
+        one place in the project that has promised not to interpret them.
+
+        ``updated_at`` comes along because it is the only record of *when* a
+        position was written, and a position with no date cannot be told from a
+        position that has not moved in a month.
+        """
+        stmt = (
+            select(SourceState.key, SourceState.value, SourceState.updated_at)
+            .where(SourceState.source_slug == source_slug)
+            .order_by(SourceState.key)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [
+            SavedState(key=row.key, value=dict(row.value or {}), updated_at=row.updated_at)
+            for row in rows
+        ]
 
     async def set(self, source_slug: str, key: str, value: dict[str, Any]) -> None:
         """Store a value, replacing whatever was there.

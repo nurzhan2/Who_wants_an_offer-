@@ -32,6 +32,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from app.core.config import settings
 from app.db.enums import EmploymentType, RemoteType
 from app.schemas.common import CountryCode, LanguageCode
+from app.schemas.crawl import CrawlPosition, SavedState
 from app.schemas.vacancy import MAX_POSTED_WITHIN_DAYS
 
 if TYPE_CHECKING:  # pragma: no cover - the runtime import would be a cycle
@@ -289,6 +290,27 @@ class BaseSource(ABC):
         if self._state_save is None:
             return
         await self._state_save(key, value)
+
+    def describe_position(self, stored: Sequence[SavedState]) -> list[CrawlPosition]:
+        """Render this source's saved state for a person to read.
+
+        ``stored`` is every ``source_state`` row this source owns. The
+        decoding lives here rather than in the service that shows it because the
+        keys are the connector's own invention: hh writes one per sitemap file
+        per host, a source that walks a paginated feed would write one per feed,
+        and a reader outside ``sources/`` could only guess between them. That is
+        rule 5 — adding a source must not need edits anywhere else — applied to
+        reading as well as to running.
+
+        Pure and synchronous on purpose: the rows are already in hand, and a
+        method that could reach for a session or a socket would be one the
+        dashboard has to time out.
+
+        The default is "nothing to say", not an error. Most sources fetch one
+        bounded feed and keep no position at all, and there is nothing for them
+        to report.
+        """
+        return []
 
     async def record_progress(self, durable: int) -> None:
         """``durable`` postings from this stream are now written. Persist what that covers.
