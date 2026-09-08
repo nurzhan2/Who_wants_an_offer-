@@ -113,6 +113,7 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/tests/test_normalize_requirements.py" = ["RUF001", "RUF002"]
 "backend/tests/test_matching_rules.py" = ["RUF001", "RUF002"]
 "backend/tests/test_matching_scorer.py" = ["RUF001", "RUF002"]
+"backend/tests/test_script_reports.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_end_to_end.py" = ["RUF001", "RUF002"]
 # Its fixtures are notes a person typed into a tracker, in Russian, next to a
 # block the agent rendered in Russian — telling those two apart is the whole
