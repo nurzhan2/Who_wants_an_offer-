@@ -94,6 +94,9 @@ known-first-party = ["app", "factories", "helpers"]
 "scripts/run_pipeline.py" = ["RUF001", "RUF002"]
 "scripts/backfill_skills.py" = ["RUF001", "RUF002"]
 "scripts/run_matching.py" = ["RUF001", "RUF002"]
+# The Stage 0 catalogue probe prints its whole report in Russian, next to hh's
+# own latin slugs and URLs, so every second word mixes scripts and trips this.
+"scripts/probe_hh_roles.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
