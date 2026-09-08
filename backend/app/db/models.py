@@ -122,6 +122,99 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
 
+class ProfileContact(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """How to reach the candidate: the block printed at the top of every CV.
+
+    **A table of its own rather than columns on ``candidate_profile``**, which
+    was the choice to justify:
+
+    * *Contacts must not travel with the profile.* The profile is loaded by the
+      matcher, embedded, re-scored and serialised on every dashboard request.
+      As columns, a phone number would ride along in every one of those reads
+      and would be one ``from_attributes`` field away from an API response, an
+      LLM prompt or a log line. As a table with no relationship pointing at it
+      from :class:`CandidateProfile`, reaching a phone number takes a
+      deliberate join — the privacy boundary this data needs is enforced by the
+      schema instead of by everyone remembering.
+    * *They change for different reasons.* Every field on ``candidate_profile``
+      is derived from a document and is rewritten wholesale each time that
+      document is re-parsed. These are facts about a person that the owner
+      edits by hand and that must survive exactly such a re-parse; mixing the
+      two in one row means one ``UPDATE ... SET`` away from losing them.
+    * *They are written by a different path.* Nothing in the pipeline writes
+      here except the prefill step, and the API endpoint that writes here
+      touches nothing else. One row, one writer, no partial overlap.
+
+    One row per profile, enforced by a unique constraint on ``profile_id``
+    rather than by making it the primary key: the links table points at this
+    row's own id, so a profile that is deleted and re-created cannot leave
+    links attached to the wrong contact block.
+    """
+
+    __tablename__ = "profile_contact"
+    __table_args__ = (UniqueConstraint("profile_id"),)
+
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("candidate_profile.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    full_name: Mapped[str | None] = mapped_column(String(200))
+    phone: Mapped[str | None] = mapped_column(String(64))
+    email: Mapped[str | None] = mapped_column(String(320))
+    city: Mapped[str | None] = mapped_column(String(120))
+
+    # One flag per field, not one flag for the row. Prefill fills the gaps a
+    # person has not filled in themselves, so it has to know which gaps those
+    # are: a correction to the phone number must not freeze the email address
+    # the resume would have supplied.
+    full_name_edited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    phone_edited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    email_edited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    city_edited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    links: Mapped[list["ProfileContactLink"]] = relationship(
+        back_populates="contact",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ProfileContactLink.position",
+    )
+
+
+class ProfileContactLink(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One address the candidate can be looked up at.
+
+    Rows rather than columns because the set is open. ``github``, ``telegram``
+    and ``linkedin`` are what this market asks for today; the next resume adds
+    a personal site, a portfolio, a package registry — and none of those should
+    cost a migration. ``kind`` is a plain slug for the same reason the rest of
+    the schema keeps open vocabularies out of PostgreSQL enums.
+
+    ``position`` preserves the order the owner arranged, which is the order the
+    generated document prints. It is not unique: reordering a list under a
+    unique constraint means a delete-then-insert dance for no benefit.
+    """
+
+    __tablename__ = "profile_contact_link"
+    __table_args__ = (UniqueConstraint("contact_id", "url"),)
+
+    contact_id: Mapped[UUID] = mapped_column(
+        ForeignKey("profile_contact.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    label: Mapped[str | None] = mapped_column(String(60))
+    #: True when a person typed or kept this link. Re-parsing a resume replaces
+    #: only the extracted ones; a link a human put here outlives every upload.
+    is_manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    position: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)
+
+    contact: Mapped[ProfileContact] = relationship(back_populates="links")
+
+
 class ProfileSkill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """One canonicalised skill of the candidate, with depth and recency."""
 
