@@ -24,7 +24,8 @@ import io
 import re
 import statistics
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Any
 
 import docx
@@ -32,7 +33,17 @@ import pdfplumber
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.schemas.ats import ATSCoverage, ATSReport, Finding, FindingCode, Recoverable, Severity
+from app.schemas.ats import (
+    ATSCoverage,
+    ATSKeywords,
+    ATSReport,
+    DocumentKind,
+    DocumentOrigin,
+    Finding,
+    FindingCode,
+    Recoverable,
+    Severity,
+)
 from app.schemas.llm import ProfileExtraction
 
 logger = get_logger(__name__)
@@ -60,6 +71,21 @@ PENALTY: dict[FindingCode, int] = {
     FindingCode.DATES_NOT_EXTRACTABLE: 25,
     FindingCode.TEXT_IN_TABLES: 15,
     FindingCode.MISSING_SECTIONS: 12,
+    # Not a readability defect: this is the document trying to cheat the reader
+    # it is being audited for. It costs more than a broken font because a
+    # tracking system that catches it drops the candidate rather than the file,
+    # and because we will not be the ones who taught them to do it.
+    FindingCode.HIDDEN_TEXT: 60,
+    FindingCode.KEYWORD_STUFFING: 30,
+    # The requirements this variant does not name. Small: the document is
+    # readable and true, it is just answering less of the posting than it could.
+    FindingCode.REQUIREMENTS_NOT_NAMED: 10,
+    FindingCode.DATE_FORMAT_MIXED: 8,
+    FindingCode.LENGTH_OUT_OF_RANGE: 5,
+    # Costs nothing. A break in someone's employment is a fact about their life,
+    # not a defect in their file, and the only thing the audit has to say about
+    # it is what the parser will compute. See :func:`check_gaps`.
+    FindingCode.EMPLOYMENT_GAP: 0,
     FindingCode.FORMAT_NOT_PDF: 0,
 }
 
@@ -134,6 +160,11 @@ class PageFacts:
     line_count: int
     table_words: int
     chars: list[dict[str, Any]]
+    #: Filled shapes on the page. Only :func:`check_hidden_text` reads them, and
+    #: only to answer one question: white text on a dark banner is a design, not
+    #: a hidden keyword block, and without the shape under it the two are the
+    #: same character. Defaulted because a DOCX and a TXT have no shapes.
+    rects: list[dict[str, Any]] = field(default_factory=list)
 
 
 def detect_columns(words: Sequence[dict[str, Any]], width: float) -> list[Column]:
@@ -243,6 +274,7 @@ def gather(content: bytes) -> list[PageFacts]:
                     line_count=line_count,
                     table_words=_count_table_words(page, words),
                     chars=page.chars,
+                    rects=page.rects,
                 )
             )
     return pages
@@ -449,25 +481,498 @@ def check_sections(pages: Sequence[PageFacts]) -> Finding | None:
     )
 
 
+# ── the checks that read the document as a document ────────────────────
+#
+# Everything above asks whether the text comes out. These ask whether what
+# comes out is shaped like a resume a parser can file, and — the one check here
+# that is not about readability at all — whether the document is trying to
+# cheat the reader it is being audited for.
+
+#: Codepoints that occupy no space and draw nothing. In a resume's text layer
+#: they arrive one of two ways: pasted in from a web page, or sprinkled through
+#: a keyword block to stop a human reader noticing it. Either way an employer's
+#: parser reads them as part of the words around them.
+INVISIBLE_CHARS = re.compile(r"[\u00ad\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]")
+#: Below this many, an invisible codepoint is a copy-paste artefact rather than
+#: a technique. Three is the smallest count that cannot be one stray paste.
+MIN_INVISIBLE = 3
+
+#: Words too common to mean anything when repeated. Everything shorter than
+#: three characters is already excluded, which covers most of the Russian ones.
+STOPWORDS = frozenset(
+    [
+        "без",
+        "были",
+        "было",
+        "была",
+        "будет",
+        "всё",
+        "где",
+        "для",
+        "если",
+        "есть",
+        "его",
+        "ещё",
+        "или",
+        "их",
+        "как",
+        "когда",
+        "который",
+        "которые",
+        "меня",
+        "над",
+        "них",
+        "ним",
+        "она",
+        "они",
+        "при",
+        "про",
+        "свою",
+        "так",
+        "там",
+        "того",
+        "тоже",
+        "только",
+        "что",
+        "чтобы",
+        "это",
+        "этом",
+        "and",
+        "are",
+        "but",
+        "для",
+        "for",
+        "from",
+        "has",
+        "have",
+        "his",
+        "her",
+        "its",
+        "not",
+        "our",
+        "that",
+        "the",
+        "them",
+        "then",
+        "they",
+        "this",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "with",
+        "you",
+        "your",
+        "года",
+        "год",
+        "лет",
+        "компания",
+        "компании",
+        "опыт",
+        "работа",
+        "работы",
+        "проект",
+        "проекта",
+    ]
+)
+
+#: A token repeated more often than this in one document is being repeated on
+#: purpose. Measured against the fixtures: the busiest legitimate repeat in a
+#: real one-page resume is a technology named once per job, which is four.
+KEYWORD_REPEAT_LIMIT = 12
+#: The same token this many times in a row is a keyword block whatever its
+#: total count is — "python python python python" is not a sentence.
+CONSECUTIVE_REPEAT_LIMIT = 4
+
+#: How a document writes a date, by the shape of it. Mixing two of these is not
+#: a style problem: a parser recognises the formats it was written for, and a
+#: resume that uses two has a chance of being read under only one of them.
+DATE_STYLES: dict[str, re.Pattern[str]] = {
+    "MM.YYYY": re.compile(r"\b(?:0?[1-9]|1[0-2])[./-](?:19|20)\d{2}\b"),
+    "YYYY-MM": re.compile(r"\b(?:19|20)\d{2}[./-](?:0?[1-9]|1[0-2])\b"),
+    "месяц ГГГГ": re.compile(
+        r"\b(?:янв|фев|мар|апр|мая|май|июн|июл|авг|сен|окт|ноя|дек"
+        r"|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[а-яa-z]*\.?\s+(?:19|20)\d{2}\b",
+        re.IGNORECASE,
+    ),
+}
+#: One date in a second format is a typo; two is a habit the document is built
+#: on, and only the second is worth telling somebody to go and fix.
+MIN_MINORITY_DATES = 2
+
+#: Months of silence a parser reads as a break in employment.
+GAP_MONTHS = 12
+
+
+def _luminance(color: object) -> float | None:
+    """How light a pdfplumber colour is, 0.0 black to 1.0 white.
+
+    Handles the three shapes a PDF states a colour in — grey, RGB, CMYK — and
+    returns ``None`` for anything else, including the ``None`` a page uses to
+    mean "whatever was set before". Guessing at an unknown colour space would
+    mean either inventing hidden text or missing it, and both are worse than
+    saying the check could not read this character.
+    """
+    if isinstance(color, (int, float)) and not isinstance(color, bool):
+        return max(0.0, min(1.0, float(color)))
+    if not isinstance(color, (list, tuple)) or not color:
+        return None
+    try:
+        values = [float(component) for component in color]
+    except (TypeError, ValueError):
+        return None
+    if len(values) == 1:
+        return max(0.0, min(1.0, values[0]))
+    if len(values) == 3:
+        red, green, blue = values
+        return max(0.0, min(1.0, 0.299 * red + 0.587 * green + 0.114 * blue))
+    if len(values) == 4:
+        cyan, magenta, yellow, black = values
+        red = (1 - cyan) * (1 - black)
+        green = (1 - magenta) * (1 - black)
+        blue = (1 - yellow) * (1 - black)
+        return max(0.0, min(1.0, 0.299 * red + 0.587 * green + 0.114 * blue))
+    return None
+
+
+def _dark_boxes(page: PageFacts) -> list[tuple[float, float, float, float]]:
+    """Filled shapes dark enough for white text to be readable on them.
+
+    Without this the check would report every resume with a dark header band as
+    hiding text, which is a false critical on a common and entirely honest
+    design — and a false critical tells somebody to rebuild a file that was
+    fine.
+    """
+    boxes: list[tuple[float, float, float, float]] = []
+    for rect in page.rects:
+        light = _luminance(rect.get("non_stroking_color"))
+        if light is None or light > settings.ats_dark_fill_luminance:
+            continue
+        try:
+            boxes.append(
+                (float(rect["x0"]), float(rect["top"]), float(rect["x1"]), float(rect["bottom"]))
+            )
+        except (KeyError, TypeError, ValueError):  # a shape with no usable box
+            continue
+    return boxes
+
+
+def _is_hidden(char: dict[str, Any], dark: Sequence[tuple[float, float, float, float]]) -> bool:
+    """Is this character drawn so a person cannot see it but a parser can?
+
+    Two ways: painted the colour of the page, or set so small it reads as a
+    line of dust. Both are visible to text extraction and to nothing else.
+    """
+    if char.get("text", "").isspace():
+        return False
+    size = char.get("size")
+    if isinstance(size, (int, float)) and 0 < float(size) < settings.ats_min_font_size:
+        return True
+
+    light = _luminance(char.get("non_stroking_color"))
+    if light is None or light < settings.ats_invisible_luminance:
+        return False
+    try:
+        x = (float(char["x0"]) + float(char["x1"])) / 2
+        y = (float(char["top"]) + float(char["bottom"])) / 2
+    except (KeyError, TypeError, ValueError):
+        return True
+    return not any(x0 <= x <= x1 and top <= y <= bottom for x0, top, x1, bottom in dark)
+
+
+def check_hidden_text(pages: Sequence[PageFacts]) -> Finding | None:
+    """Is anything in this document written to be read by machines only?
+
+    This is the one check here that is not about whether a parser copes. White
+    text on white paper, a two-point keyword block, zero-width characters
+    threaded through a paragraph — none of them break extraction, all of them
+    are aimed at it, and every applicant tracking system worth the name has been
+    catching them for a decade. Being caught does not filter the file, it
+    filters the person.
+
+    So it is reported as a defect, in those words, and the fix says to delete
+    it. The audit's whole claim on somebody's trust is that it tells them what
+    the machine sees; an audit that noticed this and stayed quiet — or worse,
+    framed it as working — would be teaching the trick it was asked to detect.
+    """
+    hidden: list[str] = []
+    for page in pages:
+        dark = _dark_boxes(page)
+        hidden.extend(char.get("text", "") for char in page.chars if _is_hidden(char, dark))
+
+    text = "".join(page.text for page in pages)
+    invisible = INVISIBLE_CHARS.findall(text)
+    if len(hidden) < settings.ats_hidden_char_limit and len(invisible) < MIN_INVISIBLE:
+        return None
+
+    if len(hidden) >= settings.ats_hidden_char_limit:
+        what = (
+            f"{len(hidden)} символов набраны цветом фона или размером, который человек не разглядит"
+        )
+        example = "".join(hidden)[:100]
+    else:
+        what = f"{len(invisible)} невидимых символов вставлены внутрь текста"
+        example = None
+    return _finding(
+        FindingCode.HIDDEN_TEXT,
+        Severity.CRITICAL,
+        "В документе есть скрытый текст",
+        f"{what}. Робот их читает, человек — нет. Это распознаётся как попытка "
+        "обмануть отбор: системы отслеживания кандидатов сравнивают видимый "
+        "слой с текстовым и помечают такие резюме, после чего отклоняют не "
+        "файл, а кандидата.",
+        "Удали скрытый блок целиком. Ключевые слова работают только тогда, "
+        "когда они написаны в тексте, который человек прочитает и сможет "
+        "подтвердить на собеседовании.",
+        example,
+    )
+
+
+def _tokens(pages: Sequence[PageFacts]) -> list[str]:
+    """Words of the document, folded, short ones and stopwords dropped."""
+    text = "\n".join(page.text for page in pages)
+    return [
+        word
+        for word in re.findall(r"[^\W_]{3,}", text.casefold(), re.UNICODE)
+        if word not in STOPWORDS
+    ]
+
+
+def check_stuffing(pages: Sequence[PageFacts]) -> Finding | None:
+    """Is the same word repeated past the point of meaning anything?
+
+    The other half of the boundary this audit refuses to cross. Keyword stuffing
+    is the advice the internet gives, it is what a generator optimising for a
+    coverage number would converge on, and it is what this check exists to stop
+    — including on documents this system wrote itself.
+    """
+    tokens = _tokens(pages)
+    if not tokens:
+        return None
+
+    counts: dict[str, int] = {}
+    run_token, run, longest_run, worst_run_token = "", 0, 0, ""
+    for token in tokens:
+        counts[token] = counts.get(token, 0) + 1
+        run = run + 1 if token == run_token else 1
+        run_token = token
+        if run > longest_run:
+            longest_run, worst_run_token = run, token
+
+    repeated = sorted(
+        (token for token, count in counts.items() if count > KEYWORD_REPEAT_LIMIT),
+        key=lambda token: -counts[token],
+    )
+    if not repeated and longest_run < CONSECUTIVE_REPEAT_LIMIT:
+        return None
+
+    if repeated:
+        detail = ", ".join(f"«{token}» — {counts[token]} раз" for token in repeated[:5])
+    else:
+        detail = f"«{worst_run_token}» — {longest_run} раз подряд"
+    return _finding(
+        FindingCode.KEYWORD_STUFFING,
+        Severity.WARNING,
+        "Ключевые слова повторяются набивкой",
+        f"В тексте {detail}. Так выглядит не резюме, а список для робота: "
+        "современные ATS считают частоту и понижают документы, где она "
+        "неестественная, а человек, открывший файл следом, прочитает то же самое.",
+        "Оставь каждое название столько раз, сколько его требует смысл — "
+        "обычно по одному разу на место работы, где навык применялся. "
+        "Повторение не увеличивает совпадение, а помечает документ.",
+        detail[:200],
+    )
+
+
+def check_date_format(pages: Sequence[PageFacts]) -> Finding | None:
+    """Does the document write its periods one way, or several?"""
+    text = "\n".join(page.text for page in pages)
+    counts = {style: len(pattern.findall(text)) for style, pattern in DATE_STYLES.items()}
+    used = {style: count for style, count in counts.items() if count}
+    if len(used) < 2:
+        return None
+    # The dominant style is the document's; the question is whether the others
+    # are a habit or a typo. One stray date is not worth an instruction to go
+    # and edit a file.
+    minority = sorted(used.values())[:-1]
+    if max(minority) < MIN_MINORITY_DATES:
+        return None
+
+    listing = ", ".join(f"{style} — {count}" for style, count in used.items())
+    return _finding(
+        FindingCode.DATE_FORMAT_MIXED,
+        Severity.WARNING,
+        "Даты записаны в разных форматах",
+        f"В резюме встречаются форматы: {listing}. Парсер разбирает даты по "
+        "шаблонам и обычно знает не все: то, что записано вторым форматом, "
+        "рискует не превратиться в период работы, и стаж посчитается меньше.",
+        "Приведи все периоды к одному виду — «04.2022 — 09.2023», "
+        "«04.2022 — по настоящее время». Включая даты образования.",
+        listing,
+    )
+
+
+def check_length(pages: Sequence[PageFacts]) -> Finding | None:
+    """Is there enough here to match against, and not so much it gets cut?"""
+    words = _word_count(pages)
+    if not words:
+        return None
+    if words < settings.ats_min_resume_words:
+        return _finding(
+            FindingCode.LENGTH_OUT_OF_RANGE,
+            Severity.WARNING,
+            "Резюме слишком короткое для сопоставления",
+            f"В документе {words} слов. Отбор по ключевым словам работает с тем, "
+            "что написано: у короткого резюме почти нет совпадений — не потому, "
+            "что опыта нет, а потому что он не назван.",
+            "Опиши каждое место работы задачами и технологиями, а не одной "
+            "строкой должности. Названия инструментов пиши словами.",
+        )
+    if words > settings.ats_max_resume_words:
+        return _finding(
+            FindingCode.LENGTH_OUT_OF_RANGE,
+            Severity.WARNING,
+            "Резюме длиннее, чем читает робот",
+            f"В документе {words} слов. Часть систем обрезает текст при импорте, "
+            "и обрезается всегда конец — то есть ранний опыт и образование.",
+            "Сократи до двух страниц: подробно последние места работы, "
+            "остальные — строкой с датами и должностью.",
+        )
+    return None
+
+
+def check_gaps(extraction: ProfileExtraction) -> Finding | None:
+    """Periods a parser will read as a break in employment.
+
+    Reported at zero cost and at ``info``, and the wording is the reason this
+    check is written separately from the rest. A gap is usually a fact about
+    somebody's life — a child, an illness, a year of study, a country change —
+    and it is not this audit's business to imply it should be papered over. The
+    only thing being said is what the arithmetic on the other side will produce,
+    and the only fix offered is to date work that is already in the document.
+    """
+    dated = sorted(
+        (
+            (start, year_month(str(period.end)) if period.end else None, period.company)
+            for period in extraction.work_periods
+            if period.start and (start := year_month(str(period.start))) is not None
+        ),
+        key=lambda item: item[0],
+    )
+    if len(dated) < 2:
+        return None
+
+    gaps: list[str] = []
+    for (_, end, company), (start, _, later) in pairwise(dated):
+        if end is None:
+            continue
+        months = (start[0] - end[0]) * MONTHS_IN_YEAR + (start[1] - end[1])
+        if months > GAP_MONTHS:
+            gaps.append(f"{company} → {later}: {months} мес.")
+    if not gaps:
+        return None
+
+    return _finding(
+        FindingCode.EMPLOYMENT_GAP,
+        Severity.INFO,
+        "Между периодами работы есть промежутки",
+        "Робот считает стаж как сумму периодов, поэтому эти промежутки в стаж "
+        "не войдут: " + "; ".join(gaps) + ". Это не дефект файла — так "
+        "посчитает любая система, читающая даты.",
+        "Если в эти месяцы была работа, учёба, фриланс или свой проект — "
+        "добавь их с датами в том же формате. Если не было, ничего "
+        "исправлять не нужно: промежуток в биографии не чинится резюме.",
+    )
+
+
+def check_requirements(keywords: ATSKeywords) -> Finding | None:
+    """Requirements the candidate holds and this variant does not name.
+
+    Only the middle bucket produces a finding. The requirements nobody holds are
+    reported in the keyword list and generate no advice at all, because the only
+    advice available would be to claim them.
+    """
+    unstated = keywords.unstated
+    if not unstated:
+        return None
+
+    named = ", ".join(
+        f"«{item.requirement}»" + (f" (в резюме: «{item.found_as}»)" if item.found_as else "")
+        for item in unstated[:8]
+    )
+    return _finding(
+        FindingCode.REQUIREMENTS_NOT_NAMED,
+        Severity.WARNING,
+        f"Не названы дословно: {len(unstated)} требований из списка вакансии",
+        "Эти навыки есть в профиле, но в этом варианте документа они не "
+        f"написаны так, как их ищет работодатель: {named}. Фильтр ищет точные "
+        "строки, поэтому «постгрес» и «PostgreSQL» для него разные вещи.",
+        "Перегенерируй вариант под эту вакансию: он назовёт эти навыки "
+        "формулировками вакансии там, где они действительно были в работе. "
+        "Ничего нового при этом не появляется — всё перечисленное уже в профиле.",
+    )
+
+
 #: Checks that need a PDF's geometry, in the order they are reported.
 PDF_CHECKS = (
     check_text_layer,
     check_columns,
     check_unmapped_fonts,
     check_glyphs,
+    check_hidden_text,
     check_contacts,
     check_dates,
+    check_date_format,
     check_tables,
     check_sections,
+    check_stuffing,
+    check_length,
 )
 #: Checks that work on any text, whatever produced it.
 #: What can be asked of text with no page behind it.
-TEXT_CHECKS = (check_contacts, check_glyphs, check_dates, check_sections)
+TEXT_CHECKS = (
+    check_contacts,
+    check_glyphs,
+    check_hidden_text,
+    check_dates,
+    check_date_format,
+    check_sections,
+    check_stuffing,
+    check_length,
+)
 
 #: A DOCX adds the one layout question worth asking of it. Kept separate from
 #: TEXT_CHECKS so a plain .txt does not claim to have been checked for tables
 #: it cannot have.
 DOCX_CHECKS = (*TEXT_CHECKS, check_tables)
+
+#: What may be asked of a cover letter.
+#:
+#: Short, and the shortness is the point. A letter has no employment section, no
+#: date column and no second page, so running the resume checks over one would
+#: report four defects on a perfectly good letter — an audit that cries wolf
+#: about the wrong document is one nobody reads on the right one. What survives
+#: is the pair that is about conduct rather than layout, and those two matter
+#: more here than anywhere else: this is the document *we* wrote.
+LETTER_CHECKS = (check_hidden_text, check_stuffing)
+
+#: Which check set fits which kind of document, for the callers that know the
+#: kind but nothing about the checks.
+CHECKS_BY_KIND: dict[DocumentKind, tuple[Check, ...]] = {
+    DocumentKind.RESUME: TEXT_CHECKS,
+    DocumentKind.COVER_LETTER: LETTER_CHECKS,
+}
+
+
+def _word_count(pages: Sequence[PageFacts]) -> int:
+    """Words in the document, however the pages were built.
+
+    ``words`` is populated from geometry for a PDF and from the paragraphs for a
+    DOCX; a plain-text page has none and is counted from its text.
+    """
+    counted = sum(len(page.words) for page in pages)
+    return counted or sum(len(page.text.split()) for page in pages)
 
 
 def _docx_pages(content: bytes, raw_text: str) -> list[PageFacts]:
@@ -685,6 +1190,7 @@ def audit(
     source_format: str,
     raw_text: str = "",
     extraction: ProfileExtraction | None = None,
+    keywords: ATSKeywords | None = None,
 ) -> ATSReport:
     """Judge how a machine will read this file.
 
@@ -698,6 +1204,10 @@ def audit(
     the text layer — and it is optional because the report is produced twice:
     once at upload, when no extraction exists yet and the structural findings
     are already worth showing, and again when parsing finishes.
+
+    ``keywords`` is this document read against one vacancy's requirement list,
+    computed by :mod:`app.resume.ats_keywords`. Optional for the same reason:
+    the report shown right after upload is not about any particular vacancy.
     """
     checks: tuple[Check, ...]
     extra: list[Finding] = []
@@ -721,6 +1231,76 @@ def audit(
             )
         ]
 
+    return _assemble(
+        pages,
+        checks,
+        extra=extra,
+        extraction=extraction,
+        keywords=keywords,
+        kind=DocumentKind.RESUME,
+        origin=DocumentOrigin.UPLOADED,
+        source_format=source_format,
+        page_count=len(pages) if source_format == "pdf" else 0,
+    )
+
+
+def audit_generated(
+    text: str,
+    *,
+    kind: DocumentKind,
+    keywords: ATSKeywords | None = None,
+) -> ATSReport:
+    """Audit a document this system produced, before a person sees it.
+
+    The original audit answers a question about somebody else's file. This one
+    turns the same machinery on our own output, which is the harder half of the
+    idea: a generator is graded on the coverage number it produces, and the
+    cheapest way to raise that number is exactly what
+    :func:`check_stuffing` and :func:`check_hidden_text` refuse. Running them
+    over every generated document is what keeps the boundary from being a
+    paragraph in a prompt.
+
+    The checks that apply are decided by ``kind`` rather than by the caller, so
+    "audit what we wrote" cannot quietly become "audit it with the checks it
+    happens to pass".
+
+    Text only. Nothing here has a page yet — a letter is pasted into a form, and
+    a generated resume is a document tree until something renders it — so the
+    geometry checks have nothing to read and are honestly absent from
+    ``checks_run`` rather than silently passing.
+    """
+    pages = _text_only_pages(text)
+    return _assemble(
+        pages,
+        CHECKS_BY_KIND[kind],
+        extra=[],
+        extraction=None,
+        keywords=keywords,
+        kind=kind,
+        origin=DocumentOrigin.GENERATED,
+        source_format="text",
+        page_count=0,
+    )
+
+
+def _assemble(
+    pages: Sequence[PageFacts],
+    checks: Sequence[Check],
+    *,
+    extra: Sequence[Finding],
+    extraction: ProfileExtraction | None,
+    keywords: ATSKeywords | None,
+    kind: DocumentKind,
+    origin: DocumentOrigin,
+    source_format: str,
+    page_count: int,
+) -> ATSReport:
+    """Run a check set over prepared pages and build the report.
+
+    One place, so an uploaded resume and a document this system generated are
+    scored by the same arithmetic. Two reports about the same defect that
+    disagree about what it costs would make the number meaningless on both.
+    """
     findings = [*extra]
     for check in checks:
         found = check(pages)
@@ -730,9 +1310,14 @@ def audit(
     coverage: ATSCoverage | None = None
     if extraction is not None:
         coverage = measure_coverage(extraction, pages)
-        lost = _coverage_finding(coverage)
-        if lost is not None:
-            findings.append(lost)
+        for found in (_coverage_finding(coverage), check_gaps(extraction)):
+            if found is not None:
+                findings.append(found)
+
+    if keywords is not None:
+        unnamed = check_requirements(keywords)
+        if unnamed is not None:
+            findings.append(unnamed)
 
     # A file with no text layer cannot fail the checks that read the text; they
     # would all fire at once and bury the one finding that matters.
@@ -742,22 +1327,31 @@ def audit(
     report = ATSReport(
         score=max(0, 100 - sum(f.penalty for f in findings)),
         findings=findings,
-        checks_run=_codes_for(checks, bool(extra), coverage is not None),
+        checks_run=_codes_for(
+            checks, any(f.code is FindingCode.FORMAT_NOT_PDF for f in extra), coverage, keywords
+        ),
         sections_detected=detect_sections(pages),
         coverage=coverage,
+        keywords=keywords,
+        document_kind=kind,
+        origin=origin,
         source_format=source_format,
-        page_count=len(pages) if source_format == "pdf" else 0,
-        word_count=sum(len(page.words) for page in pages) or len(raw_text.split()),
+        page_count=page_count,
+        word_count=_word_count(pages),
     )
     logger.info(
         "resume.ats_audited",
         source_format=source_format,
+        document_kind=kind.value,
+        origin=origin.value,
         score=report.score,
         overall=report.overall.value,
         critical=len(report.critical),
         findings=len(report.findings),
         jobs_recovered=coverage.work_periods.recovered if coverage else None,
         jobs_total=coverage.work_periods.total if coverage else None,
+        requirements=len(keywords.requirements) if keywords else None,
+        requirements_present=len(keywords.present) if keywords else None,
     )
     return report
 
@@ -772,16 +1366,33 @@ CHECK_CODES: dict[Check, FindingCode] = {
     check_dates: FindingCode.DATES_NOT_EXTRACTABLE,
     check_tables: FindingCode.TEXT_IN_TABLES,
     check_sections: FindingCode.MISSING_SECTIONS,
+    check_hidden_text: FindingCode.HIDDEN_TEXT,
+    check_stuffing: FindingCode.KEYWORD_STUFFING,
+    check_date_format: FindingCode.DATE_FORMAT_MIXED,
+    check_length: FindingCode.LENGTH_OUT_OF_RANGE,
 }
 
 
-def _codes_for(checks: Sequence[Check], format_noted: bool, compared: bool) -> list[FindingCode]:
-    """The codes a given run was actually able to look for."""
+def _codes_for(
+    checks: Sequence[Check],
+    format_noted: bool,
+    coverage: ATSCoverage | None,
+    keywords: ATSKeywords | None,
+) -> list[FindingCode]:
+    """The codes a given run was actually able to look for.
+
+    The two comparisons are listed only when they were made. A client reading
+    this list is deciding what to render as "checked and clean", and a report
+    that claims to have compared a document against a vacancy it never saw is
+    worse than one that admits it did not.
+    """
     codes = [CHECK_CODES[check] for check in checks]
     if format_noted:
         codes.append(FindingCode.FORMAT_NOT_PDF)
-    if compared:
-        codes.append(FindingCode.CONTENT_LOST)
+    if coverage is not None:
+        codes.extend((FindingCode.CONTENT_LOST, FindingCode.EMPLOYMENT_GAP))
+    if keywords is not None:
+        codes.append(FindingCode.REQUIREMENTS_NOT_NAMED)
     return codes
 
 
