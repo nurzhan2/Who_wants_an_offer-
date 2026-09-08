@@ -140,23 +140,55 @@ def test_the_exit_code_of_the_wrapped_script_is_the_exit_code_of_the_cli() -> No
     assert run_cli(["crawl"], run=Recorder(code=2))[0] == 2
 
 
-def test_a_step_nobody_has_written_yet_says_so_and_runs_nothing() -> None:
-    """`match` is the honest hole in this pipeline and the CLI names it.
+def test_match_runs_the_scoring_script_and_passes_its_flags_through() -> None:
+    """`match` was the honest hole in this pipeline until the scorer was written.
 
-    There is a match table, a MatchCreate schema and a repository able to write
-    a whole rescore; there is no code that computes a score. A "file not found"
-    for a step nobody has written is a puzzle, so the message says which file is
-    expected and what still works without it, and the exit code is its own — the
-    answer is "write it", not "look at the logs".
+    The CLI used to answer it with EXIT_MISSING_PIECE and a paragraph naming
+    the file it wanted, which was the right behaviour while there was nothing
+    to run. There is now: scripts/run_matching.py scores the corpus against the
+    active profile. The mechanism that reported the hole is still in place for
+    the next one — this test only asserts that `match` is no longer it.
     """
     runner = Recorder()
 
-    code, _, err = run_cli(["match"], run=runner)
+    code, _, _ = run_cli(["match", "--limit", "50"], run=runner)
+
+    assert code == 0
+    assert runner.commands == [
+        [sys.executable, str(cli.SCRIPTS / "run_matching.py"), "--limit", "50"]
+    ]
+
+
+def test_a_step_nobody_has_written_yet_still_says_so_and_runs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mechanism, not the step: no wrapped script is missing today.
+
+    A "file not found" for a step nobody has written is a puzzle, so the
+    message names the file expected and the exit code is its own — the answer
+    is "write it", not "look at the logs". Asserted against a wrapper pointed
+    at a path that does not exist, because asserting it against whichever step
+    happens to be unwritten is a test that dies the moment somebody writes it.
+    """
+    runner = Recorder()
+    monkeypatch.setattr(
+        cli,
+        "WRAPPED",
+        (
+            cli.Wrapped(
+                name="crawl",
+                script=cli.SCRIPTS / "no-such-step.py",
+                summary="шаг, которого нет",
+                missing="Этот шаг живёт в scripts/no-such-step.py.",
+            ),
+        ),
+    )
+
+    code, _, err = run_cli(["crawl"], run=runner)
 
     assert code == cli.EXIT_MISSING_PIECE
     assert runner.commands == []
-    assert "run_matching.py" in err
-    assert "queue" in err
+    assert "no-such-step.py" in err
 
 
 def test_no_subcommand_but_apply_can_reach_the_agent() -> None:

@@ -208,9 +208,12 @@ def test_a_live_process_running_the_unattended_subcommands_loads_neither_world(
         f"процесс CLI загрузил {loaded['crossed']}. Подкоманды должны запускать "
         "чужой код дочерним процессом, а не импортировать его."
     )
-    # And it did do the work: five subcommands, four of which had something to
-    # start. `match` has no script to start yet and says so.
-    assert loaded["codes"] == [0, 0, cli.EXIT_MISSING_PIECE, 0, 0]
+    # And it did do the work: five subcommands, every one of which now has
+    # something to start. `match` was the exception until the scorer was
+    # written, and that it now spawns a script which DOES import the backend
+    # world is exactly what the assertion above is about: the CLI process
+    # stays clean because it spawns rather than imports.
+    assert loaded["codes"] == [0, 0, 0, 0, 0]
     assert [command[1:3] for command in loaded["commands"]][-1] == ["-m", "agent.run"]
 
 

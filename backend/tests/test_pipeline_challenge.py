@@ -29,7 +29,7 @@ what they were handed, which is what these assertions are about -- the rows are
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 from uuid import UUID, uuid4
@@ -38,6 +38,7 @@ import pytest
 
 from app.db.enums import PipelineRunStatus
 from app.db.repositories.vacancy import BulkUpsertResult, UpsertItem
+from app.normalize.sync import SyncOutcome
 from app.pipeline import runner
 from app.pipeline import runner as runner_module
 from app.pipeline.runner import (
@@ -91,6 +92,24 @@ class Session:
     async def commit(self) -> None:
         """Count it, so a test can tell a write was meant to be durable."""
         self.commits += 1
+
+
+class Derivation:
+    """``sync_requirements``, minus the database.
+
+    Records the ids it was handed. The runner derives skills inside the same
+    transaction as the batch write so a stored vacancy is never left unscoreable,
+    and «over the ids that were just written» is the part of that worth holding
+    here — the derivation itself has its own tests.
+    """
+
+    calls: list[list[Any]] = []  # noqa: RUF012 - a test's shared ledger
+
+    @staticmethod
+    async def record(session: object, *, vacancy_ids: Sequence[Any] | None = None) -> Any:
+        """Note the call and hand back an outcome shaped like the real one."""
+        Derivation.calls.append(list(vacancy_ids or []))
+        return SyncOutcome()
 
 
 class Runs:
@@ -211,8 +230,15 @@ def sessions(
     """The crawl's session factory and its repositories, all without a database."""
     Runs.finished = []
     Vacancies.batches = []
+    Derivation.calls = []
     monkeypatch.setattr(runner_module, "PipelineRunRepository", Runs)
     monkeypatch.setattr(runner_module, "VacancyRepository", Vacancies)
+    # The batch write also derives vacancy_skill in the same transaction, which
+    # is real SQL against a session these tests deliberately do not have. Its
+    # own behaviour is covered in test_normalize_requirements.py; what matters
+    # here is that it runs over the ids the write just returned, so it is
+    # recorded rather than removed.
+    monkeypatch.setattr(runner_module, "sync_requirements", Derivation.record)
     reset_client()
 
     @asynccontextmanager
@@ -412,6 +438,26 @@ async def test_a_run_that_finishes_confirms_its_last_batch_too(
     assert source.confirmed[-1] == len(postings), (
         f"finished having written {len(postings)}, confirmed {source.confirmed}"
     )
+
+
+async def test_every_batch_written_is_also_derived_before_it_is_committed(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+) -> None:
+    """A stored vacancy is never left in a state where it cannot be scored.
+
+    ``vacancy_skill`` was empty for all 643 rows precisely because deriving it
+    was a separate later pass that nobody ran. Doing it in the same transaction
+    as the write is what makes that impossible to repeat, and this is the
+    assertion that says so: one derivation per batch, over the ids that batch
+    just returned, and never a batch that got written without one.
+    """
+    postings = [posting("healthy", str(index)) for index in range(UPSERT_BATCH + 4)]
+    source = Healthy(postings, challenged=False)
+
+    await _run_source(source, PLAN, sessions)
+
+    assert len(Derivation.calls) == len(Vacancies.batches), "a batch was written underived"
+    assert [len(call) for call in Derivation.calls] == [len(batch) for batch in Vacancies.batches]
 
 
 async def test_a_challenge_in_one_source_does_not_stop_another(

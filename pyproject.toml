@@ -93,6 +93,7 @@ known-first-party = ["app", "factories", "helpers"]
 "scripts/bench_ollama.py" = ["RUF001"]
 "scripts/run_pipeline.py" = ["RUF001", "RUF002"]
 "scripts/backfill_skills.py" = ["RUF001", "RUF002"]
+"scripts/run_matching.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
@@ -110,6 +111,8 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/tests/test_sources_registry.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_runner.py" = ["RUF001", "RUF002"]
 "backend/tests/test_normalize_requirements.py" = ["RUF001", "RUF002"]
+"backend/tests/test_matching_rules.py" = ["RUF001", "RUF002"]
+"backend/tests/test_matching_scorer.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_end_to_end.py" = ["RUF001", "RUF002"]
 # Its fixtures are notes a person typed into a tracker, in Russian, next to a
 # block the agent rendered in Russian — telling those two apart is the whole
@@ -118,6 +121,8 @@ known-first-party = ["app", "factories", "helpers"]
 # Its docstring argues about company forms and city names in the two languages
 # this market writes them in, so the examples are necessarily Cyrillic.
 "backend/app/normalize/fingerprint.py" = ["RUF001", "RUF002"]
+"backend/app/matching/rules.py" = ["RUF001", "RUF002"]
+"backend/app/matching/scorer.py" = ["RUF001", "RUF002"]
 # Source failures reach the dashboard, so their messages are Russian.
 "backend/app/sources/base.py" = ["RUF001", "RUF002"]
 "backend/app/sources/http.py" = ["RUF001", "RUF002"]

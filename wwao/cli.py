@@ -153,15 +153,7 @@ WRAPPED: Final[tuple[Wrapped, ...]] = (
         name="match",
         script=SCRIPTS / "run_matching.py",
         summary="посчитать соответствие вакансий профилю",
-        missing=(
-            "Скоринга ещё нет: CLI ждёт scripts/run_matching.py — такой же скрипт, как\n"
-            "  scripts/run_pipeline.py и scripts/generate_letters.py, запускаемый\n"
-            "  «python scripts/run_matching.py». В backend есть таблица match, схемы\n"
-            "  app/schemas/match.py и MatchRepository.bulk_upsert; кода, который\n"
-            "  считает score, в репозитории нет ни строки.\n"
-            "  Пока его нет: letters и queue работают на том, что уже посчитано,\n"
-            "  а очередь без score это честно показывает."
-        ),
+        missing="Скоринг живёт в scripts/run_matching.py.",
     ),
     Wrapped(
         name="letters",
