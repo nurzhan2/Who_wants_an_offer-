@@ -1,0 +1,90 @@
+# Which kinds of work a profile is looking for, and how hh names them.
+#
+# A file rather than class constants for the reason CLAUDE.md gives about the
+# city: what a candidate is looking for is a property of the deployment, not of
+# the code. It names no person and holds no list of hh slugs — see
+# `hh_roles.py` for the three steps this file is the first of.
+#
+# `when` are matched against the keywords the planner derived from the resume
+# (`app/sources/query_planner.py`, groups declared in
+# `app/resume/skills_min.yaml`). Terms of four characters or more match inside a
+# word, shorter ones match a whole word, and both sides are transliterated, so a
+# term written in Russian finds a keyword written in Latin and the other way
+# round.
+#
+# `roles` are matched against the NAMES in api.hh.ru/professional_roles, read
+# live on every refresh. Deliberately not role ids: an id in this file would
+# still resolve after hh renamed the role under it, and nothing would say so.
+# 194 roles were published on 2026-09-08, of which id 96 is
+# «Программист, разработчик» — the one measured to have a catalogue page.
+#
+# A profile matching NO family here is not given these roles as a default. It
+# falls back to its own keywords against the catalogue, which is worse for a
+# developer and right for everybody else: a bookkeeper handed the developer
+# families would get a corpus of jobs they cannot do, dressed up as a match.
+#
+# Being wide is the point. The scoring pass is what narrows; it is written, it
+# is honest, and on a corpus from the candidate's own field it finally has
+# something to separate. A posting a narrow crawl drops is dropped for good.
+families:
+  - key: backend
+    when:
+      [python, java, kotlin, golang, go, php, ruby, scala, rust, "c#", ".net",
+       node, nodejs, django, fastapi, flask, spring, laravel, symfony, express,
+       backend, бэкенд, api, rest, grpc, микросервис, postgresql, mysql, redis,
+       mongodb, sqlalchemy, orm, celery, rabbitmq, kafka]
+    roles: [программист, разработчик]
+
+  - key: frontend
+    when:
+      [javascript, typescript, react, vue, angular, svelte, next, frontend,
+       фронтенд, html, css, sass, tailwind, webpack, vite]
+    roles: [программист, разработчик]
+
+  - key: mobile
+    when: [android, ios, swift, objective-c, flutter, "react native", dart, mobile]
+    roles: [программист, разработчик]
+
+  - key: data
+    when:
+      [sql, pandas, numpy, etl, elt, airflow, dbt, clickhouse, spark, hadoop,
+       bi, tableau, "power bi", superset, metabase, greenplum, аналитика,
+       данные, витрин, дашборд]
+    roles: [аналитик данных, data, бизнес-аналитик, системный аналитик]
+
+  - key: ml
+    when:
+      [ml, "machine learning", машинное, pytorch, tensorflow, keras, sklearn,
+       scikit, nlp, llm, gpt, rag, langchain, transformers, opencv, cv,
+       "data science", ai, ии, эмбеддинг, embeddings]
+    roles: [дата-сайентист, data, машинного обучения, аналитик данных]
+
+  - key: devops
+    when:
+      [docker, kubernetes, k8s, helm, terraform, ansible, "ci/cd", gitlab,
+       jenkins, argocd, prometheus, grafana, linux, bash, nginx, aws, gcp,
+       azure, devops, sre, инфраструктур]
+    roles: [devops, системный администратор, сетевой инженер]
+
+  - key: qa
+    when:
+      [pytest, unittest, selenium, playwright, cypress, postman, qa,
+       тестирован, автотест, "test automation", jmeter, locust]
+    roles: [тестировщик, qa, автоматизирован]
+
+  # Names of products a person may equally well USE rather than integrate —
+  # 1C, SAP, Bitrix, CRM, ERP — are deliberately NOT here. A bookkeeper whose
+  # resume says 1C would have been handed the developer roles by them, which is
+  # the failure this whole file is arranged to avoid. A 1C developer is not lost
+  # by leaving them out: their own keyword still finds `programmist-1s` through
+  # the fallback in `slugs_for`.
+  - key: integration
+    when:
+      [интеграц, integration, автоматизац, automation, rpa, webhook, парсинг,
+       scraping, скрипт, "etl-интеграц"]
+    roles: [программист, разработчик, системный аналитик]
+
+  - key: security
+    when:
+      [security, безопасн, pentest, owasp, soc, siem, криптограф, infosec]
+    roles: [информационной безопасности, security]

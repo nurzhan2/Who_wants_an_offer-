@@ -331,8 +331,19 @@ def placements_for(profile: CandidateProfileRead) -> tuple[Placement, ...]:
     return tuple(dict.fromkeys(ordered))[:MAX_PLACEMENTS]
 
 
-def _query(group: KeywordGroup, placement: Placement, *, posted_within_days: int) -> SearchQuery:
-    """One search: a group's terms, in one place.
+def _query(
+    group: KeywordGroup,
+    placement: Placement,
+    *,
+    posted_within_days: int,
+    headline: str | None = None,
+) -> SearchQuery:
+    """One search: a group's terms, in one place, under the candidate's own title.
+
+    The headline is the same on every query of a plan, which is the point: the
+    groups say what this profile knows and differ from each other, and the
+    headline says what it is looking for and does not. A source with something
+    to rank uses the difference; see ``SearchQuery.headline``.
 
     ``salary_min``, ``country`` and ``language`` are left unset on purpose.
     ``SearchQuery`` carries no currency, so a figure from a profile quoted in
@@ -344,6 +355,7 @@ def _query(group: KeywordGroup, placement: Placement, *, posted_within_days: int
     """
     return SearchQuery(
         keywords=group.keywords,
+        headline=headline,
         area=placement.area,
         remote=placement.remote,
         posted_within_days=posted_within_days,
@@ -417,6 +429,7 @@ def plan_queries(
                     group,
                     placements[placement_index],
                     posted_within_days=posted_within_days,
+                    headline=" ".join((profile.headline or "").split()) or None,
                 )
                 ordered.append((group.label, query))
 

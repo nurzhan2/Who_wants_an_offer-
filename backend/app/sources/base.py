@@ -117,6 +117,22 @@ class SearchQuery(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     keywords: tuple[str, ...] = ()
+    #: What the candidate says they are, in their own words — the resume's
+    #: headline, unparsed.
+    #:
+    #: Not a filter and never one: no source narrows anything by it. It is a
+    #: statement of INTENT, and it is here because the keyword list cannot carry
+    #: one. A resume that lists Python, Java, Go, JavaScript and C gives the
+    #: planner five equal terms, and a source ranking by them treats a C job and
+    #: a Python job as equally wanted — measured on hh, where a run opened
+    #: catalogue pages for Go, C, JavaScript, Linux and C# and not one for
+    #: Python, off a profile whose headline reads "Python Developer — Backend /
+    #: AI-интеграции". Skills say what somebody can do; this says what they are
+    #: looking for, and only one of the two is a preference.
+    #:
+    #: A source that has nothing to rank ignores it, which is every source that
+    #: hands its terms to somebody else's relevance engine.
+    headline: str | None = Field(default=None, max_length=300)
     area: str | None = Field(default=None, max_length=100)
     country: CountryCode | None = None
     remote: RemoteType | None = None
