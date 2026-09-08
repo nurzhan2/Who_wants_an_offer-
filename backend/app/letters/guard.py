@@ -53,6 +53,21 @@ from enum import StrEnum
 #: hh's own ceiling, from ``applicantVacancyResponseStatuses.letterMaxLength``.
 #: The fallback only — :func:`app.letters.context.letter_max_length` prefers the
 #: value stored with the vacancy, because a per-vacancy limit can be smaller.
+#: Which set of rules this module currently enforces. Bumped by hand when a rule
+#: is added, removed or changed in a way that would judge an existing letter
+#: differently — the value has no meaning beyond "not the same rules as before".
+#:
+#: It exists because a letter outlives the rules that wrote it. ``application``
+#: records the version alongside the text, so the documents screen can say which
+#: rules produced a letter rather than implying that today's produced all of
+#: them. Deriving it from the module — a hash of the source, a count of the
+#: patterns — was rejected: every reformatting would then invent a new version
+#: and every stored letter would read as written under rules nobody changed.
+#:
+#: 1 — the rules as of 2026-09-08: no links, no at-sign, length bounds, no
+#:     unsupported claim, a non-empty skill declaration, no leaked fence.
+VERSION = 1
+
 DEFAULT_MAX_LENGTH = 10_000
 
 #: Below this a "letter" is a stub — a greeting and a sign-off with nothing in

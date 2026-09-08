@@ -452,6 +452,13 @@ class Application(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: ``app/letters/store.save_letter``. Not evidence of what was sent: a
     #: regeneration after a send replaces it in place. See :attr:`sent_letter`.
     cover_letter: Mapped[str | None] = mapped_column(Text)
+    #: Which version of ``app/letters/guard`` judged :attr:`cover_letter`,
+    #: written by the same call that wrote the letter. NULL means the letter
+    #: predates the record — not that it was written under version zero, and not
+    #: that it passes today's rules. A letter outlives the rules that wrote it,
+    #: and without this the documents screen could only show the rules in force
+    #: now and imply they produced everything on it.
+    letter_rules_version: Mapped[int | None] = mapped_column(SmallInteger)
 
     # ── the send, as the agent reported it ────────────────────────────
     #: When an application actually went out, from the report that said so.
