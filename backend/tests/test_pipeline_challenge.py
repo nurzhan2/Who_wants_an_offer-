@@ -38,8 +38,15 @@ import pytest
 
 from app.db.enums import PipelineRunStatus
 from app.db.repositories.vacancy import BulkUpsertResult, UpsertItem
+from app.pipeline import runner
 from app.pipeline import runner as runner_module
-from app.pipeline.runner import UPSERT_BATCH, RunReport, SourceOutcome, _run_source
+from app.pipeline.runner import (
+    BATCH_MAX_AGE_SECONDS,
+    UPSERT_BATCH,
+    RunReport,
+    SourceOutcome,
+    _run_source,
+)
 from app.schemas.pipeline import PipelineRunCreate, PipelineRunFinish
 from app.sources.base import BaseSource, RateLimit, RawPosting, SearchQuery
 from app.sources.http import HHChallengedError, reset_client
@@ -163,6 +170,22 @@ class Healthy(Yielding):
     """The source that must keep going while the other one is stopped."""
 
     slug = "healthy"
+
+
+class Ticking(Yielding):
+    """A source whose postings advance a clock, so "slow" is testable without waiting."""
+
+    slug = "healthy"
+
+    def __init__(self, postings: list[RawPosting], *, challenged: bool, clock: list[int]) -> None:
+        super().__init__(postings, challenged=challenged)
+        self._clock = clock
+
+    async def search(self, query: SearchQuery) -> AsyncIterator[RawPosting]:
+        """One posting, one tick."""
+        async for item in super().search(query):
+            self._clock[0] += 1
+            yield item
 
 
 class Broken(BaseSource):
@@ -460,3 +483,53 @@ async def test_a_failed_partial_write_does_not_hide_why_the_run_stopped(
 
     assert outcome.challenged is True
     assert [error["error"] for error in outcome.errors] == ["HHChallengedError"]
+
+
+async def test_a_slow_source_writes_before_its_batch_is_full(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A count alone is the wrong measure of when to write.
+
+    hh is crawled at about one page every four to five seconds, so a batch of a
+    hundred is seven and a half minutes of work held in memory, and every hh crawl
+    so far has ended before then. The challenge path rescues its batch, so that
+    ending is covered; a hard signal is not, and neither is a run the operator
+    stops. Measured with this rule in place: a crawl cut off after 200 seconds
+    stored 31 postings and recorded positions for two sitemap files, none of
+    which a full batch would have reached.
+
+    The clock is monkeypatched rather than waited on, because a test that sleeps
+    for a minute is a test nobody runs.
+    """
+    # A clock that advances with the CRAWL rather than with calls to it: forty
+    # seconds a page, which is the shape of a slow source and is deterministic
+    # however many other things read the clock. Two pages then exceed the limit.
+    # Anything that leaves the batch to the end of the run writes four at once.
+    handed_over = [0]
+    step = BATCH_MAX_AGE_SECONDS / 1.5
+    monkeypatch.setattr(runner.time, "monotonic", lambda: handed_over[0] * step)
+    postings = [posting("healthy", str(index)) for index in range(4)]
+    assert len(postings) < UPSERT_BATCH, "so only the age rule can trigger a write"
+    source = Ticking(postings, challenged=False, clock=handed_over)
+
+    await _run_source(source, PLAN, sessions)
+
+    assert [len(batch) for batch in Vacancies.batches] == [2, 2], (
+        "the aged batch must be written during the walk, not left to the end"
+    )
+    assert source.confirmed == [2, 4], "and the crawl position told about each"
+
+
+async def test_a_fast_source_still_writes_by_count(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The age rule must not turn a busy feed into a write per posting."""
+    monkeypatch.setattr(runner.time, "monotonic", lambda: 0.0)
+    postings = [posting("healthy", str(index)) for index in range(UPSERT_BATCH + 7)]
+    source = Healthy(postings, challenged=False)
+
+    await _run_source(source, PLAN, sessions)
+
+    assert [len(batch) for batch in Vacancies.batches] == [UPSERT_BATCH, 7]

@@ -33,6 +33,7 @@ unhappy.
 """
 
 import asyncio
+import time
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
@@ -73,6 +74,20 @@ type Sessions = Callable[[], AbstractAsyncContextManager[AsyncSession]]
 #: Postings held in memory before a write. One page of a busy source, so the
 #: batch amortises the round trip without letting a long crawl grow unbounded.
 UPSERT_BATCH = 100
+
+#: How long a partial batch may stay unwritten. A count alone is the wrong
+#: measure for a slow source: hh is crawled at about one page every four to five
+#: seconds, so a batch of a hundred is seven and a half minutes of work held in
+#: memory, and a crawl that ends before then — which every hh crawl so far has,
+#: whether by a check for robots or by the operator — writes nothing and records
+#: no position unless it happens to end through the one path that rescues the
+#: batch. Measured with the rule in place: a run cut off after 200 seconds stored
+#: 31 postings — a third of a batch — and recorded positions for two sitemap
+#: files. Killed at the same point without it, a hard signal takes all 31 with it.
+#:
+#: So whichever comes first. A busy feed still writes by count and pays nothing
+#: for this; a slow corpus writes every minute or so and its work survives.
+BATCH_MAX_AGE_SECONDS = 60.0
 
 
 @dataclass(slots=True)
@@ -448,6 +463,7 @@ async def _crawl(
     """
     bound = _bind(source, outcome, sessions)
     batch: list[RawPosting] = []
+    opened = time.monotonic()
     #: Postings this function has handed to the database and seen committed.
     #: The connector cannot know this and must not guess it; see
     #: ``BaseSource.record_progress``.
@@ -462,11 +478,14 @@ async def _crawl(
             if source.needs_detail_fetch:
                 posting = await bound.fetch_detail(posting)
             batch.append(posting)
-            if len(batch) >= UPSERT_BATCH:
+            full = len(batch) >= UPSERT_BATCH
+            stale = time.monotonic() - opened >= BATCH_MAX_AGE_SECONDS
+            if full or stale:
                 await _write(batch, outcome, sessions)
                 durable += len(batch)
                 await bound.record_progress(durable)
                 batch = []
+                opened = time.monotonic()
     except Exception:
         if batch:
             try:
@@ -488,7 +507,9 @@ async def _crawl(
     if batch:
         await _write(batch, outcome, sessions)
         durable += len(batch)
-    await bound.record_progress(durable)
+        # One confirmation per write, and only after one. A run that ends with
+        # nothing outstanding has already told the connector everything it knows.
+        await bound.record_progress(durable)
 
 
 def _bind(source: BaseSource, outcome: SourceOutcome, sessions: Sessions) -> BaseSource:
