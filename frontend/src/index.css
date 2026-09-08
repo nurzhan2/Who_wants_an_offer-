@@ -1,3 +1,11 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* The design system's ground. Set here rather than on a wrapper so that an
+   overscroll bounce shows paper rather than the browser's default white. */
+@layer base {
+  html {
+    background-color: theme('colors.paper');
+  }
+}
