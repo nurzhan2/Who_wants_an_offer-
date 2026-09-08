@@ -190,10 +190,14 @@ SITES_FILE = Path(__file__).with_name("hh_sites.yaml")
 SITEMAP_INDEX_PATH = "/sitemap/main.xml"
 
 #: Sitemaps of individual vacancy pages, which is all we read. ``vacancies{N}``
-#: (SEO landing pages by profession, 5716 entries with no lastmod) is a
-#: different file and deliberately not used yet; ``employers`` is companies; and
-#: ``resumes{N}`` is living people's resumes, which is why the selection here is
-#: an allow-list matched on the whole name rather than a substring test.
+#: (landing pages by profession, 5716 entries with no lastmod) is a different
+#: file and still not used: whether it is a way into the corpus by profession —
+#: which is what this walk's blindness to the profession costs us, see
+#: docs/SOURCES.md § «Обход по профессиям» — turns on a measurement nobody has
+#: taken, and ``hh_probe.py`` is the instrument for taking it. ``employers`` is
+#: companies; and ``resumes{N}`` is living people's resumes, which is why the
+#: selection here is an allow-list matched on the whole name rather than a
+#: substring test.
 VACANCY_SITEMAP = re.compile(r"/sitemap/(vacancy\d+)\.xml$")
 
 #: The frontend's boot state, escaped inside a hidden template element.

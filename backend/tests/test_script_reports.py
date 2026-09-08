@@ -1,4 +1,4 @@
-"""The two new scripts render their reports, and stay inside cp1251.
+"""The scripts render their reports, and stay inside cp1251.
 
 Same reasoning as ``test_run_pipeline_report.py``, which exists because a line
 added to the crawl report referred to a field that did not exist: the suite
@@ -12,8 +12,8 @@ pass or a backfill has already done its work.
 
 The console is Russian Windows, so ``cp1251`` is the real constraint: one box
 character in a report kills the program at the end of the run it was reporting
-on. Both scripts use ASCII rules for exactly that reason, and this is what
-holds them to it.
+on. All three scripts use ASCII rules for exactly that reason, and this is
+what holds them to it.
 """
 
 import importlib.util
@@ -24,6 +24,15 @@ import pytest
 
 from app.matching.scorer import ScoringOutcome
 from app.normalize.sync import SyncOutcome
+from app.sources.hh_probe import (
+    CatalogFile,
+    CatalogIndex,
+    CatalogPage,
+    ProbeReport,
+    Role,
+    RoleDirectory,
+    StateKey,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -45,6 +54,7 @@ def _script(name: str) -> ModuleType:
 
 matching = _script("run_matching")
 backfill = _script("backfill_skills")
+hh_roles = _script("probe_hh_roles")
 
 
 def _scored() -> ScoringOutcome:
@@ -126,3 +136,84 @@ def test_both_scripts_report_a_dry_run_as_a_dry_run(
 
     printed = capsys.readouterr().out
     assert printed.count("--dry-run") == 2
+
+
+# -- the hh catalogue probe --------------------------------------------
+
+
+def _probe(page: CatalogPage | None) -> ProbeReport:
+    """A measurement of the shape the probe returns, with that page in it."""
+    return ProbeReport(
+        host="almaty.hh.kz",
+        index=CatalogIndex(
+            host="almaty.hh.kz",
+            files=(
+                CatalogFile(
+                    name="vacancies0",
+                    url="https://almaty.hh.kz/sitemap/vacancies0.xml",
+                    body_bytes=878_592,
+                    locs=5716,
+                    slugs=5716,
+                    with_lastmod=0,
+                ),
+            ),
+            slugs=("python-razrabotchik", "buhgalter"),
+            matched=("python-razrabotchik",),
+        ),
+        page=page,
+        roles=RoleDirectory(
+            total=4,
+            matched=(Role(id="96", name="Программист, разработчик", category="ИТ"),),
+            advertised=Role(id="96", name="Программист, разработчик", category="ИТ"),
+        ),
+        notes=("справочник не прочитан: 403",),
+    )
+
+
+def _page(ids: int) -> CatalogPage:
+    """A catalogue page carrying that many vacancy ids."""
+    return CatalogPage(
+        url="https://almaty.hh.kz/vacancies/python-razrabotchik",
+        body_bytes=245_760,
+        has_state=True,
+        state_parsed=True,
+        state_keys=(StateKey(name="vacancySearchResult", kind="dict", size=12),),
+        ids_in_document=tuple(str(number) for number in range(ids)),
+        ids_in_state=tuple(str(number) for number in range(ids)),
+        links_without_query=("/vacancies/python-razrabotchik/2",),
+        links_with_query=("/vacancies/python-razrabotchik?page=3",),
+    )
+
+
+@pytest.mark.parametrize(
+    "page",
+    [_page(50), _page(0), None],
+    ids=["a-listing", "nothing-on-it", "unreadable"],
+)
+def test_the_probe_report_renders_over_every_outcome(
+    page: CatalogPage | None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Including the two that say no. The negative result is half the fork."""
+    hh_roles.show(_probe(page))
+
+    printed = capsys.readouterr().out
+    assert "ЭТАП 0" in printed
+    assert "ВЫВОД" in printed
+    printed.encode("cp1251")
+
+
+def test_the_verdict_states_the_rule_it_applied() -> None:
+    """A verdict without its threshold beside it is an opinion.
+
+    Three answers rather than two, because "two vacancy links on the page" is
+    neither a listing nor an empty page, and rounding it into either is the
+    guess the whole probe exists to replace.
+    """
+    listing = hh_roles.verdict(_page(hh_roles.IDS_FOR_A_LIST))
+    empty = hh_roles.verdict(_page(0))
+    unclear = hh_roles.verdict(_page(1))
+
+    assert str(hh_roles.IDS_FOR_A_LIST) in listing
+    assert "реализуемым" in listing
+    assert "запасной путь" in empty and "НЕ экономит" in empty
+    assert "Нужен человек" in unclear
