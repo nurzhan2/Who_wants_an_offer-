@@ -137,6 +137,75 @@ class ParseStatus(StrEnum):
     FAILED = "failed"
 
 
+class ReferenceKind(StrEnum):
+    """Which document a stored exemplar is an exemplar of.
+
+    The two are not interchangeable. A CV and a cover letter are different
+    documents with different shapes, and showing the model a resume as an
+    example of how to write a letter teaches it to write a resume.
+    """
+
+    CV = "cv"
+    COVER_LETTER = "cover_letter"
+
+
+class RuleScope(StrEnum):
+    """Which documents a rule is checked against."""
+
+    CV = "cv"
+    COVER_LETTER = "cover_letter"
+    BOTH = "both"
+
+
+class RuleSeverity(StrEnum):
+    """What happens when a rule is broken.
+
+    ``HARD`` is a gate: the generated document is not handed back until it
+    passes, and when it cannot be made to pass the answer is a refusal naming
+    what is wrong. ``SOFT`` is a note beside a document that is still returned.
+
+    The distinction is the whole reason the field exists. A rule the owner
+    meant as a preference must not stop a letter, and a rule they meant as a
+    requirement must not be silently downgraded to advice.
+    """
+
+    HARD = "hard"
+    SOFT = "soft"
+
+
+class RuleKind(StrEnum):
+    """What a rule measures.
+
+    Every member is something a function can decide by reading the finished
+    document — a count, a presence, an absence, a length. That is the point of
+    the vocabulary being closed: a rule expressed as free prose can only ever be
+    asked of the model, and asking is not checking.
+
+    ``NO_LINKS`` and ``NO_CONTACT_HANDLES`` are the two constraints that existed
+    before this table did, as ``app.letters.guard``'s spam-filter checks. They
+    are members here so that the person editing their rules sees them in the
+    same list as their own; the checking is still the guard's, called rather
+    than copied.
+    """
+
+    #: A named section holds at least / at most N items.
+    SECTION_ITEM_COUNT = "section_item_count"
+    #: A named section must be present at all.
+    REQUIRED_SECTION = "required_section"
+    #: A word or phrase must appear somewhere in the document.
+    REQUIRED_KEYWORD = "required_keyword"
+    #: Every date in the document is written the same agreed way.
+    DATE_FORMAT = "date_format"
+    #: A word or phrase that must not appear.
+    FORBIDDEN_PHRASE = "forbidden_phrase"
+    #: Characters or words, a floor and/or a ceiling.
+    LENGTH = "length"
+    #: No URLs, no bare domains. Built in; see :class:`RuleKind`.
+    NO_LINKS = "no_links"
+    #: No email addresses and no messenger handles. Built in.
+    NO_CONTACT_HANDLES = "no_contact_handles"
+
+
 class PipelineRunStatus(StrEnum):
     """Outcome of one source run inside a pipeline execution."""
 
@@ -158,6 +227,10 @@ ENUM_TYPE_NAMES: dict[str, type[StrEnum]] = {
     "application_status": ApplicationStatus,
     "parse_status": ParseStatus,
     "pipeline_run_status": PipelineRunStatus,
+    "reference_kind": ReferenceKind,
+    "rule_scope": RuleScope,
+    "rule_severity": RuleSeverity,
+    "rule_kind": RuleKind,
 }
 
 

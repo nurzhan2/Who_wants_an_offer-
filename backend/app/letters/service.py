@@ -19,6 +19,14 @@ is trained; letters that got an answer are pasted into the next prompt. The
 common case is that there are none — see :mod:`app.letters.examples` — and in
 that case this step changes nothing at all.
 
+**The workshop step is two different things wearing one name.** A reference
+document changes the prompt and nothing else. A hard rule changes what may be
+saved: it is measured against the finished text, and a letter that breaks one is
+not written at all — the outcome then carries ``letter_unwritable`` and the list
+of what was broken, which is the honest answer to a rule this profile cannot
+satisfy. Both are read once per run, like the examples, and both are empty until
+the owner sets something.
+
 The letter is saved and never sent. Sending belongs to ``agent/``, from a
 browser, under the user's own account, and only after a human has confirmed that
 particular letter for that particular vacancy.
@@ -31,6 +39,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.enums import ReferenceKind, RuleScope
 from app.letters import examples as few_shot
 from app.letters import store
 from app.letters.context import LetterContext, ProfileFacts, build_context
@@ -38,6 +47,9 @@ from app.letters.examples import ChosenExample, OutcomeEvidence
 from app.letters.generator import GeneratedLetter, LetterUnwritableError, generate
 from app.letters.guard import LetterProblem
 from app.llm.router import LLMRouter, get_router
+from app.workshop import store as workshop_store
+from app.workshop.references import ReferenceText
+from app.workshop.rules import RuleSpec, RuleViolation
 
 logger = get_logger(__name__)
 
@@ -65,6 +77,13 @@ class LetterOutcome:
     #: counts. Whatever displays it has to be able to say «данных пока мало» and
     #: mean it, which is why this is counts and a flag rather than a rate.
     evidence: OutcomeEvidence = field(default_factory=OutcomeEvidence)
+    #: Soft rules the saved letter still breaks, and the hard ones that stopped
+    #: it being written at all. A soft violation travels beside a letter that
+    #: was saved; a hard one comes with ``skipped="letter_unwritable"`` and is
+    #: the whole of the explanation the owner gets, so it is carried on the
+    #: outcome rather than left in a log.
+    warnings: tuple[RuleViolation, ...] = ()
+    broken_rules: tuple[RuleViolation, ...] = ()
 
     @property
     def problems(self) -> tuple[LetterProblem, ...]:
@@ -81,6 +100,7 @@ async def write_letter(
     force: bool = False,
     dry_run: bool = False,
     pool: few_shot.ExamplePool | None = None,
+    workshop: "Workshop | None" = None,
 ) -> LetterOutcome:
     """Generate and save one letter.
 
@@ -92,6 +112,11 @@ async def write_letter(
     ``pool`` is the run's past outcomes, read once by :func:`write_batch` and
     passed down. Left out, this loads them itself, so writing a single letter
     from the command line gets the same examples a batch would.
+
+    ``workshop`` is the owner's rules and reference documents, read the same way
+    and for the same reason. Left out it is loaded here, so one letter written
+    from the command line obeys the same rules a batch does — a rule that
+    applied to nine letters and not to the tenth would be worse than no rule.
     """
     facts = await store.load_vacancy_facts(session, vacancy_id)
     if facts is None:
@@ -120,8 +145,16 @@ async def write_letter(
             skipped="dry_run",
         )
 
+    bench = workshop if workshop is not None else await load_workshop(session)
+
     try:
-        letter = await generate(context, router=router or get_router(), examples=chosen)
+        letter = await generate(
+            context,
+            router=router or get_router(),
+            examples=chosen,
+            rules=bench.rules,
+            references=bench.references,
+        )
     except LetterUnwritableError as exc:
         # Nothing is saved. A letter that fails a hard constraint is worse than
         # an empty column: the column is visible in the report below and in the
@@ -132,6 +165,7 @@ async def write_letter(
             "letters.unwritable",
             vacancy_id=str(vacancy_id),
             problems=[problem.value for problem in exc.problems],
+            broken_rules=[violation.rule_id for violation in exc.violations],
             matched=len(context.overlap.matched),
             missing=len(context.overlap.missing),
         )
@@ -142,6 +176,7 @@ async def write_letter(
             matched=len(context.overlap.matched),
             missing=len(context.overlap.missing),
             evidence=evidence,
+            broken_rules=exc.violations,
             skipped="letter_unwritable",
         )
 
@@ -158,7 +193,10 @@ async def write_letter(
         matched=len(context.overlap.matched),
         missing=len(context.overlap.missing),
         rejected_for=[problem.value for problem in letter.rejected_for],
+        broke_rules=[violation.rule_id for violation in letter.broke_rules],
+        warnings=[violation.rule_id for violation in letter.warnings],
         examples_used=letter.examples_used,
+        references_used=len(bench.references),
         outcomes_known=evidence.answered,
     )
     return LetterOutcome(
@@ -170,7 +208,37 @@ async def write_letter(
         missing=len(context.overlap.missing),
         characters=len(letter.text),
         evidence=evidence,
+        warnings=letter.warnings,
         saved=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Workshop:
+    """The owner's rules and reference documents, read once for a run.
+
+    A pair rather than two arguments because they are read together, passed
+    together and empty together: an owner who has set nothing gets an empty one
+    and a prompt identical to the one sent before the workshop existed.
+    """
+
+    rules: tuple[RuleSpec, ...] = ()
+    references: tuple[ReferenceText, ...] = ()
+
+
+async def load_workshop(session: AsyncSession) -> Workshop:
+    """The rules and references that apply to a cover letter, right now.
+
+    Only the owner's own rules: the two built-ins are enforced unconditionally
+    inside :func:`app.letters.generator.generate` and would be checked twice if
+    they travelled here as well. Only the active ones, and only those scoped to
+    cover letters — a rule about a CV has nothing to say about a letter.
+    """
+    return Workshop(
+        rules=await workshop_store.stored_rules(
+            session, scope=RuleScope.COVER_LETTER, active_only=True
+        ),
+        references=await workshop_store.active_references(session, kind=ReferenceKind.COVER_LETTER),
     )
 
 
@@ -201,6 +269,7 @@ async def write_batch(
     force: bool = False,
     dry_run: bool = False,
     pool: few_shot.ExamplePool | None = None,
+    workshop: Workshop | None = None,
 ) -> list[LetterOutcome]:
     """Work down the queue of vacancies that still need a letter.
 
@@ -229,6 +298,11 @@ async def write_batch(
     # vacancy from this same list.
     if pool is None:
         pool = await store.load_examples(session, profile_id=profile.profile_id)
+    # Once for the run, like the pool and for the same reason: the rules do not
+    # change while a batch is being written, and re-reading them per vacancy
+    # would also let a mid-run edit apply to half the letters.
+    if workshop is None:
+        workshop = await load_workshop(session)
     outcomes: list[LetterOutcome] = []
     for item in queued:
         outcomes.append(
@@ -240,6 +314,7 @@ async def write_batch(
                 force=force,
                 dry_run=dry_run,
                 pool=pool,
+                workshop=workshop,
             )
         )
     return outcomes

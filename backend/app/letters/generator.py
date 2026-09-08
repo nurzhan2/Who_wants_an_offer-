@@ -32,13 +32,31 @@ returning something the caller will save. Saving a letter that breaks a hard
 constraint and reporting success is the one outcome nobody can recover from: it
 is discovered by the employer.
 
+**The owner's own rules are the third kind of wrong answer**, and they go
+through the same machinery rather than beside it. A rule from the workshop is
+structured data with a checker (:mod:`app.workshop.rules`), so a hard one is
+enforced exactly the way "no links" is: the model is asked for it in the prompt,
+the answer is measured in code, and a failure spends the retry. When the retries
+are gone the rule-based letter is checked against the same hard rules, and when
+even that fails :class:`LetterUnwritableError` carries the list of what was
+broken — the honest refusal, with the reasons, rather than a letter that quietly
+does not do what its owner told it to.
+
+A hard rule can be unsatisfiable, and that is not a bug to be smoothed over. «В
+навыках не меньше 21 пункта» from a profile listing twelve is a demand that can
+only be met by inventing nine, so the prompt tells the model in as many words to
+keep the truth and break the rule, and this module then refuses the letter and
+says which rule stopped it. Refusing is the outcome the owner can act on;
+complying would be the outcome an employer discovers.
+
 Nothing here sends anything. The letter is generated and saved; sending is the
 agent's job, and only after a human has confirmed it.
 """
 
-# ruff: noqa: RUF001 - the fallback letter is Russian prose, which is
-# what the homoglyph guard cannot tell from a homoglyph attack. Same exemption
-# the project grants app/sources/hh.py and agent/*.py in pyproject.toml,
+# ruff: noqa: RUF001, RUF002 - the fallback letter is Russian prose, and the
+# docstring now quotes the owner's own example of a rule, which is what the
+# homoglyph guard cannot tell from a homoglyph attack. Same exemption the
+# project grants app/sources/hh.py and agent/*.py in pyproject.toml,
 # declared here because pyproject.toml belongs to another change.
 
 from dataclasses import dataclass
@@ -48,13 +66,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.exceptions import AppError, LLMError
 from app.core.logging import get_logger
+from app.db.enums import RuleKind, RuleScope
 from app.letters import prompt as prompt_builder
 from app.letters.context import LetterContext, MatchedSkill, fold
 from app.letters.examples import ChosenExample
-from app.letters.guard import ENGLISH, LetterProblem, find_problems, is_safe
+from app.letters.guard import (
+    ENGLISH,
+    LetterProblem,
+    find_problems,
+    is_safe,
+    length_problems,
+)
 from app.llm import usage as usage_ledger
 from app.llm.base import LLMTask, LLMUsage
 from app.llm.router import LLMRouter, get_router
+from app.workshop import rules as workshop
+from app.workshop.references import ReferenceText
+from app.workshop.rules import RuleSpec, RuleViolation
 
 logger = get_logger(__name__)
 
@@ -96,9 +124,23 @@ class LetterUnwritableError(AppError):
     title = "No usable cover letter could be written"
     problem_type = "letter-unwritable"
 
-    def __init__(self, detail: str, *, problems: tuple[LetterProblem, ...] = ()) -> None:
-        super().__init__(detail, problems=[problem.value for problem in problems])
+    def __init__(
+        self,
+        detail: str,
+        *,
+        problems: tuple[LetterProblem, ...] = (),
+        violations: tuple[RuleViolation, ...] = (),
+    ) -> None:
+        super().__init__(
+            detail,
+            problems=[problem.value for problem in problems],
+            # The owner's own sentence, not this module's English: the person
+            # reading the refusal wrote these rules and knows them by the words
+            # they typed. ``detail`` is what was measured; this is which rule.
+            broken_rules=[violation.message for violation in violations],
+        )
         self.problems = problems
+        self.violations = violations
 
 
 class CoverLetterDraft(BaseModel):
@@ -149,6 +191,16 @@ class GeneratedLetter:
     usages: tuple[LLMUsage, ...] = ()
     addressed_skills: tuple[str, ...] = ()
     acknowledged_gaps: tuple[str, ...] = ()
+    #: Hard rules of the owner's that an attempt broke on the way here, in
+    #: order. Empty on a clean first answer, and kept even when a later attempt
+    #: passed: "the model had to be told twice about the skills section" is
+    #: worth seeing in a log.
+    broke_rules: tuple[RuleViolation, ...] = ()
+    #: Soft rules the text that is being returned still breaks. These are
+    #: warnings and the letter is handed back anyway — a preference the owner
+    #: marked as a preference must not stop a letter — but they travel with it,
+    #: because a warning nobody is shown is a warning nobody set.
+    warnings: tuple[RuleViolation, ...] = ()
     #: How many past letters were shown to the model as examples. Recorded
     #: because a run that had examples and a run that had none are not the same
     #: run, and a report that cannot tell them apart would let somebody credit
@@ -189,8 +241,17 @@ def inspect_draft(draft: CoverLetterDraft, context: LetterContext) -> list[Lette
     the candidate beyond the profile, and that a person reads the letter before
     it is sent. That is a smaller guarantee than "the letter is true"; it is the
     one the code actually provides.
+
+    The no-links and no-at-sign checks reach this through
+    :data:`app.workshop.rules.BUILTIN_RULES` rather than through
+    ``find_problems``. Same predicates, same regular expression, same
+    ``LetterProblem`` reported: what moved is where the constraint is *declared*,
+    so that the person editing their rules in the dashboard sees these two in
+    the same list as their own and can see that they cannot be switched off.
     """
-    problems = find_problems(draft.letter, max_length=context.vacancy.letter_max_length)
+    problems = _builtin_problems(draft.letter) + length_problems(
+        draft.letter, max_length=context.vacancy.letter_max_length
+    )
 
     possessed = context.possessed
     unsupported = [
@@ -205,6 +266,27 @@ def inspect_draft(draft: CoverLetterDraft, context: LetterContext) -> list[Lette
         problems.append(LetterProblem.LEAKED_FENCE)
 
     return problems
+
+
+#: Which ``LetterProblem`` each built-in workshop rule is reported as. The
+#: letter pipeline had these two faults before it had rules, and its logs, its
+#: retry feedback and its Russian labels are all keyed on that vocabulary;
+#: mapping here rather than renaming there keeps one name per fault.
+BUILTIN_PROBLEMS: dict[RuleKind, LetterProblem] = {
+    RuleKind.NO_LINKS: LetterProblem.CONTAINS_LINK,
+    RuleKind.NO_CONTACT_HANDLES: LetterProblem.CONTAINS_AT_SIGN,
+}
+
+
+def _builtin_problems(text: str) -> list[LetterProblem]:
+    """The built-in rules, checked, in this pipeline's own vocabulary.
+
+    Unconditional: the built-ins are constants, not rows, and no caller can
+    leave them out by passing a shorter list. That is the whole difference
+    between "undeletable" and "undeletable unless somebody forgets".
+    """
+    broken = workshop.check(text, scope=RuleScope.COVER_LETTER, rules=workshop.BUILTIN_RULES)
+    return [BUILTIN_PROBLEMS[violation.kind] for violation in broken]
 
 
 def _declared_keys(name: str) -> set[str]:
@@ -224,15 +306,27 @@ def _declared_keys(name: str) -> set[str]:
     return {key for key in (fold(name), fold(prompt_builder.undecorate(name))) if key}
 
 
-def feedback_for(problems: list[LetterProblem]) -> str:
-    """The correction the model is shown on its second attempt."""
-    faults = "\n".join(f"- {ENGLISH[problem]}" for problem in problems)
+def feedback_for(problems: list[LetterProblem], violations: tuple[RuleViolation, ...] = ()) -> str:
+    """The correction the model is shown on its second attempt.
+
+    A rule contributes its ``detail`` — the English sentence saying what was
+    measured — and never the owner's own message. Both because the message is
+    Russian in an English prompt, and because it is free text the owner typed:
+    the one thing the model is never shown is a sentence that did not go through
+    :mod:`app.workshop.prompt`.
+    """
+    faults = [f"- {ENGLISH[problem]}" for problem in problems]
+    faults += [f"- {violation.detail}" for violation in violations]
+    listed = "\n".join(faults)
     return (
         "\n## Your previous answer was rejected\n\n"
         "It was checked in code, not by a person, and it failed on:\n\n"
-        f"{faults}\n\n"
+        f"{listed}\n\n"
         "Write the letter again, correcting every point above, and return the "
-        "JSON object and nothing else."
+        "JSON object and nothing else. Correct them by writing differently, "
+        "never by claiming experience the candidate does not have: an invented "
+        "claim is rejected too, and it is the one failure an employer discovers "
+        "instead of you."
     )
 
 
@@ -241,6 +335,8 @@ async def generate(
     *,
     router: LLMRouter | None = None,
     examples: tuple[ChosenExample, ...] = (),
+    rules: tuple[RuleSpec, ...] = (),
+    references: tuple[ReferenceText, ...] = (),
 ) -> GeneratedLetter:
     """One letter for one vacancy, guaranteed to pass every hard constraint.
 
@@ -261,10 +357,26 @@ async def generate(
     claim copied out of an example is rejected by ``inspect_draft`` exactly like
     one the model invented on its own. Empty is the ordinary case, and an empty
     tuple renders no prompt text at all.
+
+    ``rules`` and ``references`` are the workshop's, and they are not the same
+    kind of thing. A reference changes the prompt and nothing else, exactly like
+    an example. A **hard** rule changes what is accepted: it is measured against
+    the finished text, it spends a retry when it fails, and when the fallback
+    breaks it too the answer is :class:`LetterUnwritableError` rather than a
+    letter that does not do what it was told. A soft one is measured too and
+    reported as a warning beside a letter that is still returned.
+
+    Built-ins in ``rules`` are dropped rather than checked twice: they are
+    enforced unconditionally by ``inspect_draft`` and would otherwise be
+    reported once as a ``LetterProblem`` and once as a violation of the same
+    rule. A caller handing in the whole active set is therefore correct, and so
+    is one handing in only the owner's own.
     """
     router = router or get_router()
+    owner_rules = tuple(rule for rule in rules if not rule.is_builtin and rule.is_active)
     usages: list[LLMUsage] = []
     seen: list[LetterProblem] = []
+    broke: list[RuleViolation] = []
     feedback = ""
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -273,7 +385,13 @@ async def generate(
                 PROMPT_NAME,
                 CoverLetterDraft,
                 task=TASK,
-                variables=prompt_builder.variables(context, feedback=feedback, examples=examples),
+                variables=prompt_builder.variables(
+                    context,
+                    feedback=feedback,
+                    examples=examples,
+                    rules=owner_rules,
+                    references=references,
+                ),
             )
         except LLMError as exc:
             # The provider is gone, or it failed to produce the shape twice.
@@ -289,7 +407,11 @@ async def generate(
 
         usages.append(usage_ledger.record(result.usage))
         problems = inspect_draft(result.value, context)
-        if not problems:
+        violations = workshop.check(
+            result.value.letter, scope=RuleScope.COVER_LETTER, rules=owner_rules
+        )
+        blocking = workshop.hard(violations)
+        if not problems and not blocking:
             return GeneratedLetter(
                 text=result.value.letter,
                 language=result.value.language or context.language,
@@ -299,16 +421,20 @@ async def generate(
                 usages=tuple(usages),
                 addressed_skills=tuple(result.value.addressed_skills),
                 acknowledged_gaps=tuple(result.value.acknowledged_gaps),
+                broke_rules=tuple(broke),
+                warnings=workshop.soft(violations),
                 examples_used=len(examples),
             )
 
         seen.extend(problems)
-        feedback = feedback_for(problems)
+        broke.extend(blocking)
+        feedback = feedback_for(problems, blocking)
         logger.warning(
             "letters.generate.rejected",
             vacancy_id=str(context.vacancy.vacancy_id),
             attempt=attempt,
             problems=[problem.value for problem in problems],
+            broken_rules=[violation.rule_id for violation in blocking],
         )
 
     fallback = compose_fallback(context)
@@ -316,22 +442,33 @@ async def generate(
         "letters.generate.fell_back",
         vacancy_id=str(context.vacancy.vacancy_id),
         problems=[problem.value for problem in seen],
+        broken_rules=[violation.rule_id for violation in broke],
         unnameable_skills=list(fallback.unnameable_skills),
     )
 
     remaining = find_problems(fallback.text, max_length=context.vacancy.letter_max_length)
-    if remaining:
+    # The fallback is assembled from the database and cannot be told to try
+    # again, so a hard rule it breaks is the end of the road. That is the
+    # reachable case for a demanding rule — «в навыках не меньше 21 пункта»
+    # against a profile listing twelve is not something any letter can satisfy
+    # truthfully — and the refusal below is the honest answer to it. The
+    # alternative, saving a letter that quietly ignores the owner's own rule
+    # while the report says it was written, is the one they cannot recover from.
+    unmet = workshop.hard(
+        workshop.check(fallback.text, scope=RuleScope.COVER_LETTER, rules=owner_rules)
+    )
+    if remaining or unmet:
         logger.error(
             "letters.generate.fallback_unusable",
             vacancy_id=str(context.vacancy.vacancy_id),
             problems=[problem.value for problem in remaining],
+            broken_rules=[violation.rule_id for violation in unmet],
             characters=len(fallback.text),
         )
         raise LetterUnwritableError(
-            "the rule-based letter fails the checks too, so there is nothing left "
-            "to fall back to: this vacancy and this profile have too little in "
-            "them to write a letter from",
+            _unwritable_detail(remaining, unmet),
             problems=tuple(remaining),
+            violations=unmet,
         )
 
     return GeneratedLetter(
@@ -346,12 +483,49 @@ async def generate(
         # overlap here would be the same silent deletion in the outcome record.
         addressed_skills=fallback.addressed_skills,
         acknowledged_gaps=context.overlap.missing,
+        broke_rules=tuple(broke),
+        # Measured on the text that is actually being returned, not carried over
+        # from an attempt that was thrown away: the fallback is a different
+        # letter and breaks a different set of preferences.
+        warnings=workshop.soft(
+            workshop.check(fallback.text, scope=RuleScope.COVER_LETTER, rules=owner_rules)
+        ),
         # Zero even when the model was shown examples, because this text is not
         # the model's: the rule-based letter is assembled from the context and
         # saw nothing. Reporting the examples here would credit them for a
         # letter they had no part in, which is the whole failure mode this
         # feature has to avoid.
         examples_used=0,
+    )
+
+
+def _unwritable_detail(problems: list[LetterProblem], violations: tuple[RuleViolation, ...]) -> str:
+    """Why nothing could be written, in the terms of whichever thing stopped it.
+
+    Two different failures wear this exception, and telling a person the wrong
+    one costs them an afternoon. A letter that fails the built-in checks means
+    the vacancy and the profile have too little in them; a letter that fails one
+    of the owner's own rules means the rule is asking for something this data
+    cannot supply, and the fix is in the workshop rather than in the resume.
+    """
+    if violations and not problems:
+        broken = "; ".join(violation.detail for violation in violations)
+        return (
+            "the rule-based letter breaks a hard rule too, so there is nothing "
+            f"left to fall back to: {broken}. The letter was not saved, because "
+            "a rule can only be kept by writing differently and this one cannot "
+            "be kept at all without claiming something untrue"
+        )
+    if violations:
+        broken = "; ".join(violation.detail for violation in violations)
+        return (
+            "the rule-based letter fails the checks and breaks a hard rule, so "
+            f"there is nothing left to fall back to: {broken}"
+        )
+    return (
+        "the rule-based letter fails the checks too, so there is nothing left "
+        "to fall back to: this vacancy and this profile have too little in "
+        "them to write a letter from"
     )
 
 

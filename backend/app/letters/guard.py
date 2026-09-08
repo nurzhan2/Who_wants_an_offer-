@@ -212,6 +212,33 @@ def has_link(text: str) -> bool:
     return False
 
 
+def length_problems(
+    text: str | None,
+    *,
+    max_length: int = DEFAULT_MAX_LENGTH,
+    min_length: int = MIN_LENGTH,
+) -> list[LetterProblem]:
+    """How big the text is, against the two bounds a letter has.
+
+    Addressable on its own because the link and at-sign checks moved into the
+    workshop as built-in rules (:data:`app.workshop.rules.BUILTIN_RULES`), so
+    :func:`app.letters.generator.inspect_draft` now gets those two from there and
+    only the sizes from here. The rules call ``has_link`` and ``AT_SIGN`` below —
+    the definitions did not move, only where the letter pipeline asks for them.
+
+    Empty short-circuits: a missing letter is one fault, not three, and saying
+    that it is also too short adds nothing a person can act on.
+    """
+    if text is None or not text.strip():
+        return [LetterProblem.EMPTY]
+    problems: list[LetterProblem] = []
+    if len(text) > max_length:
+        problems.append(LetterProblem.TOO_LONG)
+    if len(text.strip()) < min_length:
+        problems.append(LetterProblem.TOO_SHORT)
+    return problems
+
+
 def find_problems(
     text: str | None,
     *,
@@ -223,18 +250,17 @@ def find_problems(
     A list rather than the first problem, so one regeneration can be told about
     every fault instead of discovering the next one after each attempt.
     """
-    if text is None or not text.strip():
-        return [LetterProblem.EMPTY]
+    sizes = length_problems(text, max_length=max_length, min_length=min_length)
+    if sizes == [LetterProblem.EMPTY]:
+        return sizes
+    # Not None past that branch: length_problems returns EMPTY for None and for
+    # text that is only whitespace.
     problems: list[LetterProblem] = []
-    if has_link(text):
+    if has_link(text or ""):
         problems.append(LetterProblem.CONTAINS_LINK)
-    if AT_SIGN.search(text):
+    if AT_SIGN.search(text or ""):
         problems.append(LetterProblem.CONTAINS_AT_SIGN)
-    if len(text) > max_length:
-        problems.append(LetterProblem.TOO_LONG)
-    if len(text.strip()) < min_length:
-        problems.append(LetterProblem.TOO_SHORT)
-    return problems
+    return problems + sizes
 
 
 def is_safe(text: str) -> bool:

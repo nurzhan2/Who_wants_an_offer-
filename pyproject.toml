@@ -138,6 +138,15 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
 "backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]
 "backend/app/pipeline/runner.py" = ["RUF001", "RUF002"]
+# The workshop is where the owner writes rules about their own documents, so
+# every module in it argues about Russian section headings ("навыки"), quotes
+# the owner's own example of a rule, and matches the dash characters a Russian
+# document is bulleted with. RUF001-002 fire on almost every one of those lines
+# and would bury a genuine homoglyph.
+"backend/app/workshop/*.py" = ["RUF001", "RUF002", "RUF003"]
+"backend/tests/test_workshop.py" = ["RUF001", "RUF002", "RUF003"]
+"backend/tests/test_workshop_api.py" = ["RUF001", "RUF002", "RUF003"]
+
 # Every message this agent prints is read by the person whose account it is
 # about to act on, so all of them are Russian, and RUF001-003 fire on almost
 # every line. Scoped to the package rather than disabled globally.
