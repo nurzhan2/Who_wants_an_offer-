@@ -31,12 +31,24 @@ and may have been edited by hand, so they are not text this code wrote, and text
 this code did not write does not get to close a fence. The block sits after
 every instruction that constrains the letter and before the description, so the
 untrusted part stays last.
+
+Two more come from :mod:`app.workshop`, and they sit on opposite sides of the
+same line. The **rules** block is generated from structured parameters by code,
+so it is text this project wrote and it goes high up, beside the hard rules it
+extends. The **references** block is exemplary documents the owner uploaded —
+somebody else's files — so it is untrusted like the description, carries its own
+fence, and sits as late as anything can while leaving the description last.
+Both render to the empty string when the owner has set nothing, which is what
+keeps the prompt identical to the one sent before the workshop existed.
 """
 
 from app.letters.context import LetterContext, MatchedSkill, clip_description
 from app.letters.examples import ChosenExample
 from app.letters.examples import block as examples_block
 from app.letters.guard import is_safe
+from app.workshop import prompt as workshop_prompt
+from app.workshop.references import ReferenceText
+from app.workshop.rules import RuleSpec
 
 #: Markers around the untrusted description. Long and unlovely on purpose: they
 #: have to be something a job posting would never contain by accident.
@@ -221,6 +233,8 @@ def variables(
     *,
     feedback: str = "",
     examples: tuple[ChosenExample, ...] = (),
+    rules: tuple[RuleSpec, ...] = (),
+    references: tuple[ReferenceText, ...] = (),
 ) -> dict[str, str]:
     """Everything ``cover_letter.md`` needs, and nothing it does not.
 
@@ -228,10 +242,16 @@ def variables(
     so this dict and the template are checked against each other on every call —
     which is why a test renders it rather than only inspecting it.
 
-    ``examples`` is empty in the ordinary case and renders as the empty string,
-    which leaves the prompt exactly as it was before few-shot examples existed.
-    The block is defanged like the description: an example is a letter a person
-    sent, not a letter this code wrote, so it does not get to close a fence.
+    ``examples``, ``rules`` and ``references`` are all empty in the ordinary
+    case and all render as the empty string, which leaves the prompt exactly as
+    it was before any of the three existed.
+
+    Two of the three are defanged, and which two is the point. An example is a
+    letter a person sent and a reference is a file somebody uploaded: neither is
+    text this code wrote, so neither gets to close a fence. The rules block *is*
+    text this code wrote — it is generated from structured parameters, never
+    from the sentence the owner typed — so there is nothing in it to defang, and
+    :mod:`app.workshop.prompt` explains why that sentence stays out.
     """
     return {
         "letter_language": context.language,
@@ -239,7 +259,9 @@ def variables(
         "vacancy_facts": vacancy_block(context),
         "candidate_facts": candidate_block(context),
         "skill_overlap": overlap_block(context),
+        "workshop_rules": workshop_prompt.rules_block(rules),
         "examples": defang(examples_block(examples)),
+        "style_references": workshop_prompt.references_block(references),
         "fence_open": FENCE_OPEN,
         "fence_close": FENCE_CLOSE,
         "description": fenced_description(context),

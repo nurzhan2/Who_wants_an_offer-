@@ -47,7 +47,11 @@ from app.db.enums import (
     MatchBucket,
     ParseStatus,
     PipelineRunStatus,
+    ReferenceKind,
     RemoteType,
+    RuleKind,
+    RuleScope,
+    RuleSeverity,
     SalaryPeriod,
     Seniority,
     SkillEvidence,
@@ -633,3 +637,93 @@ class SourceState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class ReferenceDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A document the owner keeps as an example of how theirs should look.
+
+    Two kinds, never mixed: an exemplary CV and an exemplary cover letter. What
+    is stored is the extracted plain text, not the file — the file is read once,
+    by the same extractor an uploaded resume goes through, and then discarded.
+    Keeping the bytes would mean keeping somebody else's document indefinitely
+    for no gain: nothing downstream can use anything but the text.
+
+    **The text is untrusted input.** It is a document this project did not
+    write, usually somebody else's, and it reaches the model quoted, fenced and
+    labelled as data — see ``app/workshop/prompt.py``. The rule the reference
+    exists to serve is a rule about *form*: structure, length, register, the
+    order things are said in. Nothing factual may cross from it, and the prompt
+    says so in as many words.
+    """
+
+    __tablename__ = "reference_document"
+
+    kind: Mapped[ReferenceKind] = mapped_column(
+        pg_enum(ReferenceKind, "reference_kind"), nullable=False, index=True
+    )
+    #: What the owner calls it in their own list.
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    #: "Чем именно хорош" — why this one is worth imitating. For the person, and
+    #: for the prompt: "the opening names the product, not the company" is the
+    #: sort of note that tells the model what to take from it.
+    note: Mapped[str | None] = mapped_column(Text)
+    #: The extracted plain text. The whole of what is kept.
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Off means "keep it, do not show it". Deleting is also available; this is
+    #: for trying a reference out and putting it back.
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    #: Provenance of the upload, so a list of five references is legible. NULL
+    #: for a reference pasted as text, which is a real and ordinary case.
+    source_filename: Mapped[str | None] = mapped_column(String(255))
+    source_format: Mapped[str | None] = mapped_column(String(10))
+    size_bytes: Mapped[int | None] = mapped_column(Integer)
+
+
+class GenerationRule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One checkable requirement the owner placed on their own documents.
+
+    The shape is deliberately narrow: a closed vocabulary of kinds
+    (:class:`app.db.enums.RuleKind`), a JSONB blob of that kind's parameters,
+    and a sentence for a human. What it is *not* is a free-text instruction, and
+    that is the load-bearing decision in this table.
+
+    A rule expressed as prose can only be asked of the model. Asking is not
+    checking, and a rule that is only asked is a rule that is silently broken.
+    Every kind here is instead something a function decides by reading the
+    finished document, which is what makes ``severity = hard`` mean anything.
+
+    The second consequence is a boundary rather than a mechanism. Because a rule
+    is structure and not prose, the only way it can put a *claim* into a
+    document is by naming one — a required keyword, a required section heading —
+    and that is a small enough surface to check at the moment the rule is saved.
+    ``app/workshop/truth.py`` does the checking, and refuses a rule that would
+    make the system assert something the profile does not support.
+
+    ``params`` is JSONB because it is a different shape per kind, read whole and
+    never queried by field; ``app.workshop.rules.RuleParams`` is the contract,
+    validated on the way in and on the way out.
+    """
+
+    __tablename__ = "generation_rule"
+
+    kind: Mapped[RuleKind] = mapped_column(pg_enum(RuleKind, "rule_kind"), nullable=False)
+    scope: Mapped[RuleScope] = mapped_column(
+        pg_enum(RuleScope, "rule_scope"), nullable=False, index=True
+    )
+    severity: Mapped[RuleSeverity] = mapped_column(
+        pg_enum(RuleSeverity, "rule_severity"),
+        default=RuleSeverity.HARD,
+        nullable=False,
+    )
+    #: This kind's parameters, as ``app.workshop.rules.RuleParams`` dumps them.
+    #: Carries ``kind`` itself, so a row is self-describing and a mismatch
+    #: between the column and the payload fails validation rather than being
+    #: resolved by whichever the reader happened to trust.
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    #: What a person is shown when this rule is broken. Russian, theirs, and
+    #: **never sent to the model** — the block the model is shown is rendered
+    #: from ``params`` by code, so a sentence typed here cannot become an
+    #: instruction. See ``app/workshop/prompt.py``.
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
