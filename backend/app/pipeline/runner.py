@@ -54,6 +54,7 @@ from app.db.repositories.vacancy import UpsertItem, VacancyRepository
 from app.db.session import session_factory
 from app.normalize.fingerprint import VERSION as FINGERPRINT_VERSION
 from app.normalize.fingerprint import fingerprint
+from app.normalize.sync import sync_requirements
 from app.pipeline.embedding import EmbeddingOutcome, embed_pending
 from app.schemas.pipeline import PipelineRunCreate, PipelineRunFinish
 from app.schemas.profile import CandidateProfileRead
@@ -99,6 +100,11 @@ class SourceOutcome:
     new: int = 0
     updated: int = 0
     duplicates: int = 0
+    #: ``vacancy_skill`` rows derived from what this source's postings carried.
+    #: Worth reporting next to ``new``: a source can store hundreds of vacancies
+    #: and contribute nothing scoreable, and that is a fact about the source
+    #: rather than about the crawl.
+    skills: int = 0
     requests: int = 0
     errors: list[dict[str, Any]] = field(default_factory=list)
     skipped: Unavailable | None = None
@@ -164,6 +170,11 @@ class RunReport:
     def duplicates(self) -> int:
         """Postings collapsed into a vacancy another posting already created."""
         return sum(outcome.duplicates for outcome in self.sources)
+
+    @property
+    def skills(self) -> int:
+        """``vacancy_skill`` rows this run derived."""
+        return sum(outcome.skills for outcome in self.sources)
 
     @property
     def challenged_sources(self) -> list[str]:
@@ -560,9 +571,16 @@ async def _write(postings: list[RawPosting], outcome: SourceOutcome, sessions: S
     ]
     async with sessions() as session:
         result = await VacancyRepository(session).bulk_upsert(items)
+        # In the same transaction as the write, over the ids it just returned.
+        # A vacancy that is stored but has no ``vacancy_skill`` rows is not
+        # scoreable, so a crash between the two would leave the corpus in the
+        # state this whole change exists to end. Deriving is pure and local —
+        # no requests, no model — so it costs the batch a few statements.
+        sync = await sync_requirements(session, vacancy_ids=result.vacancy_ids)
         await session.commit()
     outcome.new += result.created
     outcome.updated += result.updated
+    outcome.skills += sync.skills_written
     # bulk_upsert deduplicates by fingerprint, so a cross-posted job contributes
     # one vacancy and several source rows. The gap is the cross-publisher
     # duplicate rate, which is worth reporting rather than hiding.

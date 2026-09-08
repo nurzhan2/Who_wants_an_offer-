@@ -92,6 +92,7 @@ known-first-party = ["app", "factories", "helpers"]
 # genuinely carry Russian sample text rather than disabled globally.
 "scripts/bench_ollama.py" = ["RUF001"]
 "scripts/run_pipeline.py" = ["RUF001", "RUF002"]
+"scripts/backfill_skills.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
@@ -108,6 +109,7 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/tests/test_sources_http.py" = ["RUF001", "RUF002"]
 "backend/tests/test_sources_registry.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_runner.py" = ["RUF001", "RUF002"]
+"backend/tests/test_normalize_requirements.py" = ["RUF001", "RUF002"]
 "backend/tests/test_pipeline_end_to_end.py" = ["RUF001", "RUF002"]
 # Its fixtures are notes a person typed into a tracker, in Russian, next to a
 # block the agent rendered in Russian — telling those two apart is the whole

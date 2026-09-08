@@ -18,6 +18,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any, ClassVar
 
 import pytest
@@ -27,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.enums import PipelineRunStatus
-from app.db.models import PipelineRun, SourceQuota, Vacancy, VacancySource
+from app.db.models import PipelineRun, SourceQuota, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.profile import ProfileRepository
 from app.pipeline.runner import run_pipeline
 from app.sources import registry
@@ -369,3 +370,61 @@ async def test_a_changed_description_is_re_embedded(
 
     assert second.embedding is not None
     assert second.embedding.embedded == 1
+
+
+async def test_a_crawl_leaves_its_vacancies_scoreable(
+    db_session: AsyncSession,
+    sessions: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    only_fixture_sources: None,
+    profile: None,
+) -> None:
+    """Skills are derived in the same step that stores the vacancy.
+
+    The alternative — deriving them in a later pass — is how ``vacancy_skill``
+    came to be empty for all 643 rows while the payloads to fill it sat in the
+    database the whole time. A vacancy that is stored but carries no skill rows
+    is not scoreable, so the two have to land together or not at all.
+    """
+    FixtureSource.postings = [
+        posting("s1", title="Backend Engineer", company="Acme").model_copy(
+            update={
+                "raw": {
+                    "_derived": {
+                        "key_skills": ["Python", "PostgreSQL", "Английский язык"],
+                        "work_experience": "between3And6",
+                    }
+                }
+            }
+        )
+    ]
+    FixtureSource.fail = False
+
+    report = await run_pipeline(sessions=sessions)
+
+    assert report.skills == 2, "the language must not have become a third skill"
+    names = await db_session.execute(select(VacancySkill.canonical_name))
+    assert sorted(row[0] for row in names.all()) == ["postgresql", "python"]
+    stored = (await db_session.execute(select(Vacancy))).scalars().one()
+    assert stored.min_years == Decimal("3")
+
+
+async def test_a_crawl_of_postings_without_skills_still_stores_them(
+    db_session: AsyncSession,
+    sessions: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    only_fixture_sources: None,
+    profile: None,
+) -> None:
+    """Deriving nothing is not a reason to store nothing.
+
+    Most of the corpus is this shape — hh's key-skills field is optional and 449
+    of 643 rows leave it blank — so a derivation that could fail the write would
+    fail most of the crawl.
+    """
+    FixtureSource.postings = [posting("s2", title="Sales Manager", company="Acme")]
+    FixtureSource.fail = False
+
+    report = await run_pipeline(sessions=sessions)
+
+    assert report.new == 1
+    assert report.skills == 0
+    assert await count(db_session, VacancySkill) == 0

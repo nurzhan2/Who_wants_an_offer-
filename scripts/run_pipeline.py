@@ -65,7 +65,7 @@ def show(report: RunReport, quota: dict[str, tuple[int, int | None]]) -> None:
     print(RULE)
     print(
         f"  {'источник':<12} {'найдено':>8} {'новых':>7} {'обновл':>7} "
-        f"{'дублей':>7} {'запросов':>9} {'сек':>7}"
+        f"{'дублей':>7} {'навыков':>8} {'запросов':>9} {'сек':>7}"
     )
     for outcome in sorted(report.sources, key=lambda item: item.slug):
         if outcome.skipped is not None:
@@ -74,7 +74,8 @@ def show(report: RunReport, quota: dict[str, tuple[int, int | None]]) -> None:
             continue
         print(
             f"  {outcome.slug:<12} {outcome.found:>8} {outcome.new:>7} {outcome.updated:>7} "
-            f"{outcome.duplicates:>7} {outcome.requests:>9} {outcome.duration_seconds:>7.1f}"
+            f"{outcome.duplicates:>7} {outcome.skills:>8} {outcome.requests:>9} "
+            f"{outcome.duration_seconds:>7.1f}"
         )
         for error in outcome.errors:
             print(f"  {'':<12}   ошибка: {error.get('error')}: {error.get('detail')}")
@@ -110,7 +111,8 @@ def show(report: RunReport, quota: dict[str, tuple[int, int | None]]) -> None:
     print(RULE)
     print(
         f"ИТОГО  найдено {report.found}, новых {report.new}, "
-        f"дублей схлопнуто {report.duplicates}, за {report.duration_seconds:.1f} с"
+        f"дублей схлопнуто {report.duplicates}, навыков {report.skills}, "
+        f"за {report.duration_seconds:.1f} с"
     )
     print(RULE)
 
