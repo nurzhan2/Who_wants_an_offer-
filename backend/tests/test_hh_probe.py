@@ -34,6 +34,7 @@ from app.sources.hh_probe import (
     catalog_entries,
     catalog_sitemaps,
     matched_terms,
+    plan_for,
     probe,
     read_page,
     read_roles,
@@ -518,3 +519,31 @@ async def test_an_unreadable_index_stops_the_measurement_and_names_the_file(
     # "we never read the sitemap" must not be reported as "the sitemap holds
     # no development slugs": the second is a measurement and the first is not.
     assert not any("нет ни одного слага" in note for note in report.notes)
+
+
+# -- the plan the crawl would build ------------------------------------
+
+
+def test_the_plan_shows_which_slugs_each_role_found() -> None:
+    """The one step of the chain nobody can verify by reading it.
+
+    Matching «Программист, разработчик» against ``programmist`` is a
+    transliteration table, and no amount of care makes a table self-evidently
+    right. This is what the probe prints against the live slug list so that a
+    person can check it — and a role with an empty list beside it is the finding,
+    not a rounding error.
+    """
+    from app.sources.hh_roles import read_directory
+
+    plan = plan_for(
+        ("python", "docker"),
+        read_directory(ROLES),
+        ("programmist", "devops-inzhener", "buhgalter", "junior-python-developer"),
+    )
+
+    assert "backend" in plan.families
+    found = {role.name: role.slugs for role in plan.roles}
+    assert found["Программист, разработчик"] == ("programmist",)
+    assert found["DevOps-инженер"] == ("devops-inzhener",)
+    assert plan.by_keyword == ("junior-python-developer",)
+    assert "buhgalter" not in plan.by_keyword

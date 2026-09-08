@@ -1,0 +1,384 @@
+"""Which hh professional roles a profile asks for, and which catalogue pages that is.
+
+**The measurement this rests on** (2026-09-08, ``scripts/probe_hh_roles.py``, see
+docs/SOURCES.md § «Обход по профессиям»). ``almaty.hh.kz`` publishes 15
+``vacancies{N}.xml`` files holding 10 435 catalogue slugs;
+``/vacancies/programmist`` carries the frontend's boot state with 50 vacancy ids
+on it, both in the markup and in the state. Paging exists only as ``?page=0..3``
+— under hh's ``Disallow: *?*`` and therefore closed to us — so depth comes from
+the breadth of the slug set rather than from pagination, and the duplicates that
+breadth produces are collapsed by the fingerprint that already runs.
+``api.hh.ru/professional_roles`` answers with 194 roles, of which id 96 is
+«Программист, разработчик».
+
+**Why the chain is three steps and not one.** The obvious shortcut is a list of
+slugs in a file. It is wrong twice over: it hardcodes one person's job search
+into the repository, which CLAUDE.md forbids for the city and forbids here for
+the same reason, and it goes stale silently — a slug hh retires becomes a 404
+nobody notices. So:
+
+1. *Profile to families.* The planner already turns a resume into keywords, one
+   group of skills at a time (``app/sources/query_planner.py``, groups declared
+   in ``app/resume/skills_min.yaml``). ``hh_roles.yaml`` says which family of
+   work each of those keyword sets means. That file is the whole of the
+   per-deployment configuration, it sits beside ``hh_sites.yaml``, and it names
+   no person.
+2. *Families to roles.* A family names roles in words; the words are matched
+   against **hh's own directory**, live. Nothing here holds a copy of hh's role
+   list, so a renamed role stops matching visibly — as a count in a log line —
+   instead of an id in a config quietly pointing at something else.
+3. *Roles to slugs.* A catalogue slug is a transliteration of a Russian role
+   name, so the matching is done on a transliterated, folded form of both. This
+   is the only guessy step in the chain, and it is deliberately the last one:
+   its input is hh's own vocabulary at both ends, and the probe prints the
+   mapping it produced so a person can check it against the live site rather
+   than trust this docstring.
+
+**Keywords also match slugs directly**, without going through the directory, and
+that is not redundancy. It is what makes the mechanism work for a profile whose
+family this file has never heard of: an accountant's keywords find the
+accountant's catalogue pages, badly but honestly, where a dev-shaped default
+would hand them a corpus of jobs they cannot do. A profile that matches no
+family is not given somebody else's roles; it is given its own words.
+
+**Being wide is a decision, not an accident.** The brief asks for the whole
+neighbouring circle — backend in any language, intern and junior developer,
+data/ML, DevOps, integrations, automation, QA automation — because a posting a
+narrow filter drops is dropped for good, while a posting a wide one lets in
+costs one scoring pass that is already written and already honest.
+"""
+
+import re
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+from typing import Any
+
+import yaml  # type: ignore[import-untyped]
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
+from app.core.exceptions import SourceError
+from app.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+#: The profile-to-roles mapping. A file rather than constants for the reason
+#: CLAUDE.md gives about the city: which work a candidate is looking for is a
+#: property of the deployment and not of the code.
+ROLES_FILE = Path(__file__).with_name("hh_roles.yaml")
+
+#: Everything that is not a Latin letter or a digit separates one word from the
+#: next. Latin only, and not by omission: every caller runs :func:`fold` first,
+#: so by the time a name reaches this it has no Cyrillic left in it.
+WORD_BREAK = re.compile(r"[^0-9a-z]+")
+
+#: Cyrillic to Latin, in the shape hh's own slugs use: ``маркетолог`` is
+#: ``marketolog`` and ``аналитик`` is ``analitik``, both measured. The three
+#: letters where two honest transliteration schemes legitimately disagree are
+#: normalised afterwards by :func:`fold` rather than guessed at here; see
+#: :data:`FOLD` for which they are.
+TRANSLIT: dict[str, str] = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "y",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "h",
+    "ц": "c",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "sch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+#: The spellings two honest transliterations disagree about, collapsed to one so
+#: that ``testirovshchik`` and ``testirovschik`` are the same word. Applied to
+#: both sides of every comparison, so it does not matter which scheme hh used.
+FOLD: tuple[tuple[str, str], ...] = (
+    ("shch", "sch"),
+    ("kh", "h"),
+    ("ts", "c"),
+    ("iy", "y"),
+    ("yy", "y"),
+    ("j", "y"),
+    ("q", "k"),
+    ("x", "ks"),
+)
+
+#: Words that name a rank rather than a trade. A role's own distinctive word may
+#: stand alone when it is matched against a slug; these may not, or «DevOps-
+#: инженер» would claim every ``inzhener-`` slug on the site, most of which are
+#: construction.
+GENERIC_ROLE_WORDS: frozenset[str] = frozenset(
+    {
+        "inzhener",
+        "menedzher",
+        "specialist",
+        "konsultant",
+        "operator",
+        "assistent",
+        "rukovoditel",
+        "administrator",
+        "direktor",
+        "tehnik",
+        "master",
+        "sotrudnik",
+        "rabotnik",
+        "nachalnik",
+        "starshiy",
+        "mladshiy",
+        "veduschiy",
+        "glavnyy",
+        "po",
+        "i",
+        "v",
+        "s",
+        "dlya",
+        "ili",
+    }
+)
+
+#: Shortest word that may stand for a role on its own. Below it a token is a
+#: preposition or an abbreviation whose collisions cost more than it finds.
+MIN_ROLE_TOKEN = 5
+
+#: Below this a term is matched as a whole word rather than as a substring. Long
+#: enough to be distinctive is the rule; ``ml`` inside ``html`` is the reason.
+MIN_SUBSTRING_TERM = 4
+
+
+def tokens(text: str) -> tuple[str, ...]:
+    """A name split into the words that may be matched against, folded."""
+    return tuple(part for part in WORD_BREAK.split(fold(text)) if part)
+
+
+def translit(text: str) -> str:
+    """Cyrillic as hh writes it in a slug. Latin passes through untouched."""
+    return "".join(TRANSLIT.get(char, char) for char in text.casefold())
+
+
+def fold(text: str) -> str:
+    """One spelling of a word, whichever transliteration produced it."""
+    folded = translit(text)
+    for before, after in FOLD:
+        folded = folded.replace(before, after)
+    return folded
+
+
+def carries(text: str, terms: Sequence[str]) -> tuple[str, ...]:
+    """Which of these terms this name carries, and by which rule.
+
+    Long terms match as substrings, so ``razrabotchik`` finds
+    ``razrabotchik-python``. Short ones match a whole word only; see
+    :data:`MIN_SUBSTRING_TERM`. Both sides are folded, so a term written in
+    Russian finds a slug written in Latin.
+    """
+    lowered = fold(text)
+    words = set(tokens(text))
+
+    def carried(term: str) -> bool:
+        needle = fold(term)
+        if len(needle) < MIN_SUBSTRING_TERM:
+            return needle in words
+        return needle in lowered
+
+    return tuple(term for term in terms if carried(term))
+
+
+class RoleFamily(BaseModel):
+    """One kind of work, and the two vocabularies that recognise it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    key: str = Field(min_length=1, max_length=40)
+    #: Matched against the keywords the planner derived from the profile.
+    when: tuple[str, ...] = ()
+    #: Matched against the names in ``api.hh.ru/professional_roles``.
+    roles: tuple[str, ...] = ()
+
+
+class DirectoryRole(BaseModel):
+    """One entry of hh's professional-role directory."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    name: str = Field(min_length=1, max_length=200)
+    #: The group hh files it under. Nothing here decides anything by it — a
+    #: family names roles, not categories — but a person checking why a slug was
+    #: chosen reads it, and it costs one field to carry.
+    category: str | None = Field(default=None, max_length=200)
+
+
+def load_families(path: Path | None = None) -> tuple[RoleFamily, ...]:
+    """The configured families. Read on demand, not at import.
+
+    The default is resolved in the body rather than in the signature, for the
+    reason ``load_sites`` states: a default argument is evaluated once and would
+    pin the module constant forever.
+    """
+    path = path or ROLES_FILE
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise SourceError(
+            f"hh: не читается {path.name} с соответствием «профиль -> роли»: {exc}",
+            source_slug="hh",
+        ) from exc
+    try:
+        return tuple(RoleFamily.model_validate(entry) for entry in raw.get("families", []))
+    except ValidationError as exc:
+        raise SourceError(
+            f"hh: {path.name} не описывает семейства ролей: {exc.errors()}", source_slug="hh"
+        ) from exc
+
+
+def read_directory(payload: Any) -> tuple[DirectoryRole, ...]:
+    """``api.hh.ru/professional_roles``, read without assuming its nesting.
+
+    Documented as categories holding roles, and walked for any object carrying
+    an integer-shaped ``id`` and a textual ``name`` instead of relying on that:
+    the point is what the endpoint returns today, and a shape change should show
+    up as a different count rather than as an empty result that reads like "hh
+    has no developer roles".
+
+    A category is told from a role by its shape — it holds a list of other named
+    objects — and never by the key it hangs under. That matters because the two
+    are separate numbering spaces: hh has both a category 11 and a role 11, and
+    reading them into one table by id loses whichever arrives second.
+
+    ``Any`` on the way in because the payload is hh's; it is validated into
+    :class:`DirectoryRole` here and nothing else escapes.
+    """
+    roles: dict[int, DirectoryRole] = {}
+
+    def visit(value: Any, category: str | None) -> None:
+        if isinstance(value, dict):
+            name = value.get("name")
+            named = isinstance(name, str) and bool(name.strip())
+            group = _is_category(value)
+            if not group and named and isinstance(name, str):
+                number = _as_int(value.get("id"))
+                if number is not None:
+                    roles.setdefault(
+                        number, DirectoryRole(id=number, name=name.strip(), category=category)
+                    )
+            inner = str(name).strip() if group and named else category
+            for item in value.values():
+                visit(item, inner)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item, category)
+
+    visit(payload, None)
+    return tuple(sorted(roles.values(), key=lambda role: role.id))
+
+
+def _is_category(value: dict[str, Any]) -> bool:
+    """Whether this object holds other named objects rather than being one."""
+    return any(
+        isinstance(item, list) and any(isinstance(element, dict) for element in item)
+        for item in value.values()
+    )
+
+
+def _as_int(value: Any) -> int | None:
+    """A role id, however hh spelled it. hh has sent these as strings."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+        return int(value)
+    return None
+
+
+def families_for(keywords: Sequence[str], families: Sequence[RoleFamily]) -> tuple[RoleFamily, ...]:
+    """Which families this profile's keywords ask for.
+
+    A profile matching none of them gets none, and that is deliberate: the
+    fallback is its own keywords against the catalogue, not somebody else's
+    roles. Handing an accountant the developer families because the file happens
+    to be written by developers would be the hardcoding this whole chain exists
+    to avoid.
+    """
+    return tuple(
+        family for family in families if any(carries(word, family.when) for word in keywords)
+    )
+
+
+def roles_for(
+    families: Sequence[RoleFamily], directory: Sequence[DirectoryRole]
+) -> tuple[DirectoryRole, ...]:
+    """The directory entries those families name, deduplicated by id."""
+    terms = tuple({term for family in families for term in family.roles})
+    if not terms:
+        return ()
+    return tuple(role for role in directory if carries(role.name, terms))
+
+
+def _alternatives(name: str) -> tuple[tuple[str, ...], ...]:
+    """The word groups a slug may match this role by, most specific first.
+
+    Two rules, and both are needed. hh writes a role's synonyms into one name
+    separated by commas — «Программист, разработчик» — and each of those alone
+    is a slug: ``/vacancies/programmist`` is the page this whole path was
+    measured on. And a multi-word role has one word that carries it —
+    ``devops`` in «DevOps-инженер» — which is why a distinctive word may stand
+    alone while :data:`GENERIC_ROLE_WORDS` may not.
+    """
+    groups: list[tuple[str, ...]] = []
+    for alternative in name.split(","):
+        words = tuple(word for word in tokens(alternative) if word not in GENERIC_ROLE_WORDS)
+        if words:
+            groups.append(words)
+    groups.extend(
+        (word,)
+        for group in list(groups)
+        for word in group
+        if len(word) >= MIN_ROLE_TOKEN and (word,) not in groups
+    )
+    return tuple(groups)
+
+
+def slugs_for(
+    roles: Sequence[DirectoryRole], keywords: Sequence[str], slugs: Iterable[str]
+) -> tuple[str, ...]:
+    """The catalogue pages worth opening, roles first and keywords after.
+
+    Ordered rather than merely collected, because the crawl reads a bounded
+    number of them per run and rotates through the rest: what hh's own directory
+    calls this work is a better first guess than what the candidate happened to
+    call their skills.
+    """
+    groups = tuple(group for role in roles for group in _alternatives(role.name))
+    by_role: list[str] = []
+    by_keyword: list[str] = []
+    for slug in slugs:
+        folded = fold(slug)
+        if any(all(word in folded for word in group) for group in groups):
+            by_role.append(slug)
+        elif keywords and carries(slug, keywords):
+            by_keyword.append(slug)
+    return tuple(sorted(by_role) + sorted(by_keyword))

@@ -64,6 +64,7 @@ from app.sources.hh import (
     MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
     MAX_SPANS,
+    ROLES_URL,
     FileWatermark,
     HHMarkupError,
     HHSite,
@@ -88,6 +89,8 @@ INDEX_URL = f"https://{HOST}/sitemap/main.xml"
 VACANCY0_URL = f"https://{HOST}/sitemap/vacancy0.xml"
 VACANCY1_URL = f"https://{HOST}/sitemap/vacancy1.xml"
 ROBOTS_URL = f"https://{HOST}/robots.txt"
+CATALOG0_URL = f"https://{HOST}/sitemap/vacancies0.xml"
+API_ROBOTS_URL = "https://api.hh.ru/robots.txt"
 
 #: The wildcard group of the live file, in full. The three Allow lines are the
 #: exceptions a search URL does not match, and the Disallow is the rule
@@ -253,6 +256,51 @@ async def collect_until_raised(
         raised = exc
     await source.record_progress(len(collected))
     return collected, raised
+
+
+#: A role directory small enough to read, shaped the way hh nests one: an outer
+#: category holding roles, with a category id that collides with a role id
+#: because on the live endpoint one does.
+ROLE_DIRECTORY: dict[str, Any] = {
+    "categories": [
+        {
+            "id": "11",
+            "name": "Информационные технологии",
+            "roles": [
+                {"id": "96", "name": "Программист, разработчик"},
+                {"id": "160", "name": "DevOps-инженер"},
+            ],
+        }
+    ]
+}
+
+
+def serve_catalog(http: respx.MockRouter, pages: dict[str, Sequence[str]]) -> None:
+    """hh's catalogue: the role directory, one catalogue sitemap, and its pages.
+
+    Served by the tests that pass keywords, because those now resolve a plan.
+    A catalogue page is modelled as the vacancy links it carries, which is what
+    the connector reads out of one — the live page also carries a megabyte of
+    boot state, and none of it is looked at.
+    """
+    http.get(API_ROBOTS_URL).mock(return_value=httpx.Response(404))
+    http.get(ROLES_URL).mock(return_value=httpx.Response(200, json=ROLE_DIRECTORY))
+    listed = "".join(f"<url><loc>https://{HOST}/vacancies/{slug}</loc></url>" for slug in pages)
+    http.get(CATALOG0_URL).mock(
+        return_value=httpx.Response(
+            200,
+            text=(
+                "<?xml version='1.0' encoding='utf-8'?>"
+                '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                f"{listed}</urlset>"
+            ),
+        )
+    )
+    for slug, ids in pages.items():
+        markup = "".join(f'<a href="/vacancy/{vacancy_id}">x</a>' for vacancy_id in ids)
+        http.get(f"https://{HOST}/vacancies/{slug}").mock(
+            return_value=httpx.Response(200, text=f"<html><body>{markup}</body></html>")
+        )
 
 
 def _covered_ids(saved: dict[str, Any], ids: Sequence[str]) -> set[str]:
@@ -875,12 +923,19 @@ async def test_no_posting_is_dropped_for_relevance(
     fetched again by any future run: upload a CV with new skills and everything
     the old keyword set rejected stays invisible forever. Relevance is scored
     downstream, on what is stored.
+
+    Since 2026-09-08 the keywords DO choose which catalogue pages to open, which
+    is the opposite thing and is why this test now serves a catalogue naming one
+    of the two postings. The one it names is fetched first. The one it does not
+    name is still fetched.
     """
     serve(http, [FULL, NO_COMPENSATION])
+    serve_catalog(http, {"devops-inzhener": [NO_COMPENSATION]})
 
     postings = await collect(hh, SearchQuery(keywords=("кубернетес", "ассемблер")))
 
-    assert [posting.external_id for posting in postings] == [FULL, NO_COMPENSATION]
+    assert set(posting.external_id for posting in postings) == {FULL, NO_COMPENSATION}
+    assert postings[0].external_id == NO_COMPENSATION
 
 
 # -- the parse layer ---------------------------------------------------
