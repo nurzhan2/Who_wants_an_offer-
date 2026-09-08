@@ -58,18 +58,23 @@ from app.core.config import settings
 from app.core.exceptions import SourceError
 from app.db.enums import RemoteType, SalaryPeriod
 from app.pipeline.runner import UPSERT_BATCH
+from app.schemas.crawl import SavedState
 from app.sources.base import RawPosting, SearchQuery
 from app.sources.hh import (
+    CENSUS_PREFIX,
     GONE_STATUSES,
     MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
     MAX_SPANS,
+    POSITION_PREFIX,
     ROLES_URL,
+    FileCensus,
     FileWatermark,
     HHMarkupError,
     HHSite,
     HHSource,
     SitemapEntry,
+    Span,
     _entry,
     _key,
     _remote_from,
@@ -192,6 +197,20 @@ class StateStore:
     def __init__(self) -> None:
         self.saved: dict[str, dict[str, Any]] = {}
         self.reads: list[str] = []
+
+    @property
+    def positions(self) -> dict[str, dict[str, Any]]:
+        """Only the rows that are claims about coverage.
+
+        The connector also writes a census — how big each sitemap file was and
+        how much of it was outstanding — which is an observation of hh's file
+        rather than a claim about what this crawler covered. Every assertion
+        below about what a walk may record is about the claims, so it reads
+        this rather than ``saved``; a test that used the whole store would fail
+        the moment an unrelated counter is added, and pass a connector that
+        recorded a position it had not earned under a key it also owns.
+        """
+        return {key: value for key, value in self.saved.items() if key.startswith(POSITION_PREFIX)}
 
     async def load(self, key: str) -> dict[str, Any] | None:
         """Answer with what was stored, exactly as the repository does."""
@@ -661,12 +680,15 @@ async def test_the_position_is_kept_per_sitemap_file(
 
     await collect(hh)
 
-    assert set(store.saved) == {f"sitemap:{HOST}:vacancy0"}
+    assert set(store.positions) == {f"{POSITION_PREFIX}{HOST}:vacancy0"}
     # Both files are consulted, each under its own key. The sequence is not
     # asserted: a walk reads a mark once to work out what is due and again to
     # advance it, and pinning that would be pinning the loop rather than the
     # rule.
-    assert set(store.reads) == {f"sitemap:{HOST}:vacancy0", f"sitemap:{HOST}:vacancy1"}
+    assert set(store.reads) == {
+        f"{POSITION_PREFIX}{HOST}:vacancy0",
+        f"{POSITION_PREFIX}{HOST}:vacancy1",
+    }
 
 
 async def test_the_position_advances_over_a_page_that_yielded_nothing(
@@ -1237,7 +1259,7 @@ async def test_nothing_is_recorded_until_the_pipeline_confirms(
     yielded = [posting async for posting in hh.search_batch([SearchQuery()])]
 
     assert yielded, "the walk did produce postings"
-    assert store.saved == {}, "and recorded no position for any of them"
+    assert store.positions == {}, "and recorded no position for any of them"
 
 
 async def test_the_position_names_exactly_what_the_pipeline_says_it_wrote(
@@ -1319,6 +1341,113 @@ async def test_the_second_run_starts_after_what_the_first_one_recorded(
     assert bought_again == bought_first, "the second run re-bought pages it had recorded"
 
 
+async def test_the_walk_records_how_big_each_file_was_and_how_much_was_due(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """The position cannot answer "how much is left", so the walk counts.
+
+    A stretch is an interval over ``(lastmod, id)`` and counts nothing; the
+    file's size is hh's fact and is known only while a run is holding the file.
+    So it is recorded there, before a single page is fetched, and the overview
+    reads it back. Without it that screen could only say how far the walk got.
+    """
+    serve(http, [FULL])
+
+    await collect(hh)
+
+    census = store.saved[f"{CENSUS_PREFIX}{HOST}:vacancy0"]
+    assert FileCensus.model_validate(census) == FileCensus(total=1, outstanding=1)
+
+
+async def test_a_census_that_cannot_be_written_does_not_stop_the_crawl(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """The one write in this connector allowed to fail quietly, and why.
+
+    A position is correctness — losing one re-buys pages or, worse, skips them —
+    so a store that refuses it stops the run. A census is a number on a screen,
+    and stopping a crawl that can reach hh because a counter could not be saved
+    would trade the thing the run is for against the thing that describes it.
+    """
+    refused: list[str] = []
+
+    async def refuse_census(key: str, value: dict[str, Any]) -> None:
+        if key.startswith(CENSUS_PREFIX):
+            refused.append(key)
+            raise RuntimeError("source_state is unavailable")
+        store.saved[key] = value
+
+    hh.with_state(store.load, refuse_census)
+    serve(http, [FULL])
+
+    yielded = await collect(hh)
+
+    assert [posting.external_id for posting in yielded] == [FULL]
+    assert refused, "the census write was attempted"
+
+
+@pytest.mark.unit
+def test_the_saved_position_reads_back_as_one_line_per_sitemap_file() -> None:
+    """What the overview renders, decoded by the connector that wrote it.
+
+    Only this module knows that a key names a host and a file, so only this
+    module may take one apart. The counts come from the census and only from
+    it: deriving "covered" from ``total - outstanding`` would be the same number
+    said twice, and deriving it from the stretches is not possible at all.
+    """
+    described = HHSource().describe_position(
+        [
+            SavedState(
+                key=f"{POSITION_PREFIX}{HOST}:vacancy0",
+                value=FileWatermark(
+                    covered=(
+                        Span(
+                            low_lastmod=WHEN,
+                            low_id="1",
+                            high_lastmod=WHEN,
+                            high_id="9",
+                        ),
+                    )
+                ).model_dump(mode="json"),
+                updated_at=WHEN,
+            ),
+            SavedState(
+                key=f"{CENSUS_PREFIX}{HOST}:vacancy0",
+                value={"total": 500, "outstanding": 120},
+                updated_at=WHEN,
+            ),
+        ]
+    )
+
+    assert len(described) == 1
+    position = described[0]
+    assert (position.scope, position.label) == (HOST, "vacancy0")
+    assert (position.total, position.outstanding, position.stretches) == (500, 120, 1)
+    assert position.title == "Алматы"
+
+
+@pytest.mark.unit
+def test_a_file_no_run_has_counted_reports_an_unknown_remainder() -> None:
+    """Unknown, never zero.
+
+    A position written before the counting was added says how far the walk got
+    and nothing about what is left. Rendering that as ``0 outstanding`` would
+    announce a finished backfill over a corpus of thirteen thousand postings.
+    """
+    described = HHSource().describe_position(
+        [
+            SavedState(
+                key=f"{POSITION_PREFIX}{HOST}:vacancy0",
+                value={"covered": []},
+                updated_at=WHEN,
+            )
+        ]
+    )
+
+    assert described[0].total is None
+    assert described[0].outstanding is None
+
+
 async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the_run_stopped(
     hh: HHSource,
     http: respx.MockRouter,
@@ -1348,8 +1477,10 @@ async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the
     # Not vacuous: without a write on confirmation there would be nothing to
     # fail, and a test asserting only that the walk finished would pass on a
     # connector that never tried to record anything.
-    assert attempts == [f"sitemap:{HOST}:vacancy0"]
-    assert store.saved == {}
+    assert [key for key in attempts if key.startswith(POSITION_PREFIX)] == [
+        f"{POSITION_PREFIX}{HOST}:vacancy0"
+    ]
+    assert store.positions == {}
 
 
 async def test_the_walk_takes_the_newest_thing_outstanding_first(

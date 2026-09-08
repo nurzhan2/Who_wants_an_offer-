@@ -188,15 +188,15 @@ export function MyData() {
         />
       </section>
 
-      <div className="flex flex-wrap items-center gap-6 border-t border-line pt-8">
+      <div className="flex flex-wrap items-center gap-6 border-t border-hairline pt-8">
         <button
           type="submit"
           disabled={!dirty || save.isPending}
-          className="rounded-pill bg-ink px-10 py-3 text-label uppercase text-paper transition-colors disabled:cursor-not-allowed disabled:bg-line disabled:text-muted"
+          className="rounded-pill bg-ink px-10 py-3 text-label uppercase text-paper transition-colors disabled:cursor-not-allowed disabled:bg-hairline disabled:text-muted"
         >
           {save.isPending ? 'Сохраняем…' : 'Сохранить'}
         </button>
-        {save.isError && <p className="text-sm text-alarm">{errorMessage(save.error)}</p>}
+        {save.isError && <p className="text-sm text-ink">{errorMessage(save.error)}</p>}
         {!dirty && save.isSuccess && <p className="text-sm text-muted">Сохранено.</p>}
         {dirty && !save.isError && <p className="text-sm text-muted">Есть несохранённые правки.</p>}
       </div>
@@ -206,7 +206,7 @@ export function MyData() {
 
 function SectionTitle({ title, note }: { title: string; note: string }) {
   return (
-    <header className="flex flex-col gap-2 border-b border-line pb-4">
+    <header className="flex flex-col gap-2 border-b border-hairline pb-4">
       <h2 className="text-xl tracking-tight text-ink">{title}</h2>
       <p className="max-w-2xl text-sm text-muted">{note}</p>
     </header>

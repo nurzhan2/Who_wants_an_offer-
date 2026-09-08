@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 
-import { App } from '@/App'
+import { Dashboard } from '@/pages/Dashboard'
 
 import './index.css'
 
@@ -18,7 +18,7 @@ if (!container) {
 createRoot(container).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <Dashboard />
     </QueryClientProvider>
   </StrictMode>,
 )

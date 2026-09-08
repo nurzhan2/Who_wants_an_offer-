@@ -42,7 +42,9 @@ export class ApiError extends Error {
   }
 }
 
+/** RFC 7807, as `app/core/exceptions.py` answers errors with it. */
 interface ProblemDocument {
+  title?: string
   detail?: string
   errors?: { loc?: unknown[] }[]
 }
@@ -50,7 +52,8 @@ interface ProblemDocument {
 /** The problem document's own explanation, as far as it has one. */
 function detailIn(body: unknown): string | undefined {
   if (body && typeof body === 'object' && 'detail' in body) {
-    const detail = (body as ProblemDocument).detail
+    const problem = body as ProblemDocument
+    const detail = problem.detail ?? problem.title
     if (typeof detail === 'string' && detail) {
       return detail
     }
@@ -94,8 +97,30 @@ async function parse(response: Response): Promise<unknown> {
   }
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: 'application/json' } })
+/** What a query string may carry. A list becomes a repeated key, never a join. */
+type QueryValue = string | number | boolean | null | undefined | (string | number)[]
+
+function query(params: Record<string, QueryValue> | undefined): string {
+  if (!params) return ''
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue
+    // Repeated key per element, which is how FastAPI reads a list — never a
+    // comma-joined string, which arrives as one filter value containing commas.
+    if (Array.isArray(value)) {
+      for (const item of value) search.append(key, String(item))
+    } else {
+      search.append(key, String(value))
+    }
+  }
+  const rendered = search.toString()
+  return rendered ? `?${rendered}` : ''
+}
+
+export async function apiGet<T>(path: string, params?: Record<string, QueryValue>): Promise<T> {
+  const response = await fetch(`${path}${query(params)}`, {
+    headers: { Accept: 'application/json' },
+  })
 
   // 503 is how /health reports a degraded service, and its body is the report.
   if (!response.ok && response.status !== 503) {

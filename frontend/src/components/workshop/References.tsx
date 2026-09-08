@@ -16,8 +16,8 @@ import { REFERENCE_KIND_LABELS } from '@/components/workshop/labels'
 import type { Reference, ReferenceKind } from '@/types/workshop'
 
 const FIELD =
-  'w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none'
-const LABEL = 'block text-xs font-medium uppercase tracking-wide text-slate-500'
+  'w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-ink focus:border-slate-500 focus:outline-none'
+const LABEL = 'block text-xs font-medium uppercase tracking-wide text-muted'
 
 interface FormProps {
   busy: boolean
@@ -47,7 +47,7 @@ export function ReferenceForm({ busy, error, warnings, onSubmit }: FormProps) {
         onSubmit({ kind, title, note, file, text })
       }}
     >
-      <h3 className="text-sm font-semibold text-slate-900">Новый эталон</h3>
+      <h3 className="text-sm font-semibold text-ink">Новый эталон</h3>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="space-y-1">
@@ -109,7 +109,7 @@ export function ReferenceForm({ busy, error, warnings, onSubmit }: FormProps) {
         </label>
       )}
 
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-muted">
         Из эталона берут форму: структуру, длину, порядок и тон. Содержание письма и резюме
         берут только из вашего профиля — факты из чужого документа не переносятся никогда.
       </p>
@@ -123,7 +123,7 @@ export function ReferenceForm({ busy, error, warnings, onSubmit }: FormProps) {
       )}
 
       {error != null && (
-        <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-ink">
           {error instanceof Error ? error.message : 'Не удалось сохранить эталон'}
         </p>
       )}
@@ -148,7 +148,7 @@ interface ListProps {
 
 export function ReferenceList({ references, busyId, onToggle, onDelete }: ListProps) {
   if (references.length === 0) {
-    return <p className="text-sm text-slate-500">Эталонов пока нет.</p>
+    return <p className="text-sm text-muted">Эталонов пока нет.</p>
   }
 
   return (
@@ -162,17 +162,17 @@ export function ReferenceList({ references, busyId, onToggle, onDelete }: ListPr
         >
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 space-y-1">
-              <p className="text-sm font-medium text-slate-900">
+              <p className="text-sm font-medium text-ink">
                 {reference.title}{' '}
-                <span className="text-xs font-normal text-slate-500">
+                <span className="text-xs font-normal text-muted">
                   · {REFERENCE_KIND_LABELS[reference.kind]} · {reference.characters} знаков
                   {reference.source_filename ? ` · ${reference.source_filename}` : ' · вставлен текстом'}
                 </span>
               </p>
-              {reference.note && <p className="text-sm text-slate-600">{reference.note}</p>}
-              <p className="truncate text-xs text-slate-400">{reference.preview}</p>
+              {reference.note && <p className="text-sm text-muted">{reference.note}</p>}
+              <p className="truncate text-xs text-muted">{reference.preview}</p>
               {!reference.is_active && (
-                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500">
+                <span className="rounded bg-slate-100 px-1.5 py-0.5 text-xs text-muted">
                   выключен
                 </span>
               )}
@@ -183,7 +183,7 @@ export function ReferenceList({ references, busyId, onToggle, onDelete }: ListPr
                 type="button"
                 disabled={busyId === reference.id}
                 onClick={() => { onToggle(reference); }}
-                className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-slate-700 disabled:opacity-50"
+                className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-muted disabled:opacity-50"
               >
                 {reference.is_active ? 'Выключить' : 'Включить'}
               </button>
@@ -191,7 +191,7 @@ export function ReferenceList({ references, busyId, onToggle, onDelete }: ListPr
                 type="button"
                 disabled={busyId === reference.id}
                 onClick={() => { onDelete(reference); }}
-                className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-700 disabled:opacity-50"
+                className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-ink disabled:opacity-50"
               >
                 Удалить
               </button>

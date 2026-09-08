@@ -192,7 +192,12 @@ async def queue(
 
 
 async def save_letter(
-    session: AsyncSession, *, vacancy_id: UUID, text: str, profile_id: UUID
+    session: AsyncSession,
+    *,
+    vacancy_id: UUID,
+    text: str,
+    profile_id: UUID,
+    rules_version: str,
 ) -> tuple[UUID, bool]:
     """Store the letter on this vacancy's application row, and say what happened.
 
@@ -201,12 +206,22 @@ async def save_letter(
     attempts at the same job — so this updates the oldest row rather than
     inserting a second one, which is what keeps a repeated batch run idempotent.
 
+    ``rules_version`` is passed in rather than computed: it is the fingerprint of
+    the rules that actually judged this text, the workshop's included, and only a
+    caller holding a session can read those. The same value
+    ``generated_document.rules_version`` carries — one vocabulary for "which
+    rules wrote this", across both tables.
+
     ``profile_id`` is recorded because this letter may later be shown to the
     model as an example of what got an answer, and an example written from a
     different resume would teach it to claim experience this candidate has not
     got. On an existing row it is filled in only when it is empty: a row that
     already names a profile was written from that one, and overwriting it would
     manufacture the false provenance the column exists to prevent.
+
+    The rules version travels with the text, because a letter outlives the
+    rules that judged it: the documents screen has to be able to say which set
+    produced this one rather than implying today's produced all of them.
 
     The letter is saved, never sent. Sending is ``agent/``'s, after a human
     confirms it, and nothing in ``backend/`` can do it.
@@ -219,13 +234,23 @@ async def save_letter(
     )
     if application is None:
         application = Application(
-            id=uuid7(), vacancy_id=vacancy_id, cover_letter=text, profile_id=profile_id
+            id=uuid7(),
+            vacancy_id=vacancy_id,
+            cover_letter=text,
+            profile_id=profile_id,
+            letter_rules_version=rules_version,
         )
         session.add(application)
         await session.flush()
         return application.id, True
 
     application.cover_letter = text
+    # Overwritten with the letter, unlike ``profile_id`` one line down. They are
+    # facts about different things: the profile is provenance of the row and is
+    # only ever filled in, while this describes the text that is being replaced
+    # right now, and leaving the old number beside a new letter would say a
+    # version wrote something it never saw.
+    application.letter_rules_version = rules_version
     if application.profile_id is None:
         application.profile_id = profile_id
     await session.flush()

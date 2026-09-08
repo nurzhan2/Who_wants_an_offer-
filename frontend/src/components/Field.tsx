@@ -43,7 +43,7 @@ export function Field({
         onChange={(event: ChangeEvent<HTMLInputElement>) => {
           onChange(event.target.value)
         }}
-        className="w-full rounded-field border border-line bg-card px-4 py-3 text-ink outline-none transition-colors placeholder:text-muted/60 focus:border-ink"
+        className="w-full rounded-field border border-hairline bg-paper px-4 py-3 text-ink outline-none transition-colors placeholder:text-muted/60 focus:border-ink"
       />
       {hint !== undefined && <p className="text-xs text-muted">{hint}</p>}
     </div>

@@ -24,15 +24,15 @@ interface Props {
 function Badge({ children, tone }: { children: string; tone: 'hard' | 'soft' | 'muted' }) {
   const tones = {
     hard: 'bg-amber-100 text-amber-900',
-    soft: 'bg-slate-100 text-slate-700',
-    muted: 'bg-slate-100 text-slate-500',
+    soft: 'bg-slate-100 text-muted',
+    muted: 'bg-slate-100 text-muted',
   }
   return <span className={`rounded px-1.5 py-0.5 text-xs ${tones[tone]}`}>{children}</span>
 }
 
 export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
   if (rules.length === 0) {
-    return <p className="text-sm text-slate-500">Правил пока нет.</p>
+    return <p className="text-sm text-muted">Правил пока нет.</p>
   }
 
   return (
@@ -46,9 +46,9 @@ export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
         >
           <div className="flex flex-wrap items-start justify-between gap-2">
             <div className="min-w-0 space-y-1">
-              <p className="text-sm font-medium text-slate-900">{rule.message}</p>
-              <p className="text-sm text-slate-600">{describeRule(rule.params)}</p>
-              <p className="text-xs text-slate-400">
+              <p className="text-sm font-medium text-ink">{rule.message}</p>
+              <p className="text-sm text-muted">{describeRule(rule.params)}</p>
+              <p className="text-xs text-muted">
                 Модель просят так: <span className="font-mono">{rule.asked_as}</span>
               </p>
               <div className="flex flex-wrap items-center gap-1.5 pt-1">
@@ -67,7 +67,7 @@ export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
                   type="button"
                   disabled={busyId === rule.id}
                   onClick={() => { onToggle(rule); }}
-                  className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-slate-700 disabled:opacity-50"
+                  className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-muted disabled:opacity-50"
                 >
                   {rule.is_active ? 'Выключить' : 'Включить'}
                 </button>
@@ -75,7 +75,7 @@ export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
                   type="button"
                   disabled={busyId === rule.id}
                   onClick={() => { onDelete(rule); }}
-                  className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-red-700 disabled:opacity-50"
+                  className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-ink disabled:opacity-50"
                 >
                   Удалить
                 </button>

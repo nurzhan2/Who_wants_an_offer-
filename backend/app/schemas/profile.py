@@ -181,3 +181,19 @@ class CandidateProfileRead(ReadModel):
     skills: list[SkillRead] = Field(default_factory=list)
     #: The raw resume text and the embedding are intentionally absent: one is
     #: large and one is meaningless to a client.
+
+
+class SkillElsewhere(BaseModel):
+    """A skill some other resume of the same owner lists.
+
+    Here rather than in ``schemas/dashboard.py``, where the screen that shows it
+    lives: the data layer reads it — ``ProfileRepository.skills_elsewhere`` —
+    and that module imports the letter service for another model, so a
+    repository importing it there closes a cycle through ``services/ats.py``.
+    Re-exported from ``dashboard`` so nothing on the screen side moved.
+    """
+
+    canonical_name: str
+    profile_id: UUID
+    resume_filename: str | None = None
+    profile_name: str | None = None

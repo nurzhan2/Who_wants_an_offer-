@@ -1,34 +1,33 @@
-import { DocumentsSection } from '@/components/DocumentsSection'
-import { HealthBadge } from '@/components/HealthBadge'
+import { Shell } from '@/components/Shell'
+import { useOverview } from '@/hooks/queries'
+import { useLocation } from '@/hooks/useLocation'
+import { Applications } from '@/pages/Applications'
+import { Documents } from '@/pages/Documents'
+import { MyData } from '@/pages/MyData'
+import { Overview } from '@/pages/Overview'
+import { Vacancies } from '@/pages/Vacancies'
+import { Workshop } from '@/pages/Workshop'
 
 /**
- * The dashboard as it stands: the health badge, and the documents section.
+ * Which screen is on, and the one thing every screen shares.
  *
- * The full set of screens — обзор, вакансии, отклики, документы, мои данные,
- * мастерская — is `prompts/11-dashboard.md`'s, along with the routing that
- * connects them. This page holds the one section that exists so far, laid out
- * to the monopo saigon grid the rest will use: 1078px centred, 46px between
- * sections, monochrome, no shadows.
+ * The overview query lives here because the header needs the active profile and
+ * so does the first screen; asking twice would let the header say one thing
+ * while the page below it says another. Every other screen fetches its own
+ * data — they are read separately and nothing compares them.
  */
 export function Dashboard() {
-  return (
-    <div className="flex flex-col gap-8">
-      <p className="max-w-2xl text-muted">
-        Каркас готов. Дашборд с вакансиями появится в фазе 7.
-      </p>
-      <div className="rounded-field border border-line bg-card p-4">
-        <HealthBadge />
-      </div>
+  const { route, id } = useLocation()
+  const overview = useOverview()
 
-      <section className="flex flex-col gap-4">
-        <h2 className="text-lg">Документы под вакансию</h2>
-        <p className="max-w-2xl text-muted">
-          Резюме и сопроводительное собираются под конкретную вакансию из твоего профиля.
-          Ничего не придумывается: каждый факт в документе есть в профиле. Отправляет отклик
-          человек, из CLI — здесь только генерация.
-        </p>
-        <DocumentsSection />
-      </section>
-    </div>
+  return (
+    <Shell route={route} profile={overview.data?.profile ?? null}>
+      {route === 'overview' ? <Overview query={overview} /> : null}
+      {route === 'vacancies' ? <Vacancies selected={id} /> : null}
+      {route === 'applications' ? <Applications /> : null}
+      {route === 'documents' ? <Documents /> : null}
+      {route === 'workshop' ? <Workshop /> : null}
+      {route === 'profile' ? <MyData /> : null}
+    </Shell>
   )
 }

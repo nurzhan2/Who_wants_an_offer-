@@ -26,21 +26,25 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 async def read_active_profile(
     session: Annotated[AsyncSession, Depends(get_session)],
 ) -> CandidateProfileRead:
-    """Return the live profile, so a client that has no id can find one.
+    """The active resume, without having to know its id.
 
-    Declared before ``/{profile_id}`` on purpose: routes match in the order
-    they are added, and the other one would swallow "active" and answer 422
-    about a malformed UUID.
+    Declared **above** ``/{profile_id}``: FastAPI matches routes in order, and
+    the other way round "active" would be parsed as a UUID and answered with a
+    422 that mentions neither the profile nor the word.
 
-    v1 is single-user, so "the profile" is the most recent successfully parsed
-    upload. 404 means no resume has been parsed yet, which is a real state the
-    dashboard has to render — it is not an error.
+    It exists because every screen needs it and none of them has an id to start
+    from. v1 is single-user, so "active" is a flag rather than a session; when
+    that changes this endpoint is where the change lands, and no caller has to
+    move.
     """
     profile = await ProfileRepository(session).get_active()
     if profile is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active profile; upload a resume first",
+            # Distinct from the 404 below on purpose: "no resume has been
+            # uploaded" and "that id is not a profile" send a person to
+            # completely different places.
+            detail="No active profile. Upload a resume first.",
         )
     return CandidateProfileRead.model_validate(profile)
 

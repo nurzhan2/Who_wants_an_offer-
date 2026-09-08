@@ -1,89 +1,87 @@
 import type { Config } from 'tailwindcss'
 
 /**
- * The monopo saigon design system, as tokens.
+ * The design system, as tokens rather than as a document.
  *
- * Chosen by the owner and described in `prompts/hh/hh-final.md`; this file is
- * that description turned into the only vocabulary the components may use.
- * Three of its rules are the ones a dashboard breaks first, so they are worth
- * restating where they are enforced:
+ * Every rule the brief states is here, and the ones that are absent are absent
+ * on purpose. There is no colour scale: the palette is two values and their
+ * inversion, so a component that wanted to encode a status in colour has
+ * nothing to reach for and has to encode it in position, label and weight
+ * instead — which is what the brief asks for and what a screen full of amber
+ * badges quietly refuses to do.
  *
- * - **there is no chromatic colour in the interface.** Not for statuses, not for
- *   scores, not for "good" and "bad". Difference is carried by position, by
- *   label and by font weight. The one permitted gradient is a background behind
- *   the overview heading and never a control's fill, so it is not a token here.
- * - **radii are 0px or 75px and nothing between.** Cards, inputs and tables are
- *   square; buttons and tags are full pills.
- * - **there are no shadows anywhere.** Separation is a 1px hairline and an
- *   inverted surface.
+ * Likewise the radii. Two values, 0 and 75px, and nothing between them: a
+ * `rounded-lg` written out of habit does not compile to anything.
  */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   theme: {
+    // Replaced, not extended: an extended palette would keep Tailwind's
+    // hundred-odd colours one autocomplete away, and the first `text-red-600`
+    // typed in a hurry is the end of a monochrome interface.
+    colors: {
+      transparent: 'transparent',
+      current: 'currentColor',
+      ink: 'var(--ink)',
+      paper: 'var(--paper)',
+      // The only greys, and both are the ink at reduced opacity rather than a
+      // third colour: they stay correct when a surface inverts.
+      muted: 'var(--muted)',
+      hairline: 'var(--hairline)',
+    },
+    borderRadius: {
+      none: '0px',
+      // The same 0px under the name the "Мои данные" form was written against.
+      // An alias rather than a rename: the system has one square corner and two
+      // phases spelled it differently, and renaming across screens buys nothing.
+      field: '0px',
+      pill: '75px',
+    },
+    boxShadow: {
+      // Nothing casts one. Declared as `none` rather than omitted so that
+      // `shadow` remains a valid class that does nothing, instead of silently
+      // falling through to Tailwind's default.
+      DEFAULT: 'none',
+      none: 'none',
+    },
     extend: {
-      colors: {
-        // Not pure #000/#fff: paper is warmed slightly and ink stopped short of
-        // black, which is what keeps a monochrome page from looking like a
-        // rendering error.
-        paper: '#f4f4f2',
-        card: '#ffffff',
-        ink: '#111111',
-        muted: '#6b6b6b',
-        line: '#d8d8d4',
-        // The one non-grey, and it is only ever a failure state.
-        alarm: '#8a1f11',
-        obsidian: '#000000',
-        inkstone: '#181818',
-        'felt-gray': '#6d6d6d',
-        'slate-pill': '#636363',
-        'ash-mist': '#9a9a9a',
-        pewter: '#808080',
-      },
       fontFamily: {
-        // Roobert is the system's face; Inter is the substitution it names, and
-        // the stack ends in the platform sans so a machine with neither still
-        // renders the intended proportions rather than a serif.
+        // Roobert first for the machines that have it; Inter is the
+        // substitution the brief names, and the rest is the usual ladder down
+        // to whatever the system has.
         sans: ['Roobert', 'Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
       },
+      fontWeight: {
+        light: '300',
+        normal: '400',
+        semibold: '600',
+      },
       fontSize: {
-        caption: ['12px', { lineHeight: '1.19' }],
-        'body-sm': ['16px', { lineHeight: '1.15' }],
-        body: ['18px', { lineHeight: '1.21' }],
-        subheading: ['39px', { lineHeight: '1.19' }],
-        'heading-sm': ['54px', { lineHeight: '1.39' }],
-        // 78px is the ceiling this dashboard uses: the system goes higher, and
-        // the conflict resolution in the brief caps it here because this is a
-        // dense data screen rather than an agency showcase.
-        heading: ['78px', { lineHeight: '1.10' }],
-        label: ['0.6875rem', { lineHeight: '1rem', letterSpacing: '0.12em' }],
-      },
-      borderRadius: {
-        // The system has no value between these two. `field` and `none` are the
-        // same 0px under two names: the forms were written against one and the
-        // documents screen against the other, and renaming either would touch
-        // more components than keeping both aliases does.
-        none: '0px',
-        field: '0px',
-        // A pill, at any height this app uses.
-        pill: '75px',
-      },
-      spacing: {
-        // Base unit 4px; these three are the layout's named gaps.
-        element: '14px',
-        card: '34px',
-        section: '46px',
+        // The display sizes, capped: the brief allows this system's big
+        // headings but not above 78px, so 78 is the largest step that exists.
+        display: ['78px', { lineHeight: '0.94', letterSpacing: '-0.03em' }],
+        title: ['46px', { lineHeight: '1.02', letterSpacing: '-0.02em' }],
+        heading: ['26px', { lineHeight: '1.15', letterSpacing: '-0.01em' }],
+        body: ['15px', { lineHeight: '1.55' }],
+        small: ['13px', { lineHeight: '1.5' }],
+        micro: ['11px', { lineHeight: '1.4', letterSpacing: '0.08em' }],
+        // `micro` under the name the contacts form uses for the same step.
+        label: ['11px', { lineHeight: '1.4', letterSpacing: '0.08em' }],
       },
       maxWidth: {
-        // One measure, two names, for the same reason as the radii above.
-        canvas: '1078px',
         shell: '1078px',
       },
+      spacing: {
+        section: '46px',
+        card: '34px',
+      },
       transitionTimingFunction: {
-        monopo: 'cubic-bezier(0.19, 1, 0.22, 1)',
+        // One easing curve for everything that moves.
+        slow: 'cubic-bezier(0.19, 1, 0.22, 1)',
       },
       transitionDuration: {
-        slow: '800ms',
-        slower: '1250ms',
+        800: '800ms',
+        1250: '1250ms',
       },
     },
   },

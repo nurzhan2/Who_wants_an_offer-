@@ -184,7 +184,10 @@ async def test_the_active_profile_route_is_not_read_as_an_id(
 
     assert response.status_code == 404
     body = response.json()
-    assert "upload a resume" in body["detail"]
+    # Case-insensitively: two phases wrote this endpoint independently and the
+    # merge kept one wording. What the test is for is that the 404 says what to
+    # do about it, not which capital letter it starts with.
+    assert "upload a resume" in body["detail"].lower()
 
 
 # ── correcting by hand ────────────────────────────────────────────────

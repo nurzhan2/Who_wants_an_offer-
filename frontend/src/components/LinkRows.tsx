@@ -41,7 +41,7 @@ export function LinkRows({ links, onChange }: LinkRowsProps) {
       {links.map((link) => (
         <div
           key={link.key}
-          className="grid grid-cols-1 gap-3 border-b border-line pb-4 sm:grid-cols-[9rem_1fr_9rem_auto]"
+          className="grid grid-cols-1 gap-3 border-b border-hairline pb-4 sm:grid-cols-[9rem_1fr_9rem_auto]"
         >
           <input
             aria-label="Тип ссылки"
@@ -50,7 +50,7 @@ export function LinkRows({ links, onChange }: LinkRowsProps) {
             onChange={(event) => {
               update(link.key, { kind: event.target.value })
             }}
-            className="rounded-field border border-line bg-card px-3 py-2 text-sm text-ink outline-none focus:border-ink"
+            className="rounded-field border border-hairline bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-ink"
           />
           <input
             aria-label="Адрес"
@@ -61,7 +61,7 @@ export function LinkRows({ links, onChange }: LinkRowsProps) {
             onChange={(event) => {
               update(link.key, { url: event.target.value })
             }}
-            className="rounded-field border border-line bg-card px-3 py-2 text-sm text-ink outline-none focus:border-ink"
+            className="rounded-field border border-hairline bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-ink"
           />
           <input
             aria-label="Подпись"
@@ -70,14 +70,14 @@ export function LinkRows({ links, onChange }: LinkRowsProps) {
             onChange={(event) => {
               update(link.key, { label: event.target.value })
             }}
-            className="rounded-field border border-line bg-card px-3 py-2 text-sm text-ink outline-none focus:border-ink"
+            className="rounded-field border border-hairline bg-paper px-3 py-2 text-sm text-ink outline-none focus:border-ink"
           />
           <button
             type="button"
             onClick={() => {
               remove(link.key)
             }}
-            className="rounded-pill border border-line px-4 py-2 text-label uppercase text-muted transition-colors hover:border-ink hover:text-ink"
+            className="rounded-pill border border-hairline px-4 py-2 text-label uppercase text-muted transition-colors hover:border-ink hover:text-ink"
           >
             Убрать
           </button>
