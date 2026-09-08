@@ -50,6 +50,31 @@ class SkillCreate(BaseModel):
     last_used_year: int | None = Field(default=None, ge=1970, le=2100)
 
 
+class ExperienceCreate(BaseModel):
+    """One job as extracted from a resume, on its way to ``profile_experience``.
+
+    The extraction has always produced these and nothing stored them, which was
+    harmless while the only consumers were a total-years figure and a per-skill
+    year count. A CV generated for a vacancy *is* this list, so from migration
+    0010 they are rows — and the generator quotes them rather than restating
+    them, which is what makes "the generated CV does not change dates, company
+    names or job titles" a property of the schema.
+    """
+
+    #: Order in the resume, newest first as resumes are written. Unique per
+    #: profile, and the handle the generator refers to a job by.
+    position: int = Field(ge=0)
+    company: str = Field(max_length=300)
+    title: str = Field(max_length=300)
+    #: "YYYY-MM". A string and not a date: a resume that gives only a year does
+    #: not state a month, and a date column would have to invent one.
+    start: str | None = Field(default=None, max_length=7)
+    end: str | None = Field(default=None, max_length=7)
+    is_current: bool = False
+    stack: list[str] = Field(default_factory=list)
+    domains: list[str] = Field(default_factory=list)
+
+
 class SkillRead(ReadModel):
     """A skill of the candidate."""
 
@@ -76,8 +101,14 @@ class CandidateProfileCreate(BaseModel):
     salary_min: Decimal | None = Field(default=None, ge=0)
     salary_currency: CurrencyCode | None = None
     languages: list[dict[str, Any]] = Field(default_factory=list)
+    #: Degrees, as the extraction recorded them. A JSONB column on the profile,
+    #: like ``languages`` beside it: a short list of flat records, read whole.
+    education: list[dict[str, Any]] = Field(default_factory=list)
     raw_text: str | None = None
     skills: list[SkillCreate] = Field(default_factory=list)
+    #: Rows of their own, so a generated CV can refer to a job rather than
+    #: retype one. Written by ``ProfileRepository.replace_experience``.
+    experience: list[ExperienceCreate] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _skills_are_unique(self) -> Self:

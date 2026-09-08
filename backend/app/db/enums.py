@@ -123,6 +123,32 @@ class ApplicationStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class DocumentKind(StrEnum):
+    """Which of the two documents a generated row holds.
+
+    Both are written for one (profile, vacancy) pair and both are versioned the
+    same way, so they share a table rather than getting one each. What differs
+    is only what is inside them, and that is the row's payload.
+    """
+
+    CV = "cv"
+    COVER_LETTER = "cover_letter"
+
+
+class DocumentSource(StrEnum):
+    """Where a generated document's arrangement came from.
+
+    Recorded because the two are not the same thing to a person deciding
+    whether to send it: ``model`` means a model chose the order and the
+    selection, ``fallback`` means the rule-based arrangement did. Neither
+    invents facts — that is enforced elsewhere — but one of them was tailored
+    to the vacancy and the other was not.
+    """
+
+    MODEL = "model"
+    FALLBACK = "fallback"
+
+
 class ParseStatus(StrEnum):
     """Where a resume is in the extraction pipeline.
 
@@ -157,6 +183,8 @@ ENUM_TYPE_NAMES: dict[str, type[StrEnum]] = {
     "match_bucket": MatchBucket,
     "application_status": ApplicationStatus,
     "parse_status": ParseStatus,
+    "document_kind": DocumentKind,
+    "document_source": DocumentSource,
     "pipeline_run_status": PipelineRunStatus,
 }
 

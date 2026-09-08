@@ -40,6 +40,7 @@ def default_routing() -> dict[str, str]:
     return {
         LLMTask.RESUME_EXTRACTION.value: "cli",
         LLMTask.COVER_LETTER.value: "cli",
+        LLMTask.CV_TAILORING.value: "cli",
         LLMTask.TOOLING.value: "cli",
         LLMTask.TELEGRAM_PARSE.value: "ollama",
         LLMTask.VACANCY_PARSE.value: "api",
@@ -67,6 +68,7 @@ def default_task_effort() -> dict[str, Effort]:
     return {
         LLMTask.RESUME_EXTRACTION.value: "high",
         LLMTask.COVER_LETTER.value: "high",
+        LLMTask.CV_TAILORING.value: "high",
         LLMTask.TOOLING.value: "high",
         LLMTask.VACANCY_PARSE.value: "medium",
         LLMTask.TELEGRAM_PARSE.value: "low",

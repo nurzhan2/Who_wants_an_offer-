@@ -252,12 +252,17 @@ robots.txt (404) означает «разрешено» — так отвеча
 candidate_profile
   id, name, headline, seniority, total_years, summary,
   locations jsonb, relocation bool, remote_pref,
-  salary_min, salary_currency, languages jsonb,
+  salary_min, salary_currency, languages jsonb, education jsonb,
   raw_text, embedding vector(1024), created_at, is_active
 
 profile_skill
   id, profile_id → candidate_profile, canonical_name, raw_name,
   years float, level enum(basic|working|strong|expert), last_used_year
+
+profile_experience
+  id, profile_id → candidate_profile, position int, company, title,
+  start char(7), end char(7), is_current bool, stack jsonb, domains jsonb
+  unique(profile_id, position)
 
 vacancy
   id, fingerprint unique, title, company, company_url,
@@ -286,10 +291,35 @@ application
   id, vacancy_id, status enum(saved|applied|screening|interview|offer|rejected),
   applied_at, notes, cover_letter, updated_at
 
+generated_document
+  id, profile_id → candidate_profile, vacancy_id → vacancy,
+  kind enum(cv|cover_letter), version int, payload jsonb, text,
+  file_format, ats_report jsonb, rules_version, problems jsonb,
+  source enum(model|fallback), created_at
+  unique(profile_id, vacancy_id, kind, version)
+
 pipeline_run
   id, started_at, finished_at, source_slug, status,
   found, new, updated, errors jsonb
 ```
+
+Две таблицы существуют ради генерации документов под вакансию и
+заслуживают отдельного слова.
+
+`profile_experience` хранит то, что экстрактор производил всегда и что схема
+всегда выбрасывала: места работы с датами и стеком. Пока из профиля собирались
+только число лет и сопроводительное, это ничего не стоило. Резюме под вакансию
+**и есть** этот список, и генерация ссылается на строки по `position`, а не
+переписывает их: компания, должность и даты попадают в документ из колонок.
+Поэтому «генератор не меняет даты, названия компаний и должностей» — свойство
+схемы, а не правило, которое кто-то помнит проверить.
+
+`generated_document` версионируется и никогда не перезаписывается: уникальность
+по `(profile_id, vacancy_id, kind, version)` — это то, что делает
+перегенерацию новой версией на уровне БД. Файл не хранится, хранится
+`payload` — расстановка, из которой документ рендерится детерминированно.
+Хранить байты значило бы удвоить объём и, что хуже, позволить файлу разойтись
+с профилем, который он описывает, без всякой возможности это заметить.
 
 ### Решения по типам
 
@@ -363,7 +393,23 @@ GET    /api/v1/analytics/skill-gaps   топ недостающих скилло
 GET    /api/v1/analytics/salary       распределение по совпадающим вакансиям
 
 GET/POST/PATCH /api/v1/applications
+
+POST   /api/v1/documents/cv/{vacancy_id}             резюме под эту вакансию
+POST   /api/v1/documents/cover-letter/{vacancy_id}   сопроводительное под неё же
+GET    /api/v1/documents                             что уже сгенерировано
+GET    /api/v1/documents/versions/{vacancy_id}/{kind} история версий
+GET    /api/v1/documents/candidates                  вакансии с кнопками и счётчиками
+GET    /api/v1/documents/rules                       жёсткие правила, как их читает человек
+GET    /api/v1/documents/{id}/file                   скачать версию файлом
 ```
+
+Оба POST отвечают документом **и** ATS-отчётом сразу: отчёт едет вместе с
+документом, а не лежит рядом. Ответ всегда 200, даже когда документ не выдан —
+тогда `delivered: false`, `document_id: null` и `reason_ru` говорит почему.
+Клиент ветвится по `delivered`, и тот, кто про него забыл, не получает файла.
+
+Эндпоинта «отправить отклик» здесь нет и не будет: отклик отправляет `agent/`
+из браузера под аккаунтом владельца после подтверждения человеком.
 
 Фильтры `/vacancies`: `score_min`, `score_max`, `bucket`, `source`, `remote`,
 `city`, `country`, `salary_min`, `currency`, `seniority`, `posted_within_days`,

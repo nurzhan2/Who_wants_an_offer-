@@ -20,8 +20,10 @@ from helpers import run_alembic
 EXPECTED_TABLES = {
     "application",
     "candidate_profile",
+    "generated_document",
     "match",
     "pipeline_run",
+    "profile_experience",
     "profile_skill",
     "source_quota",
     "source_state",
@@ -32,6 +34,8 @@ EXPECTED_TABLES = {
 
 EXPECTED_ENUM_TYPES = {
     "application_status",
+    "document_kind",
+    "document_source",
     "employment_type",
     "match_bucket",
     "parse_status",

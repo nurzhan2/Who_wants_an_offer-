@@ -101,6 +101,20 @@ known-first-party = ["app", "factories", "helpers"]
 # Its assertions are about Russian resume text and the Russian findings raised
 # on it, so the same reasoning applies as for the module under test.
 "backend/tests/test_ats_audit.py" = ["RUF001", "RUF002"]
+# Everything these four modules put in front of a person is Russian: the
+# reasons a document was withheld, the hard rules as the owner reads them, and
+# the section headings a generated CV is required to carry — the headings are a
+# contract with app/resume/ats_audit.py, which searches for those exact words.
+# RUF001/RUF002 fire on almost every line of them and would bury a real finding,
+# the same trade already made for ats_audit.py itself.
+"backend/app/documents/guard.py" = ["RUF001", "RUF002"]
+"backend/app/documents/rules.py" = ["RUF001", "RUF002"]
+"backend/app/documents/render.py" = ["RUF001", "RUF002"]
+"backend/app/documents/service.py" = ["RUF001", "RUF002"]
+# Its assertions are about Russian CV text, the Russian findings raised on it,
+# and the Cyrillic-alphabet word boundaries the guard's mention check turns on.
+"backend/tests/test_documents.py" = ["RUF001", "RUF002"]
+"backend/tests/test_documents_api.py" = ["RUF001", "RUF002"]
 # The source tests assert on Russian fixture data and Russian API messages.
 "backend/tests/test_source_quota.py" = ["RUF001", "RUF002"]
 "backend/tests/test_sources_api.py" = ["RUF001", "RUF002"]

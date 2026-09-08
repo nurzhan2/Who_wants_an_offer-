@@ -51,6 +51,7 @@ class LLMTask(StrEnum):
     VACANCY_PARSE = "vacancy_parse"
     RERANK = "rerank"
     COVER_LETTER = "cover_letter"
+    CV_TAILORING = "cv_tailoring"
     TOOLING = "tooling"
 
 
@@ -64,15 +65,18 @@ class LLMTask(StrEnum):
 #: working directory holding that one file, and the file is one the user
 #: uploaded a moment earlier.
 #:
-#: Everything else gets nothing. COVER_LETTER in particular: its prompt carries
-#: a vacancy description scraped from a job board, which is untrusted input by
-#: definition.
+#: Everything else gets nothing. COVER_LETTER and CV_TAILORING in particular:
+#: both prompts carry a vacancy description scraped from a job board, which is
+#: untrusted input by definition. CV_TAILORING is the one whose output goes out
+#: under the candidate's own name, so it is also the one where a tool would be
+#: worth the most to whoever wrote the description.
 TOOL_POLICY: dict[LLMTask, tuple[str, ...]] = {
     LLMTask.RESUME_EXTRACTION: ("Read",),
     LLMTask.TELEGRAM_PARSE: (),
     LLMTask.VACANCY_PARSE: (),
     LLMTask.RERANK: (),
     LLMTask.COVER_LETTER: (),
+    LLMTask.CV_TAILORING: (),
     LLMTask.TOOLING: (),
 }
 
