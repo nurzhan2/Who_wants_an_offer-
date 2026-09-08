@@ -138,6 +138,15 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
 "backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]
 "backend/app/pipeline/runner.py" = ["RUF001", "RUF002"]
+# The contact block is read out of Russian resumes and written back by a
+# Russian-speaking owner, so the fixtures, the sample text and the rejected
+# values are all Cyrillic — including the deliberately invalid ones, whose
+# whole point is to be text rather than a slug or a number.
+"backend/tests/test_resume_contacts.py" = ["RUF001", "RUF002"]
+"backend/tests/test_contacts_api.py" = ["RUF001", "RUF002"]
+# Its fixtures are invented people with Russian names, addresses and cities:
+# every identity string in the file is Cyrillic by construction.
+"backend/tests/test_pii_logging.py" = ["RUF001", "RUF002"]
 # Every message this agent prints is read by the person whose account it is
 # about to act on, so all of them are Russian, and RUF001-003 fire on almost
 # every line. Scoped to the package rather than disabled globally.

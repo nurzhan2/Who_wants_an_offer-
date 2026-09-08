@@ -9,10 +9,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import get_session
 from app.schemas.ats import ATSReport
+from app.schemas.contact import ProfileContactRead, ProfileContactUpdate
 from app.schemas.profile import CandidateProfileRead, CandidateProfileUpdate
+from app.services import contacts as contact_service
 from app.services import resume as resume_service
 
 router = APIRouter(prefix="/profile", tags=["profile"])
+
+
+@router.get(
+    "/active",
+    response_model=CandidateProfileRead,
+    summary="The profile everything is scored against",
+)
+async def read_active_profile(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> CandidateProfileRead:
+    """Return the live profile, so a client that has no id can find one.
+
+    Declared before ``/{profile_id}`` on purpose: routes match in the order
+    they are added, and the other one would swallow "active" and answer 422
+    about a malformed UUID.
+
+    v1 is single-user, so "the profile" is the most recent successfully parsed
+    upload. 404 means no resume has been parsed yet, which is a real state the
+    dashboard has to render — it is not an error.
+    """
+    profile = await ProfileRepository(session).get_active()
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No active profile; upload a resume first",
+        )
+    return CandidateProfileRead.model_validate(profile)
 
 
 @router.get(
@@ -87,3 +116,52 @@ async def read_ats_report(
             detail="No ATS report recorded for this profile",
         )
     return report
+
+
+@router.get(
+    "/{profile_id}/contacts",
+    response_model=ProfileContactRead,
+    summary="Name, phone, email, city and links",
+)
+async def read_contacts(
+    profile_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ProfileContactRead:
+    """Return the contact block the generated documents are stamped with.
+
+    A profile with nothing filled in yet answers 200 with an empty block rather
+    than 404: the screen behind this is a form, and "nothing here yet" is the
+    state it exists to fix. 404 means the profile itself is not there.
+    """
+    contacts = await contact_service.get_contacts(session, profile_id)
+    if contacts is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    return contacts
+
+
+@router.patch(
+    "/{profile_id}/contacts",
+    response_model=ProfileContactRead,
+    summary="Correct the contact block by hand",
+)
+async def update_contacts(
+    profile_id: UUID,
+    changes: ProfileContactUpdate,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ProfileContactRead:
+    """Apply the owner's corrections and remember that they made them.
+
+    Extraction reads contacts off a page and gets them wrong the way any parser
+    does — a phone number split across two lines, a city taken from an
+    employer's address. What is different from the rest of the profile is that
+    nothing downstream can catch it: a wrong skill shows up as a strange match
+    score, while a wrong phone number just means nobody calls.
+
+    So every field named here is flagged as settled by a human and is never
+    written by extraction again, including one set to null.
+    """
+    updated = await contact_service.update_contacts(session, profile_id, changes)
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    await session.commit()
+    return updated
