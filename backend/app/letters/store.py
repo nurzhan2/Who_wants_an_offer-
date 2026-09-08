@@ -47,6 +47,7 @@ from app.letters.examples import (
     OutcomeEvidence,
     grade_of,
 )
+from app.letters.guard import VERSION as RULES_VERSION
 
 logger = get_logger(__name__)
 
@@ -208,6 +209,10 @@ async def save_letter(
     already names a profile was written from that one, and overwriting it would
     manufacture the false provenance the column exists to prevent.
 
+    The rules version travels with the text, because a letter outlives the
+    rules that judged it: the documents screen has to be able to say which set
+    produced this one rather than implying today's produced all of them.
+
     The letter is saved, never sent. Sending is ``agent/``'s, after a human
     confirms it, and nothing in ``backend/`` can do it.
     """
@@ -219,13 +224,23 @@ async def save_letter(
     )
     if application is None:
         application = Application(
-            id=uuid7(), vacancy_id=vacancy_id, cover_letter=text, profile_id=profile_id
+            id=uuid7(),
+            vacancy_id=vacancy_id,
+            cover_letter=text,
+            profile_id=profile_id,
+            letter_rules_version=RULES_VERSION,
         )
         session.add(application)
         await session.flush()
         return application.id, True
 
     application.cover_letter = text
+    # Overwritten with the letter, unlike ``profile_id`` one line down. They are
+    # facts about different things: the profile is provenance of the row and is
+    # only ever filled in, while this describes the text that is being replaced
+    # right now, and leaving the old number beside a new letter would say a
+    # version wrote something it never saw.
+    application.letter_rules_version = RULES_VERSION
     if application.profile_id is None:
         application.profile_id = profile_id
     await session.flush()
