@@ -1,14 +1,19 @@
-"""Stage 0 for reading hh by profession: run the measurement, print what it saw.
+"""Measure hh's catalogue by profession, and check the plan built on it.
 
-    uv run python scripts/probe_hh_roles.py
+    uv run python scripts/probe_hh_roles.py --slug programmist
+    uv run python scripts/probe_hh_roles.py --keyword python --keyword docker
     uv run python scripts/probe_hh_roles.py --files 2 --no-roles
-    uv run python scripts/probe_hh_roles.py --slug python-razrabotchik --json probe.json
+    uv run python scripts/probe_hh_roles.py --json docs/hh-probe.json
 
-The crawl is blind to the profession, and the reason is not a bug: a sitemap
-entry is a URL and a date, so the role is only known after the request has been
-spent. Whether there is a way in by profession turns on one fact nobody has
-measured -- what hh's ``vacancies{N}.xml`` catalogue pages actually contain --
-and this prints that fact.
+This measured the way in by profession on 2026-09-08 and the crawl was built on
+what it found; see ``app/sources/hh_probe.py`` for the numbers and for the two
+jobs it has now that the answer is known -- watching those facts stay true, and
+printing the profile-to-slugs plan the production code would build so that the
+transliteration step can be checked against the live site.
+
+Pick the slug deliberately. The first run of this opened ``digital-analitik``, a
+profession the city barely hires for, and concluded from that one page that
+catalogue pages do not list vacancies; ``programmist`` answered the other way.
 
 It changes nothing and stores nothing. Every request goes through the hh
 connector's own client, so robots.txt, the ban on query strings and the measured
@@ -16,11 +21,6 @@ rate of one page every four to five seconds all apply: a full run reads the
 sitemap index, every catalogue file, one catalogue page and one dictionary,
 which is about a minute of polite crawling. Nothing here goes near
 ``/search/vacancy``, and nothing here goes faster.
-
-``--json`` writes the whole measurement to a file. That is the artefact
-docs/SOURCES.md quotes, and it is also how the one question a single run cannot
-answer -- whether a catalogue page's composition changes -- gets answered: dump
-it, run it again tomorrow, diff the two.
 """
 
 import argparse
@@ -37,6 +37,7 @@ from app.sources.hh_probe import (
     DEV_TERMS,
     CatalogIndex,
     CatalogPage,
+    CrawlPlan,
     ProbeReport,
     RoleDirectory,
     probe,
@@ -66,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         action="append",
         dest="terms",
         help="search term for the development family; repeatable, replaces the defaults",
+    )
+    parser.add_argument(
+        "--keyword",
+        action="append",
+        dest="keywords",
+        help="a keyword the planner would send; repeatable, turns on the plan section",
     )
     parser.add_argument("--no-roles", action="store_true", help="skip api.hh.ru/professional_roles")
     parser.add_argument("--json", help="write the whole measurement here")
@@ -165,37 +172,66 @@ def show_roles(roles: RoleDirectory | None) -> None:
         print(f"    {role.id:>5}  {role.name}")
 
 
-def verdict(page: CatalogPage | None) -> str:
-    """The fork in the brief, decided by the rule printed beside it.
+def show_plan(plan: CrawlPlan | None) -> None:
+    """What the crawl would open for this profile, role by role."""
+    print()
+    print(RULE)
+    print("4. ПЛАН ОБХОДА ДЛЯ ЭТОГО ПРОФИЛЯ")
+    print(RULE)
+    if plan is None:
+        print("  не построен: нужны --keyword и прочитанный список слагов (см. ЗАМЕЧАНИЯ)")
+        return
+    print(f"  ключевые слова: {', '.join(plan.keywords)}")
+    print(f"  семейства из hh_roles.yaml: {', '.join(plan.families) or 'ни одного'}")
+    print(f"  всего страниц каталога в плане: {plan.total}")
+    if not plan.roles:
+        print("  ролей не выбрано: слаги берутся только по ключевым словам профиля")
+    for role in plan.roles:
+        print(f"    {role.id:>5}  {role.name} -- слагов {len(role.slugs)}")
+        for slug in role.slugs[:5]:
+            print(f"           {slug}")
+        if not role.slugs:
+            # The finding this section exists to surface: hh names that work in
+            # a way the transliteration did not recognise.
+            print("           НИ ОДНОГО: проверить термины в hh_roles.yaml")
+    print(f"  слагов по ключевым словам, без роли: {len(plan.by_keyword)}")
+    for slug in plan.by_keyword[:MAX_LINES]:
+        print(f"    {slug}")
 
-    Deliberately three answers and not two. "Ambiguous" is a real outcome of
-    this measurement -- a page carrying two vacancy links is not a listing --
-    and collapsing it into either branch would be the guess the whole exercise
-    exists to avoid.
+
+def verdict(page: CatalogPage | None) -> str:
+    """Whether the catalogue still works, decided by the rule printed beside it.
+
+    Deliberately three answers and not two. "Not a listing" is a real outcome --
+    a rare profession has almost no postings, and the first run of this probe
+    read exactly that on ``digital-analitik`` and reported the catalogue as a
+    dead end. It was not; ``programmist`` carried 50. So the middle answer sends
+    the reader back to a profession the city actually hires for instead of
+    letting one page decide.
     """
     if page is None:
         return "не измерено: страница каталога не прочитана"
     ids = len(page.ids_in_document)
     if ids >= IDS_FOR_A_LIST:
         paging = (
-            "и есть пагинация без строки запроса"
+            "нашлась пагинация без строки запроса -- это новость, "
+            "глубину можно брать не только широтой слагов"
             if page.links_without_query
-            else ("но ссылок на следующие страницы без строки запроса не найдено")
+            else "пагинации без строки запроса нет, как и было замерено 2026-09-08"
         )
         return (
-            f"страница отдаёт список вакансий ({ids} id, порог {IDS_FOR_A_LIST}) {paging}. "
-            "Вход по профессии выглядит реализуемым: слаг -> страница каталога -> id -> "
-            "/vacancy/{id}"
+            f"страница отдаёт список вакансий ({ids} id, порог {IDS_FOR_A_LIST}); {paging}. "
+            "Обход по профессии работает: слаг -> страница каталога -> id -> /vacancy/{id}"
         )
     if ids == 0:
         return (
-            "на странице нет ни одного id вакансии. Входа по профессии здесь нет; "
-            "запасной путь -- обход как сейчас с ранним отсевом по professional_role_ids, "
-            "и он НЕ экономит запросов"
+            "на странице нет ни одного id вакансии. Если это не редкая профессия "
+            "(перепроверить на programmist), то каталог перестал отдавать списки, "
+            "обход по профессии молча выродился в обход по дате -- чинить hh.py"
         )
     return (
         f"на странице {ids} id вакансий при пороге {IDS_FOR_A_LIST}: это не список. "
-        "Нужен человек: посмотреть сохранённый JSON и решить"
+        "Скорее всего редкая профессия -- повторить на programmist, прежде чем решать"
     )
 
 
@@ -211,6 +247,7 @@ def show(report: ProbeReport) -> None:
     show_index(report.index)
     show_page(report.page)
     show_roles(report.roles)
+    show_plan(report.plan)
 
     if report.notes:
         print()
@@ -246,6 +283,7 @@ async def main() -> int:
             slug=args.slug,
             max_files=args.files,
             read_roles_directory=not args.no_roles,
+            keywords=tuple(args.keywords or ()),
         )
     finally:
         await close_client()

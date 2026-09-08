@@ -28,6 +28,8 @@ from app.sources.hh_probe import (
     CatalogFile,
     CatalogIndex,
     CatalogPage,
+    CrawlPlan,
+    PlannedRole,
     ProbeReport,
     Role,
     RoleDirectory,
@@ -205,15 +207,54 @@ def test_the_probe_report_renders_over_every_outcome(
 def test_the_verdict_states_the_rule_it_applied() -> None:
     """A verdict without its threshold beside it is an opinion.
 
-    Three answers rather than two, because "two vacancy links on the page" is
-    neither a listing nor an empty page, and rounding it into either is the
-    guess the whole probe exists to replace.
+    Three answers rather than two, and the middle one is the one that was
+    learned the hard way: the first run of this probe read a rare profession,
+    found almost nothing on it, and reported the catalogue as a dead end. Both
+    of the answers that are not "this is a listing" now send the reader back to
+    ``programmist`` before concluding anything.
     """
     listing = hh_roles.verdict(_page(hh_roles.IDS_FOR_A_LIST))
     empty = hh_roles.verdict(_page(0))
     unclear = hh_roles.verdict(_page(1))
 
     assert str(hh_roles.IDS_FOR_A_LIST) in listing
-    assert "реализуемым" in listing
-    assert "запасной путь" in empty and "НЕ экономит" in empty
-    assert "Нужен человек" in unclear
+    assert "работает" in listing
+    assert "programmist" in empty and "programmist" in unclear
+
+
+def test_the_plan_section_renders_and_names_a_role_that_found_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The finding the section exists for has to be legible, not counted.
+
+    A role the transliteration failed to match against any slug is the one
+    outcome a person must act on, and a zero in a column is not how anybody
+    notices one.
+    """
+    hh_roles.show_plan(
+        CrawlPlan(
+            keywords=("python", "docker"),
+            families=("backend", "devops"),
+            roles=(
+                PlannedRole(id=96, name="Программист, разработчик", slugs=("programmist",)),
+                PlannedRole(id=165, name="Дата-сайентист", slugs=()),
+            ),
+            by_keyword=("junior-python-developer",),
+            total=2,
+        )
+    )
+
+    printed = capsys.readouterr().out
+    assert "НИ ОДНОГО" in printed
+    assert "hh_roles.yaml" in printed
+    printed.encode("cp1251")
+
+
+def test_the_plan_section_says_when_there_was_no_profile_to_plan_for(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty section that looks like a result is worse than an absent one."""
+    hh_roles.show_plan(None)
+
+    printed = capsys.readouterr().out
+    assert "--keyword" in printed and "ЗАМЕЧАНИЯ" in printed

@@ -1,61 +1,56 @@
-"""Stage 0 of reading hh by profession: measure the catalogue, never guess it.
+"""The measurement behind the crawl by profession, and the way to take it again.
 
-**Why this file exists.** The crawl walks ``vacancy{N}.xml`` newest-first and is
-blind to the profession, because a sitemap entry carries a ``<loc>`` and a
-``<lastmod>`` and nothing else. Measured on 643 scored vacancies on 2026-09-08:
-of 294 hh rows collected, none belonged to the programmer/developer/devops
-family, the top role was sales at 34, and the whole corpus produced one match
-above "miss". Scoring is honest and there is nothing in the corpus to score.
+**What it found.** Run against ``almaty.hh.kz`` on 2026-09-08 and recorded in
+docs/SOURCES.md § «Обход по профессиям»: 15 ``vacancies{N}.xml`` files holding
+10 435 catalogue slugs, 630 of them development; ``/vacancies/programmist`` is
+1.49 MB carrying the frontend's boot state with 50 vacancy ids on it, in the
+markup and in the state alike; the only paging is ``?page=0..3``, which hh's
+``Disallow: *?*`` closes to us, with no query-less form of it anywhere on the
+page; and ``api.hh.ru/professional_roles`` answers with 194 roles, of which id
+96 is «Программист, разработчик» — confirming the ``roles=96`` that had only
+been seen in hh's advertising telemetry.
 
-Filtering by role at walk time is impossible in the obvious way:
-``professionalRoleIds`` lives on the vacancy page, i.e. after the request has
-already been spent, so discarding a posting afterwards saves database rows and
-not one single request. The share of relevant postings per request — the number
-that actually decides whether this source is worth its rate limit — is unchanged
-by any amount of filtering downstream.
+That answered the fork this module was written for, and ``hh.py`` now walks the
+catalogue. What this file is for from here is the two jobs a measurement has
+after it has been believed.
 
-There is a candidate for a real answer, and it is a *candidate*, not a plan.
-Beside ``vacancy{N}.xml`` the sitemap index lists ``vacancies{N}.xml``, which is
-a different family: measured on 2026-09-06, ``vacancies0.xml`` for Almaty was
-858 KB and held 5716 URLs shaped like ``https://almaty.hh.kz/vacancies/
-crm-marketolog`` — no query string, no ``lastmod``. They look like catalogue
-pages per profession. If such a page lists vacancy ids, then the walk can start
-from a profession instead of from a date, with no query string anywhere and
-every URL inside what robots.txt allows. If it does not, the honest fallback is
-the walk as it is plus an early discard, which must be described as what it is.
+**Watching it stay true.** The crawl rests on facts about somebody else's site:
+that a catalogue page lists ids, that the slug family exists, that paging is
+closed. Each of them can change without warning, and each would fail quietly —
+a catalogue that stops listing ids does not raise, it returns an empty set and
+the walk falls back to the date order it had before, silently collecting sales
+managers again. Re-running this says so in one screen.
 
-**Which of those is true is a measurement nobody has taken**, and this module is
-the instrument for taking it. It answers three questions and reports what it
-saw, not what it expected:
+**Checking the one step nobody can verify by reading.** A catalogue slug is a
+transliteration of a Russian role name, and matching «Программист, разработчик»
+to ``programmist`` is done by a table in ``hh_roles.py`` that no amount of care
+makes self-evidently right. Given the profile's keywords, ``--keyword``, this
+prints the plan the production code would build — every role the profile asked
+for, and the slugs each one found on the live site. A role with an empty list
+beside it is the finding: hh names that work in a way the table did not
+recognise, and the fix is a term in ``hh_roles.yaml``.
 
-1. Which ``vacancies{N}.xml`` files the index lists, how many slugs they hold,
-   whether any entry carries a ``lastmod``, and which slugs name something in
-   the development family.
-2. What one catalogue page actually contains: whether ``HH-Lux-InitialState`` is
-   on it, what the top level of that state holds, how many distinct
-   ``/vacancy/{id}`` ids appear in the document, and which links to further
-   catalogue pages exist — split by whether they carry a query string, because
-   the ones that do are closed to us and the ones that do not are the pagination
-   this whole idea depends on.
-3. What ``api.hh.ru/professional_roles`` — open, unlike the jobseeker half of
-   that host — calls the roles in the same family, with their ids, so that the
-   ``roles=96`` seen in hh's own ad telemetry can be checked against the
-   directory rather than believed.
+**The negative result was a sampling error, and that is worth keeping.** The
+first run of this probe opened ``digital-analitik``, found almost nothing, and
+reported that catalogue pages do not list vacancies. One page of one rare
+profession is not a measurement of the catalogue; ``programmist`` was, and it
+answered the other way. The probe now takes ``--slug`` for exactly this reason,
+and anybody re-running it should open a profession the city actually hires for
+before concluding anything.
 
-**What this module is not.** It is not a connector: it registers nothing and the
-pipeline never holds it. It does not decide anything — the terms in
-:data:`DEV_TERMS` are the search terms of one measurement, not this project's
-answer to "which roles does this profile want", which is a config file that
-belongs next to ``hh_sites.yaml`` and can only be written once the vocabulary it
-must hold is known. And it changes no rate: every request goes through the hh
-connector's own :class:`~app.sources.http.SourceHTTP`, so robots.txt, the ban on
-query strings, the challenge detection and the measured 0.25 requests a second
-apply here exactly as they apply to a crawl. A probe that went faster to answer
-sooner would answer with a captcha.
+**What it does not do.** It decides nothing and stores nothing. The terms in
+:data:`DEV_TERMS` are one measurement's search terms — "how much of this
+catalogue is development at all" — and not the project's answer to which roles a
+profile wants, which is ``hh_roles.yaml`` and is applied by the crawl. And it
+changes no rate: every request goes through the hh connector's own
+:class:`~app.sources.http.SourceHTTP`, so robots.txt, the ban on query strings,
+the challenge detection and the measured 0.25 requests a second apply here
+exactly as they apply to a crawl. A probe that went faster to answer sooner
+would answer with a captcha.
 
-One question it deliberately cannot answer in one pass: whether a catalogue
-page's composition changes over time. That needs two runs and a diff, which is
-what ``--json`` is for — dump it, run it again tomorrow, compare.
+One question a single run still cannot answer: whether a catalogue page's
+composition changes over time. That needs two runs and a diff, which is what
+``--json`` is for — dump it, run it again tomorrow, compare.
 """
 
 import html as html_lib
@@ -64,46 +59,43 @@ import re
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlsplit
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.sources.hh import (
+    ROLES_URL,
     SITEMAP_CACHE_TTL,
     SITEMAP_INDEX_PATH,
-    SITEMAP_LOC,
     STATE_MARKER,
+    VACANCY_ID_ON_PAGE,
     HHSite,
+    catalog_entries,
+    catalog_sitemaps,
+)
+from app.sources.hh_roles import (
+    DirectoryRole,
+    carries,
+    families_for,
+    load_families,
+    read_directory,
+    roles_for,
+    slugs_for,
 )
 from app.sources.http import HHChallengedError, SourceHTTP
 
 logger = get_logger(__name__)
 
-#: The catalogue family. Three letters away from ``vacancy{N}.xml``, which is
-#: why the connector matches its own files on the whole name — and why this one
-#: does too, rather than on a substring that would happily take both.
-CATALOG_SITEMAP = re.compile(r"/sitemap/(vacancies\d+)\.xml$")
-
-#: A catalogue URL as the sitemap writes it: ``/vacancies/{slug}`` and nothing
-#: else. Anything deeper is a page of one, and is measured from the page itself.
-CATALOG_PATH = re.compile(r"^/vacancies/([^/]+)/?$")
+#: The same question asked of the parsed state as ``VACANCY_ID_ON_PAGE`` asks
+#: of the document, by key rather than by URL. Both numbers are reported:
+#: agreeing they are evidence, disagreeing they are the interesting part.
+STATE_ID_KEY = re.compile(r"vacancyid$", re.IGNORECASE)
 
 #: Any link into the catalogue found in a page's markup, pagination included.
-#: Deliberately loose: what shapes exist is the thing being measured.
+#: Deliberately loose: measured 2026-09-08, the only next-page links are
+#: ``?page=0..3``, and it is this pattern plus the split on ``?`` that said so.
 CATALOG_LINK = re.compile(r"/vacancies/[^\s\"'<>\\)]*")
-
-#: A vacancy id anywhere in the document — in an ``href`` or inside the escaped
-#: JSON of the boot state. The single least assuming way to ask "does this page
-#: list vacancies", because it reads hh's own URL shape rather than a key name
-#: this repository would otherwise have to invent.
-VACANCY_ID = re.compile(r"/vacancy/(\d+)")
-
-#: The same question asked of the parsed state, by key rather than by URL. Both
-#: numbers are reported: agreeing they are evidence, disagreeing they are the
-#: interesting part.
-STATE_ID_KEY = re.compile(r"vacancyid$", re.IGNORECASE)
 
 #: What "related to development" means for this measurement, and nothing more.
 #: Wide on purpose — the brief asks for the whole neighbouring circle, because
@@ -146,53 +138,24 @@ DEV_TERMS: tuple[str, ...] = (
     "системный",
 )
 
-#: Below this a term is matched as a whole token rather than as a substring.
-#: ``ml`` inside ``kremlin`` and ``qa`` inside anything are noise, and a probe
-#: whose output has to be filtered by eye is a probe nobody runs twice.
-MIN_SUBSTRING_TERM = 4
 
-#: The id seen as ``roles=96`` in hh's own advertising telemetry, which the
-#: directory is asked about by name so that the guess is either confirmed or
-#: replaced by the real one.
+#: The id seen as ``roles=96`` in hh's own advertising telemetry. Confirmed
+#: 2026-09-08 against the directory: «Программист, разработчик».
 ADVERTISED_ROLE_ID = "96"
 
 #: Slugs and ids listed in full in the console report. The JSON dump carries
-#: everything; a terminal that scrolls for five thousand lines carries nothing.
+#: everything; a terminal that scrolls for ten thousand lines carries nothing.
 MAX_SAMPLE = 40
 
 
-#: Everything that is not a letter or a digit separates one word from the next.
-#: The Cyrillic halves are written as escapes rather than as themselves: a range
-#: of Cyrillic letters sitting next to ``a-zA-Z`` in one class is exactly the
-#: confusable-character mistake ruff's RUF001 exists to catch, and a class that
-#: silently contains a Cyrillic ``a`` instead of a Latin one is unreadable and
-#: wrong in a way no test would show.
-WORD_BREAK = re.compile(r"[^0-9a-zA-Z\u0430-\u044f\u0451\u0410-\u042f\u0401]+")
-
-
-def _tokens(text: str) -> tuple[str, ...]:
-    """A name split into the words a term may be matched against."""
-    return tuple(part for part in WORD_BREAK.split(text.casefold()) if part)
-
-
 def matched_terms(text: str, terms: Sequence[str] = DEV_TERMS) -> tuple[str, ...]:
-    """Which of these terms this name carries, and by which rule.
+    """Which of these terms this name carries.
 
-    Long terms match as substrings, so ``razrabotchik`` finds
-    ``razrabotchik-python`` and ``администратор баз`` finds the role whose name
-    continues ``данных``. Short ones match a whole token only; see
-    :data:`MIN_SUBSTRING_TERM` for what that is worth.
+    The production matcher, not a second one: the crawl decides which catalogue
+    pages to open with :func:`app.sources.hh_roles.carries`, so a measurement
+    made with a different rule would be a measurement of something else.
     """
-    lowered = text.casefold()
-    tokens = set(_tokens(text))
-
-    def carried(term: str) -> bool:
-        needle = term.casefold()
-        if len(needle) < MIN_SUBSTRING_TERM:
-            return needle in tokens
-        return needle in lowered
-
-    return tuple(term for term in terms if carried(term))
+    return carries(text, terms)
 
 
 class CatalogFile(BaseModel):
@@ -282,6 +245,70 @@ class RoleDirectory(BaseModel):
     advertised: Role | None = None
 
 
+class PlannedRole(BaseModel):
+    """One role the profile asked for, and the catalogue pages it names."""
+
+    model_config = ConfigDict(frozen=True)
+
+    id: int
+    name: str
+    category: str | None = None
+    slugs: tuple[str, ...] = ()
+
+
+class CrawlPlan(BaseModel):
+    """What the crawl would actually open for a given profile.
+
+    The one part of this report that is not a measurement of hh but a
+    measurement of us: the same functions the connector calls, run against the
+    same live slug list, so that the step nobody can verify by reading — a
+    Cyrillic role name matched against a Latin slug — can be checked by eye
+    against the real site instead of trusted.
+
+    A role with no slugs beside it is the finding to look for. It means hh names
+    that work in a way this repository's transliteration did not recognise, and
+    the fix is a term in ``hh_roles.yaml`` rather than an argument about it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    keywords: tuple[str, ...] = ()
+    families: tuple[str, ...] = ()
+    roles: tuple[PlannedRole, ...] = ()
+    #: Slugs no selected role named, picked by the profile's own words. The
+    #: fallback that keeps this working for a profile no family describes.
+    by_keyword: tuple[str, ...] = ()
+    total: int = 0
+
+
+def plan_for(
+    keywords: Sequence[str], directory: Sequence[DirectoryRole], slugs: Sequence[str]
+) -> CrawlPlan:
+    """Run the production profile-to-slugs chain and report every step of it."""
+    families = families_for(keywords, load_families())
+    roles = roles_for(families, directory)
+    planned = tuple(
+        PlannedRole(
+            id=role.id,
+            name=role.name,
+            category=role.category,
+            # One role at a time, and with no keywords, so that each line of the
+            # report says what THAT role found rather than what the union did.
+            slugs=slugs_for([role], (), slugs),
+        )
+        for role in roles
+    )
+    chosen = slugs_for(roles, keywords, slugs)
+    named = {slug for role in planned for slug in role.slugs}
+    return CrawlPlan(
+        keywords=tuple(keywords),
+        families=tuple(family.key for family in families),
+        roles=planned,
+        by_keyword=tuple(slug for slug in chosen if slug not in named),
+        total=len(chosen),
+    )
+
+
 class ProbeReport(BaseModel):
     """One run of the probe. This is the artefact docs/SOURCES.md quotes."""
 
@@ -293,42 +320,11 @@ class ProbeReport(BaseModel):
     index: CatalogIndex | None = None
     page: CatalogPage | None = None
     roles: RoleDirectory | None = None
+    #: Only filled when the probe was given a profile's keywords to plan with.
+    plan: CrawlPlan | None = None
     #: What could not be measured and why. A probe that half worked has to say
     #: which half, or its silence is read as an answer.
     notes: tuple[str, ...] = ()
-
-
-def catalog_sitemaps(body: str, host: str) -> list[tuple[str, str]]:
-    """The ``vacancies{N}.xml`` files this index lists, on this host only.
-
-    Host-checked for the reason the connector checks it: a sitemap is somebody
-    else's document and every URL in it is input.
-    """
-    found = {
-        (match.group(1), url)
-        for url in SITEMAP_LOC.findall(body)
-        if (match := CATALOG_SITEMAP.search(url)) and urlsplit(url).hostname == host
-    }
-    return sorted(found)
-
-
-def catalog_entries(body: str, host: str) -> tuple[tuple[str, ...], int, int]:
-    """Slugs, total ``<loc>`` count and how many entries carry a ``lastmod``.
-
-    Returned together because the second and third numbers are what say whether
-    the first is trustworthy: a file whose every line is a catalogue URL is a
-    different thing from one where we recognised a tenth of them.
-    """
-    locs = SITEMAP_LOC.findall(body)
-    slugs: list[str] = []
-    for url in locs:
-        parts = urlsplit(url)
-        if parts.hostname != host or parts.query:
-            continue
-        match = CATALOG_PATH.match(parts.path)
-        if match is not None:
-            slugs.append(match.group(1))
-    return tuple(dict.fromkeys(slugs)), len(locs), body.count("<lastmod>")
 
 
 def _walk_state(value: Any) -> Iterator[tuple[str, Any]]:
@@ -392,7 +388,7 @@ def read_page(url: str, body: str) -> CatalogPage:
     is a real answer to the question being asked, and the fork in the brief
     turns on exactly that answer.
     """
-    ids = tuple(dict.fromkeys(VACANCY_ID.findall(body)))
+    ids = tuple(dict.fromkeys(VACANCY_ID_ON_PAGE.findall(body)))
     links = tuple(dict.fromkeys(CATALOG_LINK.findall(body)))
     match = STATE_MARKER.search(body)
     state: Any = None
@@ -416,55 +412,30 @@ def read_page(url: str, body: str) -> CatalogPage:
     )
 
 
-def _is_category(value: dict[str, Any]) -> bool:
-    """Whether this object holds other named objects rather than being one.
-
-    The shape test, rather than the key name ``roles``, for the reason the whole
-    module is written this way: what the endpoint nests under what is the thing
-    being measured. It matters because a category id and a role id are separate
-    numbering spaces — hh has both a category 11 and a role 11 — so reading them
-    into one table by id loses whichever came second.
-    """
-    return any(
-        isinstance(item, list) and any(isinstance(element, dict) for element in item)
-        for item in value.values()
-    )
-
-
 def read_roles(payload: Any, terms: Sequence[str] = DEV_TERMS) -> RoleDirectory:
-    """The professional-role directory, read without assuming its nesting.
+    """The professional-role directory, and what it calls the wanted family.
 
-    ``professional_roles`` is documented as categories holding roles, and this
-    walks for any object carrying both an ``id`` and a textual ``name`` instead
-    of relying on that: the measurement is what the endpoint returns today, and
-    a shape change should show up as a different count rather than as an empty
-    result that reads like "hh has no developer roles".
+    The reading is :func:`app.sources.hh_roles.read_directory`, which is what the
+    crawl uses; this adds only the two things a measurement wants on top —
+    which entries the terms matched, and what the id seen in hh's advertising
+    telemetry turns out to be.
     """
-    roles: dict[str, Role] = {}
-
-    def visit(value: Any, category: str | None) -> None:
-        if isinstance(value, dict):
-            name = value.get("name")
-            identifier = value.get("id")
-            named = (
-                isinstance(name, str) and bool(name.strip()) and isinstance(identifier, int | str)
-            )
-            if named and not _is_category(value):
-                roles.setdefault(
-                    str(identifier), Role(id=str(identifier), name=str(name), category=category)
-                )
-            for item in value.values():
-                visit(item, str(name) if named and _is_category(value) else category)
-        elif isinstance(value, list):
-            for item in value:
-                visit(item, category)
-
-    visit(payload, None)
-    matched = tuple(role for role in roles.values() if matched_terms(role.name, terms))
+    directory = read_directory(payload)
+    matched = tuple(role for role in directory if matched_terms(role.name, terms))
     return RoleDirectory(
-        total=len(roles),
-        matched=tuple(sorted(matched, key=lambda role: role.name)),
-        advertised=roles.get(ADVERTISED_ROLE_ID),
+        total=len(directory),
+        matched=tuple(
+            Role(id=str(role.id), name=role.name, category=role.category)
+            for role in sorted(matched, key=lambda role: role.name)
+        ),
+        advertised=next(
+            (
+                Role(id=str(role.id), name=role.name, category=role.category)
+                for role in directory
+                if str(role.id) == ADVERTISED_ROLE_ID
+            ),
+            None,
+        ),
     )
 
 
@@ -476,6 +447,7 @@ async def probe(
     slug: str | None = None,
     max_files: int | None = None,
     read_roles_directory: bool = True,
+    keywords: Sequence[str] = (),
 ) -> ProbeReport:
     """Take the three measurements, and record what could not be taken.
 
@@ -486,15 +458,31 @@ async def probe(
     notes: list[str] = []
     index = await _measure_index(http, site, terms=terms, max_files=max_files, notes=notes)
     page = await _measure_page(http, site, index=index, slug=slug, notes=notes)
-    roles = (
-        await _measure_roles(terms=terms, http=http, notes=notes) if read_roles_directory else None
-    )
+    directory: tuple[DirectoryRole, ...] = ()
+    roles: RoleDirectory | None = None
+    if read_roles_directory:
+        payload = await _read_roles_payload(http, notes)
+        if payload is not None:
+            directory = read_directory(payload)
+            roles = read_roles(payload, terms)
+    plan: CrawlPlan | None = None
+    if keywords:
+        # Two different silences again, and the report has to tell them apart:
+        # "you gave me no profile" and "I could not read the slug list" produce
+        # the same empty section and mean opposite things.
+        if index is None:
+            notes.append("план обхода не построен: список слагов не прочитан")
+        else:
+            if not directory:
+                notes.append("план построен только по ключевым словам: справочник не прочитан")
+            plan = plan_for(keywords, directory, index.slugs)
     return ProbeReport(
         host=site.host,
         terms=tuple(terms),
         index=index,
         page=page,
         roles=roles,
+        plan=plan,
         notes=tuple(notes),
     )
 
@@ -605,19 +593,17 @@ def _first(index: CatalogIndex | None) -> str | None:
     return next(iter(index.matched), None) or next(iter(index.slugs), None)
 
 
-async def _measure_roles(
-    *, terms: Sequence[str], http: SourceHTTP, notes: list[str]
-) -> RoleDirectory | None:
-    """Question three: what hh's own directory calls these roles.
+async def _read_roles_payload(http: SourceHTTP, notes: list[str]) -> Any:
+    """Question three: hh's own directory, fetched once and read twice.
 
     ``api.hh.ru/professional_roles`` is one of the dictionaries that stayed open
     when the jobseeker half of that host closed; the transport blocks
-    ``/vacancies`` there and nothing else.
+    ``/vacancies`` there and nothing else. ``Any`` because the payload is hh's
+    and is validated by :func:`app.sources.hh_roles.read_directory` one line
+    later, in the module the crawl shares with this one.
     """
-    url = "https://api.hh.ru/professional_roles"
     try:
-        payload = await http.get_json(url, cache_ttl=SITEMAP_CACHE_TTL)
+        return await http.get_json(ROLES_URL, cache_ttl=SITEMAP_CACHE_TTL)
     except (SourceError, OSError) as exc:
-        notes.append(f"справочник {url} не прочитан: {exc}")
+        notes.append(f"справочник {ROLES_URL} не прочитан: {exc}")
         return None
-    return read_roles(payload, terms)

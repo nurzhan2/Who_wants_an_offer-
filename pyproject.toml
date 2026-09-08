@@ -97,6 +97,14 @@ known-first-party = ["app", "factories", "helpers"]
 # The Stage 0 catalogue probe prints its whole report in Russian, next to hh's
 # own latin slugs and URLs, so every second word mixes scripts and trips this.
 "scripts/probe_hh_roles.py" = ["RUF001", "RUF002"]
+# A transliteration table IS a homoglyph table: every one of its 33 keys is a
+# Cyrillic letter that ruff correctly points out looks like a Latin one. The
+# protection RUF001 gives is restored as a test instead — see
+# ``test_the_transliteration_table_is_cyrillic_in_and_ascii_out``, which also
+# holds the Latin-only tables beside it to being Latin, which is the failure
+# that would otherwise be silent.
+"backend/app/sources/hh_roles.py" = ["RUF001", "RUF002"]
+"backend/tests/test_hh_roles.py" = ["RUF001", "RUF002"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
