@@ -31,6 +31,7 @@ from app.db.session import session_factory
 from app.llm.router import LLMRouter, get_router
 from app.resume import ats_audit, extractor, profile_builder
 from app.schemas.ats import ATSReport
+from app.services import contacts as contact_service
 
 logger = get_logger(__name__)
 
@@ -125,9 +126,11 @@ async def parse_in_background(
         content = await asyncio.to_thread(path.read_bytes)
         document = extractor.extract(content, path.name)
         async with session_factory() as session:
-            await profile_builder.build_profile(
+            result = await profile_builder.build_profile(
                 document, session=session, profile_id=profile_id, router=llm
             )
+            if result.status is ParseStatus.READY:
+                await fill_contacts(session, profile_id)
             await session.commit()
     except Exception as exc:  # a background task must never die silently
         logger.exception(
@@ -142,6 +145,38 @@ async def parse_in_background(
         # Always: a staged file whose task has ended is dead weight, and
         # uploads/ would otherwise grow one resume at a time.
         await asyncio.to_thread(path.unlink, True)
+
+
+async def fill_contacts(session: AsyncSession, profile_id: UUID) -> None:
+    """Fill the profile's contact block from the resume that was just parsed.
+
+    Here rather than inside ``build_profile`` because that module orchestrates
+    the *profile*: extraction, enrichment, embedding, scoring readiness. The
+    contact block is a different thing with a different writer, and this is the
+    layer allowed to reach for a second service.
+
+    It reads the values back off the stored profile instead of taking them from
+    the extraction: whatever landed in the row is what the rest of the product
+    believes, and a contact block that disagreed with the profile it belongs to
+    would be its own kind of bug.
+
+    Only after a successful parse. A failed one has no name, no city and no
+    text to read a phone number out of, and writing an empty block would leave
+    the screen looking like extraction found nothing rather than never ran.
+    """
+    profile = await ProfileRepository(session).get(profile_id)
+    if profile is None:  # pragma: no cover - deleted while the parse ran
+        return
+    await contact_service.prefill_from_resume(
+        session,
+        profile_id=profile_id,
+        raw_text=profile.raw_text,
+        full_name=profile.name,
+        # locations is a list because a profile can want several cities; the
+        # contact block prints one, and the first is the one extraction read
+        # off the contact line.
+        city=profile.locations[0] if profile.locations else None,
+    )
 
 
 async def get_profile(session: AsyncSession, profile_id: UUID) -> CandidateProfile | None:
