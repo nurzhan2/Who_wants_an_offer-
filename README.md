@@ -46,7 +46,7 @@ skills, the experience delta and the LLM's verdict. See
 | Queue / schedule | APScheduler (v1) → Celery + Redis (v2) |
 | Embeddings | `BAAI/bge-m3` via sentence-transformers (multilingual RU/EN/KZ) |
 | LLM | Routed per task: Claude Code CLI (subscription), Anthropic API, local Ollama |
-| Frontend | React 18, Vite, TypeScript, TanStack Query + Table, Tailwind, shadcn/ui |
+| Frontend | React 18, Vite, TypeScript, TanStack Query, Tailwind |
 | Infra | Docker Compose, GitHub Actions CI |
 
 ## Quickstart
@@ -62,6 +62,42 @@ npm --prefix frontend install && npm --prefix frontend run dev
 ```
 
 With `make` available, the same thing is `make install && make up && make dev`.
+
+## The dashboard
+
+Six screens on `http://localhost:5173`, drawn from one API and from one
+database:
+
+| Screen | What it answers |
+| --- | --- |
+| Обзор | How much corpus there is, where the crawl got to per city and sitemap file, how the last run ended, what it bought by name, and how many applications went out |
+| Вакансии | The ranked list with filters, and one vacancy explained |
+| Отклики | The applications board: queued, waiting for a person, sent — and what hh has since said |
+| Документы | Resumes with their ATS audit, and every letter with the rules version that judged it |
+| Мастерская | The queue of vacancies worth a letter, and the button that writes one |
+| Мои данные | The resume as the matcher reads it: every field a score is computed from |
+
+Two rules shape all six.
+
+**Nothing is counted in the browser.** Every number is one SQL statement, so
+the screen describes the database rather than the page it managed to fetch.
+
+**`null` is not zero.** A sitemap file no run has counted says «не измерено»; a
+vacancy nothing has scored has no score rather than a zero; an application hh
+has not answered has no outcome. Each of those is a different fact from the
+measured version of itself, and the API, the types and the formatters all keep
+them apart.
+
+**There is no «отправить отклик» button, and there will not be one.** The
+dashboard reads, and it writes exactly one thing: a cover letter. An
+application goes out through `wwao apply --send`, where the letter is printed
+on a confirmation card and a person at the keyboard confirms that letter for
+that vacancy — a browser tab cannot make that promise.
+
+```bash
+uv run python scripts/seed.py    # deterministic data for every screen state
+npm --prefix frontend run dev    # proxies /api and /health to :8000
+```
 
 ## From a crawl to an application
 
@@ -135,6 +171,7 @@ masked unless you pass `--show-pii`.
 | Type check | `uv run mypy backend/app` |
 | Tests + coverage | `uv run pytest` |
 | Frontend gates | `npm --prefix frontend run typecheck && npm --prefix frontend run lint` |
+| Frontend build | `npm --prefix frontend run build` |
 | Fast tests (no DB, no model) | `uv run pytest -m "not db and not slow and not network"` |
 | Canary against live sources | `uv run pytest -m network` (deselected by default) |
 | Real embedding model | `make verify-embeddings` (needs `uv sync --extra embeddings`) |

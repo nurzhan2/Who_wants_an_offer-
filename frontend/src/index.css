@@ -1,3 +1,87 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/*
+ * Two colours and their inversion, and nothing else in the whole interface.
+ *
+ * The greys are the ink at reduced opacity rather than separate values, which
+ * is what lets a surface invert — swap the two variables and every hairline,
+ * every muted label and every border is still correct against the new ground.
+ * A third literal grey would have to be re-chosen by hand for the dark half and
+ * would be wrong on one of them forever after.
+ */
+@layer base {
+  :root {
+    --ink: #0b0b0b;
+    --paper: #f3f2ef;
+    --muted: color-mix(in srgb, var(--ink) 52%, var(--paper));
+    --hairline: color-mix(in srgb, var(--ink) 16%, var(--paper));
+  }
+
+  /* The inverted surface. The one emphasis this system has, and the reason it
+     needs no accent colour: a panel that matters is the page turned inside
+     out. */
+  .invert-surface {
+    --ink: #f3f2ef;
+    --paper: #0b0b0b;
+    background-color: var(--paper);
+    color: var(--ink);
+  }
+
+  html {
+    background-color: var(--paper);
+    color: var(--ink);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body {
+    margin: 0;
+    font-family: theme('fontFamily.sans');
+    font-weight: 400;
+    font-size: theme('fontSize.body[0]');
+    line-height: 1.55;
+  }
+
+  /* Tabular figures everywhere a number can change: a score ticking from 92 to
+     100 must not move the column it is in. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  ::selection {
+    background: var(--ink);
+    color: var(--paper);
+  }
+
+  :focus-visible {
+    outline: 1px solid var(--ink);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* The one motion in the system: content arrives, it does not appear. Slow on
+     purpose — the brief's 0.8s floor — and skipped entirely for anybody who has
+     asked their machine to stop animating things. */
+  .rise {
+    animation: rise 0.8s cubic-bezier(0.19, 1, 0.22, 1) both;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .rise {
+      animation: none;
+    }
+  }
+}
