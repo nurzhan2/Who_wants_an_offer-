@@ -17,6 +17,7 @@ the rules do what they say, and the live check is
 the real slug list and prints what each role found.
 """
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from app.sources.hh_roles import (
     carries,
     families_for,
     fold,
+    intent_words,
     load_families,
     read_directory,
     roles_for,
@@ -377,3 +379,197 @@ def test_every_word_table_is_stored_folded() -> None:
     """
     for word in EXPERIENCE_WORDS | GENERIC_ROLE_WORDS:
         assert word == fold(word), f"{word!r} is not stored in its folded form"
+
+
+# -- intent, which is not the same thing as skill ----------------------
+
+
+#: The owner's, verbatim. Everything below is what it has to survive.
+HEADLINE = "Python Developer — Backend / AI-интеграции"
+
+#: The sixteen keywords the planner produced from a resume that lists Java, Go,
+#: JavaScript and C beside Python — all of them true, all of them equal.
+FLAT_KEYWORDS = (
+    "python",
+    "java",
+    "go",
+    "javascript",
+    "c",
+    "c#",
+    "linux",
+    "docker",
+    "git",
+    "sql",
+    "postgresql",
+    "fastapi",
+    "pytest",
+    "react",
+    "bash",
+    "nginx",
+)
+
+POLYGLOT_SLUGS = (
+    "go-razrabotchik",
+    "c-razrabotchik",
+    "javascript-razrabotchik",
+    "razrabotchik-c-sharp",
+    "linux-administrator",
+    "java-razrabotchik",
+    "testirovshchik",
+    "python-razrabotchik",
+    "backend-razrabotchik-python",
+    "backend-razrabotchik",
+    "programmist",
+    "razrabotchik-integraciy",
+)
+
+
+def _polyglot_roles() -> tuple[DirectoryRole, ...]:
+    """The roles a Python backend profile selects out of hh's directory."""
+    return read_directory(DIRECTORY)
+
+
+def test_a_flat_keyword_list_cannot_say_which_language_is_wanted() -> None:
+    """The failure this weight was added for, kept as the control.
+
+    Measured on the live run of 2026-09-08: ranked by keywords alone the crawl
+    opened Go, C, JavaScript, Linux and C# pages and not one Python page. Every
+    one of those words is genuinely on the resume, which is exactly why the
+    keyword list cannot arbitrate between them — and why deleting the headline
+    weight has to fail a test rather than quietly restore that run.
+    """
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(_polyglot_roles(), FLAT_KEYWORDS, POLYGLOT_SLUGS, families=families)
+
+    assert "python" not in picked[0]
+
+
+def test_the_headline_outranks_every_skill_the_resume_happens_to_list() -> None:
+    """What the candidate says they are beats what they can also do.
+
+    ``python`` and ``linux`` are both on this resume. Only one of them is in the
+    headline, and a run opens eight pages.
+    """
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(
+        _polyglot_roles(), FLAT_KEYWORDS, POLYGLOT_SLUGS, families=families, headline=HEADLINE
+    )
+
+    assert all("python" in slug or "backend" in slug for slug in picked[:3])
+    for other in ("linux-administrator", "razrabotchik-c-sharp", "javascript-razrabotchik"):
+        assert picked.index("python-razrabotchik") < picked.index(other), other
+
+
+def test_the_family_the_headline_named_outranks_the_one_a_skill_dragged_in() -> None:
+    """``qa`` got in on ``pytest``; ``backend`` is what the headline says.
+
+    Both are crawled — the brief asks for breadth and a QA-automation posting is
+    in scope — but a backend page is bought before a testing one, and that is the
+    difference between the two weights rather than a filter.
+    """
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(
+        _polyglot_roles(), FLAT_KEYWORDS, POLYGLOT_SLUGS, families=families, headline=HEADLINE
+    )
+
+    assert "testirovshchik" in picked
+    assert picked.index("backend-razrabotchik") < picked.index("testirovshchik")
+
+
+def test_the_headline_finds_its_own_subject_in_another_grammatical_form() -> None:
+    """«AI-интеграции» in a resume, ``razrabotchik-integraciy`` on hh.
+
+    Russian inflects and the two do not inflect the same way, so an exact match
+    would read the profile's own subject as somebody else's technology and rank
+    it with the ABAP pages.
+    """
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(
+        _polyglot_roles(), FLAT_KEYWORDS, POLYGLOT_SLUGS, families=families, headline=HEADLINE
+    )
+
+    assert picked.index("razrabotchik-integraciy") < picked.index("go-razrabotchik")
+
+
+def test_a_rank_word_in_a_headline_is_not_an_intent_word() -> None:
+    """«Ведущий инженер-программист» means ``programmist``.
+
+    Letting ``inzhener`` carry the heaviest weight in the ranking would hand
+    every construction page on the site the top of the queue.
+    """
+    assert intent_words("Ведущий инженер-программист") == frozenset({"programmist"})
+    assert intent_words(None) == frozenset()
+
+
+def test_the_focus_weight_changes_direction_with_the_headline() -> None:
+    """Both halves of one key, because they pull opposite ways and both are right.
+
+    A page that already names what the candidate asked for is worse for naming
+    somebody else's language too. A page that names none of it is better for
+    naming their kind of work than for naming a trade they never mentioned.
+    """
+    roles = (DirectoryRole(id=96, name="Программист, разработчик"),)
+    families = families_for(FLAT_KEYWORDS, load_families())
+    named = ("python-developer", "java-backend-developer")
+    unnamed = ("go-razrabotchik", "linux-administrator")
+
+    picked = slugs_for(roles, FLAT_KEYWORDS, named + unnamed, families=families, headline=HEADLINE)
+
+    assert picked.index("python-developer") < picked.index("java-backend-developer")
+    assert picked.index("go-razrabotchik") < picked.index("linux-administrator")
+
+
+# -- against the measurement itself ------------------------------------
+
+
+MEASUREMENT = Path(__file__).resolve().parents[2] / "docs" / "hh-probe-plan.json"
+
+
+def _measured_slugs() -> tuple[tuple[str, ...], tuple[DirectoryRole, ...]]:
+    """The live slug list and role set, out of the committed measurement."""
+    payload = json.loads(MEASUREMENT.read_text(encoding="utf-8"))
+    slugs = tuple(payload["index"]["slugs"])
+    roles = tuple(
+        DirectoryRole(id=role["id"], name=role["name"]) for role in payload["plan"]["roles"]
+    )
+    return slugs, roles
+
+
+def test_the_ranking_puts_python_first_on_the_slugs_hh_really_publishes() -> None:
+    """The whole feature, against 10 435 real slugs rather than a dozen invented ones.
+
+    ``docs/hh-probe-plan.json`` is the measurement the catalogue path rests on,
+    and it is in the repository precisely so this can be asserted without a
+    network: every slug here is one hh published on 2026-09-08, including the
+    198 that role 96 matches and the JavaScript pages that took the top of the
+    list on the live run.
+    """
+    slugs, roles = _measured_slugs()
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(roles, FLAT_KEYWORDS, slugs, families=families, headline=HEADLINE)
+
+    # The four the crawl re-reads on every run. Nothing else in this file is
+    # worth as much as these four being right.
+    assert all("python" in slug for slug in picked[:4])
+    assert picked[0] == "python-backend-developer"
+
+
+def test_without_the_headline_the_same_real_list_leads_with_javascript() -> None:
+    """The live run of 2026-09-08, reproduced from the data it was measured on.
+
+    It opened JavaScript, Go, C, Linux and C# pages and no Python one. This is
+    that run, and it is here so that losing the headline weight fails a test
+    instead of quietly costing a week of the wrong corpus.
+    """
+    slugs, roles = _measured_slugs()
+    families = families_for(FLAT_KEYWORDS, load_families())
+
+    picked = slugs_for(roles, FLAT_KEYWORDS, slugs, families=families)
+
+    assert "python" not in picked[0]
+    assert not any("python" in slug for slug in picked[:5])

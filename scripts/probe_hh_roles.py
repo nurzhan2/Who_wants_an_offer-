@@ -74,6 +74,10 @@ def parse_args() -> argparse.Namespace:
         dest="keywords",
         help="a keyword the planner would send; repeatable, turns on the plan section",
     )
+    parser.add_argument(
+        "--headline",
+        help="the profile's headline, which outranks every keyword in the plan",
+    )
     parser.add_argument("--no-roles", action="store_true", help="skip api.hh.ru/professional_roles")
     parser.add_argument("--json", help="write the whole measurement here")
     return parser.parse_args()
@@ -181,8 +185,18 @@ def show_plan(plan: CrawlPlan | None) -> None:
     if plan is None:
         print("  не построен: нужны --keyword и прочитанный список слагов (см. ЗАМЕЧАНИЯ)")
         return
+    print(f"  порядок открытия (первые {MAX_LINES}):")
+    for position, slug in enumerate(plan.order[:MAX_LINES], 1):
+        print(f"    {position:>3} {slug}")
     print(f"  ключевые слова: {', '.join(plan.keywords)}")
+    print(f"  headline: {plan.headline or 'не задан (--headline)'}")
+    if plan.headline:
+        # The heaviest weight in the ranking, printed as the words it became:
+        # a headline whose words all fell out as rank words explains an order
+        # that otherwise looks broken.
+        print(f"  слова намерения: {', '.join(plan.intent) or 'ни одного'}")
     print(f"  семейства из hh_roles.yaml: {', '.join(plan.families) or 'ни одного'}")
+    print(f"  из них названы headline: {', '.join(plan.focus) or 'ни одного'}")
     print(f"  всего страниц каталога в плане: {plan.total}")
     if not plan.roles:
         print("  ролей не выбрано: слаги берутся только по ключевым словам профиля")
@@ -284,6 +298,7 @@ async def main() -> int:
             max_files=args.files,
             read_roles_directory=not args.no_roles,
             keywords=tuple(args.keywords or ()),
+            headline=args.headline,
         )
     finally:
         await close_client()

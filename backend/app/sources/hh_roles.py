@@ -135,14 +135,26 @@ FOLD: tuple[tuple[str, str], ...] = (
     ("x", "ks"),
 )
 
-#: One slug's place in the queue, lowest first: profile words carried (negated),
-#: words belonging to no vocabulary this profile has, whether hh's own directory
-#: named it, how many words it has, and the slug itself for a stable tie-break.
-type SlugRank = tuple[int, int, int, int, str]
+#: One slug's place in the queue, lowest first: the three weights of what the
+#: profile said (negated), then words belonging to no vocabulary it has, whether
+#: hh's own directory named it, how many words it has, and the slug itself for a
+#: stable tie-break.
+type SlugRank = tuple[int, int, int, int, int, int, str]
 
 #: Shortest word that may stand for a role on its own. Below it a token is a
 #: preposition or an abbreviation whose collisions cost more than it finds.
 MIN_ROLE_TOKEN = 5
+
+#: Characters two words must share from the front to count as the same word for
+#: the two intent weights. Russian inflects, and the headline and the slug rarely
+#: inflect the same way: «AI-интеграции» folds to ``integracii`` while the slug
+#: hh publishes is ``razrabotchik-integraciy``, and an exact match reads the
+#: profile's own subject as somebody else's technology. Six is long enough that
+#: ``backend`` and ``backup`` stay apart and short enough that every case of one
+#: Russian noun in two forms lands together. Only the intent weights use it;
+#: :func:`carries` and the known-word test stay exact, because a false match
+#: there costs a wrongly-ranked page rather than a wrongly-weighted profile.
+MIN_STEM = 6
 
 #: Below this a term is matched as a whole word rather than as a substring. Long
 #: enough to be distinctive is the rule; ``ml`` inside ``html`` is the reason.
@@ -407,6 +419,92 @@ def _alternatives(name: str) -> tuple[tuple[str, ...], ...]:
     return tuple(groups)
 
 
+class Vocabulary(BaseModel):
+    """What one profile said, in three weights, plus everything it recognises.
+
+    Three and not one, because a resume says three different kinds of thing and
+    a flat keyword list flattens them into one. Measured on the live run of
+    2026-09-08: a profile listing Python, Java, Go, JavaScript and C produced
+    sixteen equal keywords, and the crawl opened catalogue pages for Go, C,
+    JavaScript, Linux and C# — not one for Python — off a resume headed «Python
+    Developer — Backend / AI-интеграции». Nothing was wrong with the ranking; it
+    was ranking by the wrong thing, because knowing a language and wanting to be
+    hired for it had the same weight.
+
+    ``headline`` is what the candidate says they ARE. ``focus`` is the rest of
+    the vocabulary of the families their headline named — a backend profile's
+    ``django``, ``api``, ``rest``, and its ``golang`` too, because the brief asks
+    for backend in any language and a Go backend page is a better use of a
+    request than a Linux administration one. ``keywords`` is the flat skill list,
+    which is what they happen to know.
+
+    ``known`` is the union of all of it with hh's own role words and the words
+    for experience levels: a slug word in none of them belongs to a different
+    trade. See :func:`_rank`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    headline: frozenset[str] = frozenset()
+    focus: frozenset[str] = frozenset()
+    keywords: tuple[str, ...] = ()
+    known: frozenset[str] = frozenset()
+
+
+def intent_words(headline: str | None) -> frozenset[str]:
+    """The words of a headline that say what work it is.
+
+    Rank words are dropped — a headline reading «Ведущий инженер-программист»
+    means ``programmist``, and letting ``inzhener`` through would hand every
+    construction page on the site the profile's strongest weight.
+    """
+    if not headline:
+        return frozenset()
+    return frozenset(
+        word for word in tokens(headline) if len(word) > 1 and word not in GENERIC_ROLE_WORDS
+    )
+
+
+def vocabulary_for(
+    roles: Sequence[DirectoryRole],
+    keywords: Sequence[str],
+    families: Sequence[RoleFamily],
+    headline: str | None = None,
+) -> Vocabulary:
+    """Everything the ranking knows about one profile, in the weights it uses.
+
+    A family counts as named by the headline when the headline carries one of
+    its ``when`` terms — the same test that selected it in the first place — so a
+    profile headed «Python Developer» makes ``backend`` a focus family and leaves
+    ``qa``, which got in on ``pytest``, in the ordinary keyword weight where it
+    belongs.
+    """
+    headline_words = intent_words(headline)
+    focus: set[str] = set()
+    for family in families:
+        if headline and carries(headline, family.when):
+            for term in family.when:
+                focus.update(tokens(term))
+    return Vocabulary(
+        headline=headline_words,
+        focus=frozenset(focus) - headline_words,
+        keywords=tuple(keywords),
+        known=_known_words(roles, keywords, families) | headline_words | frozenset(focus),
+    )
+
+
+def _same_word(one: str, other: str) -> bool:
+    """Whether these two are the same word in different grammatical clothes."""
+    if one == other:
+        return True
+    return len(one) >= MIN_STEM and len(other) >= MIN_STEM and one[:MIN_STEM] == other[:MIN_STEM]
+
+
+def _weight(words: Iterable[str], vocabulary: frozenset[str]) -> int:
+    """How many of a slug's words this part of the profile said."""
+    return sum(1 for word in words if any(_same_word(word, said) for said in vocabulary))
+
+
 def _known_words(
     roles: Sequence[DirectoryRole], keywords: Sequence[str], families: Sequence[RoleFamily]
 ) -> frozenset[str]:
@@ -429,38 +527,58 @@ def _known_words(
     return frozenset(words)
 
 
-def _rank(slug: str, *, keywords: Sequence[str], known: frozenset[str], by_role: bool) -> SlugRank:
+def _rank(slug: str, *, vocabulary: Vocabulary, by_role: bool) -> SlugRank:
     """Where this slug goes in the queue. Lower sorts first.
 
-    Measured 2026-09-08, and this exists because of what the measurement showed:
-    role 96 «Программист, разработчик» matches over a hundred slugs on
-    ``almaty.hh.kz``, and dozens of them are ``programmist_1c``,
+    Measured 2026-09-08, twice, and each measurement added a key.
+
+    The first: role 96 «Программист, разработчик» matches over a hundred slugs
+    on ``almaty.hh.kz``, and dozens of them are ``programmist_1c``,
     ``programmist-1s-buhgalteriya``, ``programmist_1szup``, ``programmist-1c-82``
-    and their ABAP, Navision, Bitrix and CNC cousins. A run opens eight of them.
-    Alphabetically, all eight are 1C — and the crawl returns exactly the
-    irrelevant corpus it was rewritten to stop returning, by a different route.
+    and their ABAP, Navision, Bitrix and CNC cousins. A run opens eight.
+    Alphabetically, all eight are 1C.
 
-    The four keys, most significant first:
+    The second: ranked by the profile's keywords alone, a run opened Go, C,
+    JavaScript, Linux and C# and not one Python page — because the resume lists
+    those languages beside Python, and a flat keyword list has no way to say
+    which of them the candidate wants to be hired for. The headline says it, in
+    their own words, and now outranks everything.
 
-    1. **How many of the profile's own words the slug carries.** ``python`` in
-       ``python-razrabotchik`` is the strongest signal there is, and nothing
-       outranks it.
-    2. **How many of its words belong to no vocabulary this profile has.**
-       ``1c`` is not on a list of bad words anywhere — there is no such list,
-       and any list would be endless and out of date. It is simply a word the
-       profile never said, and ``junior`` is one it did not say either but which
+    The keys, most significant first:
+
+    1. **Words from the headline.** What the candidate says they are. A slug
+       carrying ``python`` or ``backend`` beats one carrying ``linux`` or
+       ``c-sharp`` even though the profile claims all four.
+    2. **Words from the families the headline named, counted in the direction
+       the first key leaves them.** On a page that already names what the
+       candidate asked for, another technology is a distraction:
+       ``python-developer`` is a better request than ``java-backend-developer``,
+       and both carry exactly one headline word. On a page that names none of
+       it, the same words are the best thing left: ``go-razrabotchik`` is a
+       better request than ``linux-administrator``, because backend in any
+       language is in scope and administration is not what this resume is for.
+       So the weight is a bonus when the headline found nothing and a demerit
+       when it found something — measured against the live slug list, where
+       without it half the four pages a run re-reads every time were Java.
+    3. **Words from the flat skill list.** What they happen to know.
+    4. **Words belonging to no vocabulary this profile has.** ``1c`` is not on a
+       list of bad words anywhere — there is no such list, it would be endless
+       and out of date the week it was written. It is simply a word the profile
+       never said, and ``junior`` is one it did not say either but which
        :data:`EXPERIENCE_WORDS` recognises as a level rather than another trade.
-       That is what puts ``mladshij-programmist`` above ``programmist_1c``.
-    3. **Named by hh's directory before named by the candidate's words.** The
-       site's own vocabulary is the better guess about the site.
-    4. **Shorter, then alphabetical.** A slug with fewer words is the more
-       general page and holds the larger pool; alphabetical last, so the order
-       is stable across runs and a stored plan means the same thing tomorrow.
+    5. **Named by hh's directory before named by the candidate's words.**
+    6. **Shorter, then alphabetical.** Fewer words is the more general page and
+       the larger pool; alphabetical last, so a stored plan means the same thing
+       tomorrow.
     """
-    words = tokens(slug)
+    words = set(tokens(slug))
+    headline = _weight(words, vocabulary.headline)
+    focus = _weight(words, vocabulary.focus)
     return (
-        -len(carries(slug, keywords)),
-        sum(1 for word in words if word not in known),
+        -headline,
+        focus if headline else -focus,
+        -len(carries(slug, vocabulary.keywords)),
+        sum(1 for word in words if word not in vocabulary.known),
         0 if by_role else 1,
         len(words),
         slug,
@@ -473,21 +591,22 @@ def slugs_for(
     slugs: Iterable[str],
     *,
     families: Sequence[RoleFamily] = (),
+    headline: str | None = None,
 ) -> tuple[str, ...]:
     """The catalogue pages worth opening, nearest to the profile first.
 
     Ranked rather than merely collected, because the crawl opens a bounded
     number of them per run: which eight of a hundred it takes decides what the
-    whole run collects. See :func:`_rank` for the order and for the measurement
-    that made it necessary.
+    whole run collects. See :func:`_rank` for the order and for the two
+    measurements that made it necessary.
     """
     groups = tuple(group for role in roles for group in _alternatives(role.name))
-    known = _known_words(roles, keywords, families)
+    vocabulary = vocabulary_for(roles, keywords, families, headline)
     ranked: list[tuple[SlugRank, str]] = []
     for slug in slugs:
         folded = fold(slug)
         by_role = any(all(word in folded for word in group) for group in groups)
         if not by_role and not (keywords and carries(slug, keywords)):
             continue
-        ranked.append((_rank(slug, keywords=keywords, known=known, by_role=by_role), slug))
+        ranked.append((_rank(slug, vocabulary=vocabulary, by_role=by_role), slug))
     return tuple(slug for _, slug in sorted(ranked))

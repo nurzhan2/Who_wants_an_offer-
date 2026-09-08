@@ -234,19 +234,28 @@ def test_the_plan_section_renders_and_names_a_role_that_found_nothing(
     hh_roles.show_plan(
         CrawlPlan(
             keywords=("python", "docker"),
-            families=("backend", "devops"),
+            headline="Python Developer — Backend / AI-интеграции",
+            intent=("ai", "backend", "developer", "integracii", "python"),
+            families=("backend", "devops", "qa"),
+            focus=("backend",),
             roles=(
                 PlannedRole(id=96, name="Программист, разработчик", slugs=("programmist",)),
                 PlannedRole(id=165, name="Дата-сайентист", slugs=()),
             ),
             by_keyword=("junior-python-developer",),
-            total=2,
+            order=("python-razrabotchik", "programmist", "junior-python-developer"),
+            total=3,
         )
     )
 
     printed = capsys.readouterr().out
     assert "НИ ОДНОГО" in printed
     assert "hh_roles.yaml" in printed
+    # The order the run would open them in, which is the check the whole
+    # section is for, and the two weights that produced it.
+    assert "python-razrabotchik" in printed
+    assert "слова намерения" in printed
+    assert "из них названы headline" in printed
     printed.encode("cp1251")
 
 

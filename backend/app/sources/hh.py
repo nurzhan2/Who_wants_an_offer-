@@ -197,6 +197,7 @@ from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, Sear
 from app.sources.hh_roles import (
     DirectoryRole,
     RoleFamily,
+    carries,
     families_for,
     load_families,
     read_directory,
@@ -908,6 +909,10 @@ class CatalogPlan(BaseModel):
 
     resolved_at: AwareDatetime
     families: tuple[str, ...] = ()
+    #: The headline this plan was ranked under. Stored for the same reason the
+    #: families are: it decides the order, so a change to it invalidates the plan
+    #: even when the families it selected are identical.
+    headline: str | None = None
     #: What the profile asked for, as hh's directory numbers it. Not used to
     #: choose pages — the slugs are — but to count how many of the postings a run
     #: bought were actually in those roles, which is the number that says whether
@@ -1266,6 +1271,10 @@ class HHSource(BaseSource):
         working exactly as written and collecting the wrong corpus.
         """
         keywords = tuple(sorted({word for query in queries for word in query.keywords}))
+        # One headline per plan — it is the profile's, not the query's — so the
+        # first one any query carries is the one. Queries built by hand carry
+        # none, and the ranking then falls back to the keywords alone.
+        headline = next((query.headline for query in queries if query.headline), None)
         sites = self.sites_for(queries)
         if not sites:
             logger.warning("sources.hh.no_sites_configured", queries=len(queries))
@@ -1285,6 +1294,16 @@ class HHSource(BaseSource):
             logger.info(
                 "sources.hh.role_families",
                 families=[family.key for family in families],
+                # Which of them the headline named, as opposed to which got in
+                # on a skill the candidate happens to list. Both are crawled —
+                # the brief asks for breadth — but only the first kind outranks
+                # the other in ``hh_roles._rank``, and a run that opened nothing
+                # but Go and C# pages is what happens when nobody can see the
+                # difference from the outside.
+                focus=[
+                    family.key for family in families if headline and carries(headline, family.when)
+                ],
+                headline=headline,
                 keywords=len(keywords),
             )
 
@@ -1302,7 +1321,12 @@ class HHSource(BaseSource):
         share = max(1, MAX_PAGES_PER_RUN // len(sites))
         for site in sites:
             async for posting in self._crawl_site(
-                site, budget, allowance=share, keywords=keywords, families=families
+                site,
+                budget,
+                allowance=share,
+                keywords=keywords,
+                families=families,
+                headline=headline,
             ):
                 yield posting
         # No tail flush any more. The walk records nothing on its own: every
@@ -1329,6 +1353,7 @@ class HHSource(BaseSource):
         allowance: int,
         keywords: Sequence[str] = (),
         families: Sequence[RoleFamily] = (),
+        headline: str | None = None,
     ) -> AsyncIterator[RawPosting]:
         """Walk one host: the index, the catalogue, then the outstanding entries.
 
@@ -1373,7 +1398,12 @@ class HHSource(BaseSource):
         files = await self._vacancy_sitemaps(site)
         spend()
         catalog = await self._catalog_ids(
-            site, keywords=keywords, families=families, spend=spend, stop=stop
+            site,
+            keywords=keywords,
+            families=families,
+            headline=headline,
+            spend=spend,
+            stop=stop,
         )
 
         due: dict[str, list[SitemapEntry]] = {}
@@ -1890,6 +1920,7 @@ class HHSource(BaseSource):
         *,
         keywords: Sequence[str],
         families: Sequence[RoleFamily],
+        headline: str | None,
         spend: "Callable[[], None]",
         stop: "Callable[[], bool]",
     ) -> "_CatalogPass":
@@ -1907,7 +1938,12 @@ class HHSource(BaseSource):
             logger.debug("sources.hh.catalog_skipped", host=site.host, reason="no keywords")
             return _CatalogPass()
         plan = await self._catalog_plan(
-            site, keywords=keywords, families=families, spend=spend, stop=stop
+            site,
+            keywords=keywords,
+            families=families,
+            headline=headline,
+            spend=spend,
+            stop=stop,
         )
         if plan is None or not plan.slugs:
             return _CatalogPass()
@@ -1973,6 +2009,7 @@ class HHSource(BaseSource):
         *,
         keywords: Sequence[str],
         families: Sequence[RoleFamily],
+        headline: str | None,
         spend: "Callable[[], None]",
         stop: "Callable[[], bool]",
     ) -> CatalogPlan | None:
@@ -1995,7 +2032,11 @@ class HHSource(BaseSource):
                 )
         wanted = tuple(family.key for family in families)
         fresh = plan is not None and datetime.now(UTC) - plan.resolved_at < CATALOG_TTL
-        if fresh and plan is not None and plan.families == wanted:
+        # The headline is compared as well as the families, and it has to be: it
+        # is the strongest weight in the ranking, so a resume retitled from
+        # "Python Developer" to "Data Engineer" reorders the whole plan while
+        # leaving the set of families it matched untouched.
+        if fresh and plan is not None and plan.families == wanted and plan.headline == headline:
             return plan
         if stop():
             return plan
@@ -2010,7 +2051,7 @@ class HHSource(BaseSource):
                 detail="no catalogue slugs read; keeping whatever plan was stored",
             )
             return plan
-        chosen = slugs_for(roles, keywords, slugs, families=families)
+        chosen = slugs_for(roles, keywords, slugs, families=families, headline=headline)
         if len(chosen) > MAX_CATALOG_SLUGS:
             logger.warning(
                 "sources.hh.catalog_slugs_capped",
@@ -2022,6 +2063,7 @@ class HHSource(BaseSource):
         refreshed = CatalogPlan(
             resolved_at=datetime.now(UTC),
             families=wanted,
+            headline=headline,
             role_ids=tuple(role.id for role in roles),
             slugs=chosen,
             offset=0,
@@ -2031,6 +2073,8 @@ class HHSource(BaseSource):
             "sources.hh.catalog_resolved",
             host=site.host,
             families=list(wanted),
+            # The head of the ranked list, which is what the next run opens.
+            head=list(chosen[:CATALOG_HEAD_PAGES]),
             roles=len(roles),
             catalog_slugs=len(slugs),
             chosen=len(chosen),
