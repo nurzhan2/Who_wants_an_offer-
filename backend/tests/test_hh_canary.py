@@ -33,7 +33,13 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.core.exceptions import SourceError
-from app.sources.hh import HHSite, HHSource
+from app.sources.hh import (
+    SITEMAP_CACHE_TTL,
+    VACANCY_ID_ON_PAGE,
+    HHSite,
+    HHSource,
+    catalog_entries,
+)
 from app.sources.http import SourceClient
 
 #: Network, and slow: three polite requests at the connector's own rate.
@@ -43,6 +49,16 @@ pytestmark = [pytest.mark.network, pytest.mark.slow]
 #: entries in it include postings already taken down; one 404 is normal and
 #: three in a row is not.
 ATTEMPTS = 3
+
+#: The profession the catalogue is asked about. A common one on purpose: the
+#: first measurement of the catalogue used a rare one and concluded from an
+#: almost-empty page that catalogue pages do not list vacancies at all.
+CANARY_SLUG = "programmist"
+
+#: Vacancy ids that page must still name. It carried 50 on 2026-09-08; the
+#: threshold is a third of that, low enough not to cry wolf on a quiet market
+#: and high enough that "the page stopped listing vacancies" fails here.
+CANARY_IDS = 15
 
 
 @pytest.fixture
@@ -163,3 +179,40 @@ async def test_a_whole_posting_still_comes_out_of_a_live_page(
     assert first.url.startswith(f"https://{site.host}/vacancy/")
     assert "?" not in first.url
     assert first.title.strip()
+
+
+async def test_the_catalogue_still_lists_vacancies_by_profession(
+    hh: HHSource, site: HHSite
+) -> None:
+    """The other half of the crawl, and the half that fails silently.
+
+    A run reads catalogue pages to decide which postings to fetch first. If hh
+    stops publishing them, or stops putting vacancy ids on them, nothing raises:
+    the id set comes back empty, the walk falls back to the date order it had
+    before, and the corpus goes back to being sales managers — which took a
+    scoring pass over 643 vacancies to notice the first time.
+
+    Asked of ``programmist`` deliberately. The first measurement of the catalogue
+    opened a rare profession, found almost nothing on it, and concluded the
+    catalogue was a dead end; one page of a profession nobody hires for is not a
+    measurement of the catalogue.
+    """
+    files = await hh._catalog_sitemaps(site, lambda: None)
+    assert files, "the sitemap index no longer lists vacancies*.xml"
+
+    slugs, locs, lastmods = catalog_entries(
+        await hh.http.get_text(files[0][1], cache_ttl=SITEMAP_CACHE_TTL), site.host
+    )
+    assert len(slugs) > 100, "a catalogue file held 5716 slugs when this was written"
+    assert lastmods == 0, "the catalogue has grown dates — it could be walked by freshness now"
+    assert locs
+
+    body = await hh.http.get_text(
+        f"https://{site.host}/vacancies/{CANARY_SLUG}", cache_ttl=SITEMAP_CACHE_TTL
+    )
+    ids = set(VACANCY_ID_ON_PAGE.findall(body))
+
+    assert len(ids) >= CANARY_IDS, (
+        f"/vacancies/{CANARY_SLUG} named {len(ids)} vacancies; it carried 50 when this was "
+        "written, and below this the crawl by profession has quietly stopped working"
+    )

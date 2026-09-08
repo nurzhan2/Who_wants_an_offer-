@@ -56,6 +56,18 @@ stopped inside a hundred pages. The whole corpus is not the goal; some 13 557
 postings for one city, most long filled. Older entries are what the remaining
 budget reaches.
 
+**And within that, the professions the profile asked for come first** — the
+change of the evening of 2026-09-08, and the one that decided whether this
+source is worth its rate limit at all. Date order is honest and blind: a walk of
+Almaty returned 294 postings, none of them in a development role, and scoring
+them put zero in "apply". hh publishes a page per profession under
+``/vacancies/{slug}`` — 50 vacancy ids on ``/vacancies/programmist``, measured —
+and the ids those pages name are walked before the ids they do not. Nothing is
+dropped for not being named; the second half of the walk is the corpus in the
+order it always had. See ``_crawl_site`` for why the ids are intersected with the
+sitemap rather than fetched directly, and ``hh_roles.py`` for how a resume
+becomes a list of professions without this repository holding a list of them.
+
 Only that redirect is recognised, and the gap is written down rather than
 papered over: a challenge delivered as a status code — a 403 whose body holds
 the captcha — has never been served to this repository, and a marker guessed
@@ -84,11 +96,21 @@ a time, slowly.
 **The shape of a run.** ``main.xml`` lists the per-file sitemaps; the
 ``vacancy{N}.xml`` ones carry a ``<loc>`` and a ``<lastmod>`` per vacancy and
 nothing else — measured at 1387 entries in one file, about fourteen thousand for
-a city. There is no title in the sitemap, so keywords cannot be pushed upstream
-and cannot be judged before the page is fetched: this source walks a corpus
-instead of running a search, which is why it overrides ``search_batch``, keeps
-its own page budget, and remembers per sitemap file how far it got. A first
-crawl takes several runs. Each of them logs what it did not reach.
+a city. There is no title in the sitemap and no search to run — the one hh has
+is behind a query string its robots.txt forbids — so this source walks a corpus,
+which is why it overrides ``search_batch``, keeps its own page budget, and
+remembers per sitemap file how far it got. A first crawl takes several runs. Each
+of them logs what it did not reach.
+
+The ``vacancies{N}.xml`` files in the same index are the other half of the run:
+15 of them for Almaty holding 10 435 catalogue slugs, no ``lastmod`` on any
+entry, and a page per slug listing the postings in that profession. A run reads
+``CATALOG_PAGES_PER_RUN`` of those pages, rotating through the slug list across
+runs, and the plan behind that rotation lives in ``source_state`` beside the
+crawl position. Paging inside a catalogue page exists only as ``?page=0..3`` and
+is therefore closed to us, so depth comes from the breadth of the slug list; the
+overlap that produces costs nothing, because the same posting reached through two
+professions is one row after the fingerprint.
 
 **A vacancy page is a JSON document wearing HTML.** The state the frontend boots
 from sits in ``<template style="display:none" id="HH-Lux-InitialState">`` as
@@ -149,7 +171,8 @@ for a posting with no salary — the check has to be for the key.
 import html as html_lib
 import json
 import re
-from collections.abc import AsyncIterator, Iterable, Sequence
+from bisect import bisect_left, bisect_right
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -171,6 +194,16 @@ from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.db.enums import RemoteType, SalaryPeriod
 from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
+from app.sources.hh_roles import (
+    DirectoryRole,
+    RoleFamily,
+    carries,
+    families_for,
+    load_families,
+    read_directory,
+    roles_for,
+    slugs_for,
+)
 from app.sources.http import HHChallengedError
 from app.sources.registry import register_source
 
@@ -190,10 +223,14 @@ SITES_FILE = Path(__file__).with_name("hh_sites.yaml")
 SITEMAP_INDEX_PATH = "/sitemap/main.xml"
 
 #: Sitemaps of individual vacancy pages, which is all we read. ``vacancies{N}``
-#: (SEO landing pages by profession, 5716 entries with no lastmod) is a
-#: different file and deliberately not used yet; ``employers`` is companies; and
-#: ``resumes{N}`` is living people's resumes, which is why the selection here is
-#: an allow-list matched on the whole name rather than a substring test.
+#: (landing pages by profession, 5716 entries with no lastmod) is a different
+#: file and still not used: whether it is a way into the corpus by profession —
+#: which is what this walk's blindness to the profession costs us, see
+#: docs/SOURCES.md § «Обход по профессиям» — turns on a measurement nobody has
+#: taken, and ``hh_probe.py`` is the instrument for taking it. ``employers`` is
+#: companies; and ``resumes{N}`` is living people's resumes, which is why the
+#: selection here is an allow-list matched on the whole name rather than a
+#: substring test.
 VACANCY_SITEMAP = re.compile(r"/sitemap/(vacancy\d+)\.xml$")
 
 #: The frontend's boot state, escaped inside a hidden template element.
@@ -211,6 +248,28 @@ SITEMAP_ENTRY = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 VACANCY_PATH = re.compile(r"^/vacancy/(\d+)$")
+
+#: The other family in the same index, and the way in by profession. Measured
+#: 2026-09-08: 15 files for Almaty holding 10 435 slugs, no ``lastmod`` on any
+#: entry, and ``/vacancies/programmist`` carrying 50 vacancy ids. Matched on the
+#: whole file name for the reason ``VACANCY_SITEMAP`` is: four letters separate
+#: it from the vacancy files and three from nothing at all.
+CATALOG_SITEMAP = re.compile(r"/sitemap/(vacancies\d+)\.xml$")
+
+#: A catalogue URL as the sitemap writes it: ``/vacancies/{slug}``, no query
+#: string, no date. Anything deeper is a page of one and is not fetched — see
+#: ``_catalog_ids`` for why paging is closed to us.
+CATALOG_PATH = re.compile(r"^/vacancies/([^/]+)/?$")
+
+#: A vacancy id anywhere in a catalogue page — in an ``href`` or inside the
+#: escaped JSON of the boot state. hh's own URL shape rather than a key name of
+#: theirs we would have to guess at and re-guess when they rename it.
+VACANCY_ID_ON_PAGE = re.compile(r"/vacancy/(\d+)")
+
+#: hh's public dictionary of professional roles: 194 of them on 2026-09-08, and
+#: one of the endpoints that stayed open when the jobseeker half of that host
+#: closed. What the profile is matched against; see ``hh_roles.py``.
+ROLES_URL = "https://api.hh.ru/professional_roles"
 
 #: Block-level tags become a newline when the description is flattened for the
 #: embedding; everything else becomes a space. Without the distinction a list of
@@ -246,6 +305,50 @@ MAX_MARKUP_FAILURES = 3
 #: runs. What a run could not reach is logged, never silently dropped.
 MAX_PAGES_PER_RUN = 1200
 
+#: Catalogue pages one run opens per site, before it starts on vacancies.
+#:
+#: Small, and the arithmetic is the argument. One page named 50 vacancy ids when
+#: it was measured, so eight of them name about four hundred — and a run has
+#: never fetched anywhere near that many postings: hh answered one live crawl
+#: with a check for robots at the 172nd request and another at the 50th. The
+#: binding constraint is the vacancy budget, never the supply of ids, so every
+#: catalogue page beyond what fills that budget is a posting not fetched. At the
+#: worst rate observed, eight leaves forty-two postings; twenty would leave
+#: thirty for no gain at all.
+#:
+#: The list is walked in a rotation across runs (``CatalogPlan.offset``), so a
+#: 630-slug set is swept over some eighty runs — about ten days at the pipeline's
+#: three-hour cadence — and every run names postings the last one did not. A
+#: catalogue page is heavy, 1.49 MB measured, and only the ids are read out of
+#: it; that is bandwidth rather than requests, and requests are what hh counts.
+CATALOG_PAGES_PER_RUN = 8
+
+#: How many of a run's catalogue pages come from the top of the ranked list
+#: rather than from the rotation.
+#:
+#: Half, and the split is the answer to a real failure rather than a taste. The
+#: list is ranked by nearness to the profile (``hh_roles._rank``), and a pure
+#: rotation over it spends run 10 on the tail — measured on the live plan, role
+#: 96 alone matches over a hundred slugs and dozens of them are 1C, ABAP,
+#: Navision and CNC pages that have nothing to do with this profile. Re-reading
+#: the top pages every run is also how a NEW python posting is found within
+#: hours instead of within the eighty runs a full sweep takes; the rotation is
+#: what eventually covers the rest.
+CATALOG_HEAD_PAGES = 4
+
+#: Catalogue slugs one plan may hold. 630 of 10 435 slugs were development on
+#: 2026-09-08, so this is headroom for a wider profile rather than a limit that
+#: bites today; what it stops is a keyword like "sql" quietly selecting half
+#: the site and pushing the roles hh itself named to the back of the rotation.
+MAX_CATALOG_SLUGS = 1000
+
+#: How long a resolved plan is reused before the slug list is read again. The
+#: catalogue costs 15 requests to re-read and its slugs are professions, which
+#: do not turn over weekly; the postings behind them are re-read every run.
+#: A profile change re-resolves immediately whatever this says, because the
+#: stored plan records which families asked for it.
+CATALOG_TTL = timedelta(days=7)
+
 #: How many walked entries may wait for the pipeline's confirmation before the
 #: walk stops adding to the list. Not a correctness bound — the pipeline
 #: confirms every ``UPSERT_BATCH`` postings and the list drains each time — but
@@ -262,12 +365,25 @@ MAX_PAGES_PER_RUN = 1200
 #: saying what it has actually written.
 MAX_HELD = 5_000
 
-#: Finished stretches kept per sitemap file. One run adds at most one stretch —
-#: the walk is contiguous within a run — so this is a bound on interruptions, not
-#: on entries. On overflow the oldest is dropped, which makes those entries due
-#: again; the alternative, merging two stretches that are not neighbours, would
-#: claim entries nobody fetched.
-MAX_SPANS = 64
+#: Finished stretches kept per sitemap file. On overflow the oldest is dropped,
+#: which makes those entries due again; the alternative, merging two stretches
+#: that are not neighbours, would claim entries nobody fetched. Repeating costs
+#: requests, losing costs data.
+#:
+#: Raised from 64 on 2026-09-08, and the reason is the whole point of that day's
+#: work. This used to say "one run adds at most one stretch — the walk is
+#: contiguous within a run", which was true of a walk ordered only by date. The
+#: walk now takes the postings of the profile's own professions first, and those
+#: sit scattered through a file ordered by date, so one run leaves dozens of
+#: stretches in a file rather than one. At 64 the cap was reached inside a single
+#: run and the oldest coverage was dropped every time — the crawl would have paid
+#: for the same pages again and again while never finishing a file.
+#:
+#: The fragmentation is temporary in the direction that matters: two stretches
+#: merge as soon as nothing lies between them, so a file being worked over
+#: collapses back towards one. 512 is room for several runs of it, about 75 kB of
+#: JSON per file at the observed span size.
+MAX_SPANS = 512
 
 #: The sitemaps are never cached. ``cache_ttl`` is thirty days because a
 #: vacancy page carries its own ``lastmod`` as a cache salt, so an edited
@@ -693,6 +809,29 @@ class FileWatermark(BaseModel):
         key = _key(entry)
         return any(span.holds(key) for span in self.covered)
 
+    def outstanding(self, entries: Sequence[SitemapEntry]) -> list[SitemapEntry]:
+        """Those entries no previous run covered, newest first.
+
+        The same answer :meth:`is_done` gives one entry at a time, computed once
+        for the file. Asking per entry is a stretch-count multiplied by an
+        entry-count — 1387 entries against the stretches a role-first walk leaves
+        behind — and it runs on every file at the start of every run. The
+        stretches are disjoint (:func:`_collapse` guarantees it), so the one that
+        could hold a key is the last one starting at or below it.
+        """
+        if not self.covered:
+            return sorted(entries, key=_key, reverse=True)
+        spans = sorted(self.covered, key=lambda span: span.low)
+        lows = [span.low for span in spans]
+        due: list[SitemapEntry] = []
+        for entry in entries:
+            key = _key(entry)
+            index = bisect_right(lows, key) - 1
+            if index >= 0 and spans[index].high >= key:
+                continue
+            due.append(entry)
+        return sorted(due, key=_key, reverse=True)
+
     def covering(self, order: Sequence[EntryKey], done: Iterable[EntryKey]) -> "FileWatermark":
         """This mark, extended to cover ``done``.
 
@@ -709,7 +848,24 @@ class FileWatermark(BaseModel):
         data.
         """
         rank = {key: index for index, key in enumerate(order)}
-        marked = {index for index, key in enumerate(order) if self.is_covered(key)}
+        ascending = sorted(rank)
+
+        # Which entries of this file are already covered, found by bisecting the
+        # file's own keys once per stretch rather than by asking every stretch
+        # about every entry. That was quadratic and invisible while a file held
+        # at most a handful of stretches; the walk now leaves dozens per run, and
+        # this method runs after every confirmed batch.
+        marked: set[int] = set()
+        unseen: list[Span] = []
+        for span in self.covered:
+            low = bisect_left(ascending, span.low)
+            high = bisect_right(ascending, span.high)
+            if low >= high:
+                # A stretch this run saw no entry of. Kept untouched: a file that
+                # shrank must not silently uncover what an earlier run paid for.
+                unseen.append(span)
+                continue
+            marked.update(rank[key] for key in ascending[low:high])
         marked.update(rank[key] for key in done if key in rank)
 
         spans: list[Span] = []
@@ -721,13 +877,140 @@ class FileWatermark(BaseModel):
                 spans.append(Span.between(order[index], order[index]))
             previous = index
 
-        unseen = [span for span in self.covered if not any(span.holds(key) for key in order)]
-        merged = sorted((*unseen, *spans), key=lambda span: span.high, reverse=True)
-        return FileWatermark(covered=tuple(merged[:MAX_SPANS]))
+        return FileWatermark(covered=_collapse((*unseen, *spans)))
 
     def is_covered(self, key: EntryKey) -> bool:
         """Whether that key falls inside any finished stretch."""
         return any(span.holds(key) for span in self.covered)
+
+
+class CatalogPlan(BaseModel):
+    """Which catalogue pages this deployment opens on one host, and where it got to.
+
+    Stored in ``source_state`` rather than recomputed each run, because
+    recomputing it costs 16 requests — hh's role directory plus 15 catalogue
+    sitemaps — to answer a question whose answer is a list of professions. The
+    postings behind those professions are re-read every run; the professions
+    themselves are not.
+
+    ``families`` is what makes a stale plan visible. It records which families of
+    ``hh_roles.yaml`` asked for this list, so a new resume with a different stack
+    re-resolves on the next run instead of crawling the previous candidate's
+    professions until :data:`CATALOG_TTL` runs out.
+
+    ``offset`` is the rotation: a run reads :data:`CATALOG_PAGES_PER_RUN` slugs
+    starting there and leaves it past them, so consecutive runs name different
+    postings. It is saved once, after the pass — a run stopped by a check for
+    robots re-reads the same slugs next time, which costs a few requests and
+    keeps this out of the hot path.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    resolved_at: AwareDatetime
+    families: tuple[str, ...] = ()
+    #: The headline this plan was ranked under. Stored for the same reason the
+    #: families are: it decides the order, so a change to it invalidates the plan
+    #: even when the families it selected are identical.
+    headline: str | None = None
+    #: What the profile asked for, as hh's directory numbers it. Not used to
+    #: choose pages — the slugs are — but to count how many of the postings a run
+    #: bought were actually in those roles, which is the number that says whether
+    #: any of this worked.
+    role_ids: tuple[int, ...] = ()
+    slugs: tuple[str, ...] = ()
+    offset: int = Field(default=0, ge=0)
+
+
+def catalog_sitemaps(body: str, host: str) -> list[tuple[str, str]]:
+    """The ``vacancies{N}.xml`` files an index lists, on this host only.
+
+    Host-checked for the reason ``_entry`` checks it: a sitemap is somebody
+    else's document and every URL in it is input.
+    """
+    found = {
+        (match.group(1), url)
+        for url in SITEMAP_LOC.findall(body)
+        if (match := CATALOG_SITEMAP.search(url)) and urlsplit(url).hostname == host
+    }
+    return sorted(found)
+
+
+def catalog_entries(body: str, host: str) -> tuple[tuple[str, ...], int, int]:
+    """Slugs, the total ``<loc>`` count, and how many entries carry a ``lastmod``.
+
+    Three numbers rather than one because the second and third are what make the
+    first trustworthy: recognising 3 of 5 URLs is a different measurement from
+    recognising 5 of 5, and the crawl needs to know that the catalogue carries no
+    dates at all — that is why it cannot be walked by freshness the way the
+    vacancy sitemaps are.
+    """
+    locs = SITEMAP_LOC.findall(body)
+    slugs: list[str] = []
+    for url in locs:
+        parts = urlsplit(url)
+        if parts.hostname != host or parts.query:
+            continue
+        match = CATALOG_PATH.match(parts.path)
+        if match is not None:
+            slugs.append(match.group(1))
+    return tuple(dict.fromkeys(slugs)), len(locs), body.count("<lastmod>")
+
+
+def pages_this_run(plan: "CatalogPlan") -> tuple[tuple[str, ...], int]:
+    """Which catalogue pages to open now, and where the rotation continues.
+
+    Half from the head of the ranked list and half from a window that moves
+    across the tail; see :data:`CATALOG_HEAD_PAGES` for why it is not simply a
+    rotation over the whole list. A plan short enough to read in one run is read
+    in one run, and the cursor stays where it is.
+
+    Pure and separate from the fetching because it is the decision worth
+    testing: everything else in the pass is a request and a regex.
+    """
+    slugs = plan.slugs
+    if not slugs:
+        return (), 0
+    if len(slugs) <= CATALOG_PAGES_PER_RUN:
+        return slugs, plan.offset
+    head = slugs[:CATALOG_HEAD_PAGES]
+    tail = slugs[len(head) :]
+    take = CATALOG_PAGES_PER_RUN - len(head)
+    start = plan.offset % len(tail)
+    rotating = [tail[(start + step) % len(tail)] for step in range(min(take, len(tail)))]
+    return (*head, *rotating), (start + len(rotating)) % len(tail)
+
+
+def _collapse(spans: Iterable[Span]) -> tuple[Span, ...]:
+    """Overlapping stretches merged into one, newest first, capped.
+
+    Two stretches can overlap without being neighbours in the file's order: a
+    stretch kept from an earlier run may sit entirely inside a range this run
+    walked in one go, which is what happens the first time the walk crosses a gap
+    it left behind. Their union is exactly as true as either of them, and leaving
+    them overlapping would break the one assumption
+    :meth:`FileWatermark.outstanding` makes to stay linear.
+
+    Truncation drops the OLDEST, and says so out loud: those entries are due
+    again, which costs requests and never data, but a crawl that silently
+    re-bought the same pages every run is what the old cap did.
+    """
+    collapsed: list[Span] = []
+    for span in sorted(spans, key=lambda item: item.low):
+        if collapsed and span.low <= collapsed[-1].high:
+            if span.high > collapsed[-1].high:
+                collapsed[-1] = Span.between(collapsed[-1].low, span.high)
+            continue
+        collapsed.append(span)
+    collapsed.sort(key=lambda item: item.high, reverse=True)
+    if len(collapsed) > MAX_SPANS:
+        logger.warning(
+            "sources.hh.spans_dropped",
+            dropped=len(collapsed) - MAX_SPANS,
+            kept=MAX_SPANS,
+            detail="oldest covered stretches dropped; those entries are due again",
+        )
+    return tuple(collapsed[:MAX_SPANS])
 
 
 def load_sites(path: Path | None = None) -> tuple[HHSite, ...]:
@@ -801,6 +1084,32 @@ class _SiteRun:
     #: in the debug lines beside it.
     not_stored: int = 0
     unreadable: int = 0
+    #: Pages fetched because the catalogue named them, i.e. in the role pass
+    #: rather than in the general walk behind it.
+    role_pass: int = 0
+    #: Postings that turned out to carry one of the professional roles the
+    #: profile asked for. Together with ``fetched`` this is the number the whole
+    #: catalogue path exists to move: relevant postings per request spent.
+    role_hits: int = 0
+
+
+@dataclass(slots=True)
+class _CatalogPass:
+    """What one run's reading of the catalogue produced.
+
+    ``ids`` is the whole of the effect on the walk: an entry whose id is in it
+    is fetched before the entries that are not, and nothing else changes. The
+    counters beside it are for the log line, which is where a person finds out
+    whether the catalogue is earning its twenty requests.
+    """
+
+    ids: frozenset[str] = frozenset()
+    role_ids: frozenset[int] = frozenset()
+    #: The catalogue pages this run actually opened, in the order it opened
+    #: them. Carried rather than counted because it is what the run report has
+    #: to show: which eight of a hundred pages were bought.
+    opened: tuple[str, ...] = ()
+    slugs: int = 0
 
 
 @dataclass(slots=True)
@@ -892,6 +1201,14 @@ class HHSource(BaseSource):
         #: what tells two finished stretches they are neighbours; see
         #: ``FileWatermark.covering``.
         self._order: dict[tuple[str, str], list[EntryKey]] = {}
+        #: ``hh_roles.yaml``, read once per instance like the site list.
+        self._families: tuple[RoleFamily, ...] | None = None
+        #: hh's role directory, fetched at most once per run: it is one document
+        #: for every host, and a second city must not pay for it again.
+        self._directory: tuple[DirectoryRole, ...] | None = None
+        #: Each host's sitemap index, kept for the run so that the vacancy files
+        #: and the catalogue files are read out of one request rather than two.
+        self._index: dict[str, str] = {}
 
     @property
     def sites(self) -> tuple[HHSite, ...]:
@@ -899,6 +1216,13 @@ class HHSource(BaseSource):
         if self._sites is None:
             self._sites = load_sites()
         return self._sites
+
+    @property
+    def families(self) -> tuple[RoleFamily, ...]:
+        """The configured profile-to-roles families, read once per instance."""
+        if self._families is None:
+            self._families = load_families()
+        return self._families
 
     def sites_for(self, queries: Sequence[SearchQuery]) -> tuple[HHSite, ...]:
         """Which hosts this plan asks for.
@@ -922,25 +1246,66 @@ class HHSource(BaseSource):
         for a source you can ask a question. hh cannot be asked one: its sitemap
         holds a URL and a date, so every query would re-walk the same pages.
 
-        **The plan's keywords are not applied, and that is deliberate.** They
-        cannot be applied before a page is fetched, because the sitemap carries
-        no title — so a filter here saves no request at all, it only decides
-        what to throw away after paying for it. And throwing it away is not
-        free: the walk records how far it got, so a posting dropped for today's
-        keywords is marked as dealt with and is never fetched again by any
-        future run. Upload a new CV with new skills and every posting the old
-        keyword set rejected stays invisible forever. Relevance belongs to
-        ``matching/``, which scores what is stored; this connector's job is to
-        store what hh published. The union is logged so that nobody reading a
-        run report believes hh honoured it.
+        **The plan's keywords never filter a posting, and they now choose which
+        pages to open.** Those are opposite things and the difference is the
+        whole of the change of 2026-09-08. Filtering after a fetch saves no
+        request — the sitemap carries no title, so the page is already paid for
+        — and it is worse than useless besides: the walk records how far it got,
+        so a posting dropped for today's keywords is marked as dealt with and no
+        future run fetches it. Upload a new CV and everything the old keyword set
+        rejected stays invisible forever. That reasoning stands, and nothing here
+        filters.
+
+        Choosing a catalogue page happens BEFORE the request, which is why it is
+        allowed to use the same words. hh publishes a page per profession —
+        ``/vacancies/programmist``, measured with 50 vacancy ids on it — and the
+        ids on the pages this profile's professions point at are fetched first.
+        The rest of the corpus follows in the same walk, newest first, on
+        whatever budget is left. Relevance still belongs to ``matching/``; what
+        this decides is only what a short run spends its requests on.
+
+        Why that matters, measured on 2026-09-08: of 294 hh postings collected by
+        a walk ordered purely by date, none were in the programmer, developer or
+        devops roles, the commonest role was sales, and scoring the result put
+        zero postings in "apply" and zero in "strong match". The connector was
+        working exactly as written and collecting the wrong corpus.
         """
-        keywords = sorted({word for query in queries for word in query.keywords})
+        keywords = tuple(sorted({word for query in queries for word in query.keywords}))
+        # One headline per plan — it is the profile's, not the query's — so the
+        # first one any query carries is the one. Queries built by hand carry
+        # none, and the ranking then falls back to the keywords alone.
+        headline = next((query.headline for query in queries if query.headline), None)
         sites = self.sites_for(queries)
         if not sites:
             logger.warning("sources.hh.no_sites_configured", queries=len(queries))
             return
-        if keywords:
-            logger.info("sources.hh.keywords_ignored", keywords=keywords, sites=len(sites))
+        families = families_for(keywords, self.families)
+        if keywords and not families:
+            # Not an error and not silent. A profile whose stack this file has
+            # never seen still gets a crawl, and its own words still pick
+            # catalogue pages — see ``hh_roles.slugs_for``. What it does not get
+            # is somebody else's professions as a default.
+            logger.warning(
+                "sources.hh.no_role_families",
+                keywords=list(keywords),
+                detail="profile matches no family in hh_roles.yaml; slugs come from keywords only",
+            )
+        else:
+            logger.info(
+                "sources.hh.role_families",
+                families=[family.key for family in families],
+                # Which of them the headline named, as opposed to which got in
+                # on a skill the candidate happens to list. Both are crawled —
+                # the brief asks for breadth — but only the first kind outranks
+                # the other in ``hh_roles._rank``, and a run that opened nothing
+                # but Go and C# pages is what happens when nobody can see the
+                # difference from the outside.
+                focus=[
+                    family.key for family in families if headline and carries(headline, family.when)
+                ],
+                headline=headline,
+                keywords=len(keywords),
+            )
 
         budget = CrawlBudget(remaining=MAX_PAGES_PER_RUN)
         # Every city gets an equal share. One shared counter walked in order
@@ -955,7 +1320,14 @@ class HHSource(BaseSource):
         # next run spends it, starting where this one stopped.
         share = max(1, MAX_PAGES_PER_RUN // len(sites))
         for site in sites:
-            async for posting in self._crawl_site(site, budget, allowance=share):
+            async for posting in self._crawl_site(
+                site,
+                budget,
+                allowance=share,
+                keywords=keywords,
+                families=families,
+                headline=headline,
+            ):
                 yield posting
         # No tail flush any more. The walk records nothing on its own: every
         # entry it finishes waits on ``self._held`` until the pipeline confirms
@@ -974,24 +1346,43 @@ class HHSource(BaseSource):
             yield posting
 
     async def _crawl_site(
-        self, site: HHSite, budget: CrawlBudget, *, allowance: int
+        self,
+        site: HHSite,
+        budget: CrawlBudget,
+        *,
+        allowance: int,
+        keywords: Sequence[str] = (),
+        families: Sequence[RoleFamily] = (),
+        headline: str | None = None,
     ) -> AsyncIterator[RawPosting]:
-        """Walk one host: the index, then every sitemap's outstanding entries.
+        """Walk one host: the index, the catalogue, then the outstanding entries.
 
-        Two passes over the same due set, for two incompatible requirements.
+        **The professions first, then everything else, in one walk.** The
+        catalogue names which postings belong to the professions the profile
+        asked for; those are fetched before the rest, and the rest follows in the
+        same order it always had — newest first, on whatever budget is left. The
+        second half is not a fallback, it is the half that keeps the corpus
+        varied and covers the professions ``hh_roles.yaml`` failed to name.
 
-        *Newest first, briefly.* A city's sitemap spans about a month, so a
-        purely ascending walk spends the first several runs on postings three
-        weeks old — many already past ``validThroughTime`` — while today's
-        vacancies wait a fortnight. For a job search that is the wrong end.
-        So a bounded head slice of the freshest entries is fetched first.
+        **Why the ids are intersected with the sitemap rather than fetched
+        directly.** A catalogue page gives an id and nothing else. The sitemap
+        gives the same id with the date hh last touched it and the file it lives
+        in, which is what the recorded position is made of. Intersecting means
+        the role pass is a REORDERING of the ordinary walk: every entry it
+        fetches is recorded, resumed and deduplicated by machinery that already
+        works. The cost is stated rather than hidden — an id on a catalogue page
+        that is in no sitemap file is not fetched, and is counted in the log —
+        because a page with no place to record it would be re-bought every run
+        forever, and a crawl that cannot finish is worse than one that is late.
 
-        *Then oldest first, for the rest.* Only an ascending walk is resumable:
-        the recorded position can then say "everything up to here is done", and
-        a run that stops early leaves an unbroken remainder. The head slice
-        deliberately does **not** advance that position — advancing it to the
-        newest entry would declare everything below it done — so the ascending
-        pass walks past those ids without buying them twice.
+        **What paging would have bought, and why there is none.** Measured
+        2026-09-08: the catalogue's own next-page links exist only as
+        ``?page=0..3``, which hh's ``Disallow: *?*`` closes to us, and there is
+        no query-less form of them. So one page per slug, 50 ids, and depth comes
+        from the breadth of the slug set instead — 630 of Almaty's 10 435 slugs
+        were development. The overlap that breadth produces costs nothing: the
+        same posting reached through two professions is one row, collapsed by the
+        fingerprint the pipeline already computes.
         """
         site_budget = CrawlBudget(remaining=min(allowance, budget.remaining))
 
@@ -1006,6 +1397,14 @@ class HHSource(BaseSource):
             return
         files = await self._vacancy_sitemaps(site)
         spend()
+        catalog = await self._catalog_ids(
+            site,
+            keywords=keywords,
+            families=families,
+            headline=headline,
+            spend=spend,
+            stop=stop,
+        )
 
         due: dict[str, list[SitemapEntry]] = {}
         marks: dict[str, FileWatermark] = {}
@@ -1025,11 +1424,7 @@ class HHSource(BaseSource):
             # falls between them — and it is the order the walk itself uses.
             order = sorted((_key(entry) for entry in entries), reverse=True)
             self._order[(site.host, name)] = order
-            due[name] = sorted(
-                (entry for entry in entries if not marks[name].is_done(entry)),
-                key=_key,
-                reverse=True,
-            )
+            due[name] = marks[name].outstanding(entries)
         outstanding = sum(len(entries) for entries in due.values())
 
         state = _SiteRun(site=site)
@@ -1054,6 +1449,24 @@ class HHSource(BaseSource):
             key=lambda pair: _key(pair[1]),
             reverse=True,
         )
+        # The professions first, and only that. A stable sort on one boolean
+        # keeps the newest-first order inside both halves, so this adds an
+        # ordering and takes nothing away: every entry that was due before is
+        # still due, in the same relative place among its own kind.
+        walk.sort(key=lambda pair: pair[1].external_id not in catalog.ids)
+        reachable = sum(1 for _, entry in walk if entry.external_id in catalog.ids)
+        if catalog.ids:
+            logger.info(
+                "sources.hh.role_pass_planned",
+                host=site.host,
+                opened=list(catalog.opened),
+                catalog_ids=len(catalog.ids),
+                # The gap between these two is the cost named in the docstring:
+                # ids the catalogue offered that no sitemap file of this host
+                # accounts for, plus ids earlier runs already covered.
+                due_now=reachable,
+                outstanding=outstanding,
+            )
         try:
             for index, (name, entry) in enumerate(walk):
                 if stop():
@@ -1067,9 +1480,13 @@ class HHSource(BaseSource):
                         held=len(self._held),
                     )
                     break
+                if entry.external_id in catalog.ids:
+                    state.role_pass += 1
                 posting = await self._fetch_counted(entry, state)
                 spend()
                 if posting is not None:
+                    if self._in_wanted_roles(posting, catalog.role_ids):
+                        state.role_hits += 1
                     yield posting
                 # ``after``, not ``before``: an entry that stored nothing is
                 # accounted for as soon as everything ahead of it is written, and
@@ -1086,12 +1503,24 @@ class HHSource(BaseSource):
             # records them.
             raise
 
-        self._log_site(site, state, budget, outstanding)
+        self._log_site(site, state, budget, outstanding, catalog)
 
     def _log_site(
-        self, site: HHSite, state: "_SiteRun", budget: CrawlBudget, outstanding: int
+        self,
+        site: HHSite,
+        state: "_SiteRun",
+        budget: CrawlBudget,
+        outstanding: int,
+        catalog: "_CatalogPass",
     ) -> None:
-        """One line per site, carrying what was covered and what was not."""
+        """One line per site, carrying what was covered and what was not.
+
+        ``role_hits`` against ``fetched`` is the measurement the catalogue path
+        was built to move, and it is reported per run rather than left to be
+        reconstructed from the database: before this change a walk ordered by
+        date returned 294 hh postings for Almaty with none of them in a
+        development role.
+        """
         logger.info(
             "sources.hh.site_finished",
             host=site.host,
@@ -1100,8 +1529,32 @@ class HHSource(BaseSource):
             stored=state.stored,
             not_stored=state.not_stored,
             unreadable=state.unreadable,
+            catalog_pages=len(catalog.opened),
+            catalog_slugs=catalog.slugs,
+            role_pass=state.role_pass,
+            role_hits=state.role_hits,
             budget_left=max(0, budget.remaining),
         )
+
+    def _in_wanted_roles(self, posting: RawPosting, roles: frozenset[int]) -> bool:
+        """Whether this posting carries one of the roles the profile asked for.
+
+        Reads ``_derived``, which is this connector's own block and not a foreign
+        payload — the rule against raw dicts between layers is about contracts
+        crossing a boundary, and this one has not left the module that wrote it.
+        Counting rather than filtering: a posting outside the wanted roles is
+        stored exactly as before, because the scorer is what narrows and it has
+        been honest all along.
+        """
+        if not roles:
+            return False
+        derived = posting.raw.get("_derived")
+        if not isinstance(derived, dict):
+            return False
+        found = derived.get("professional_role_ids")
+        if not isinstance(found, list):
+            return False
+        return any(isinstance(role, int) and role in roles for role in found)
 
     async def _fetch_counted(self, entry: SitemapEntry, state: "_SiteRun") -> RawPosting | None:
         """One page, counted, with a run's tolerance for unreadable markup.
@@ -1187,6 +1640,10 @@ class HHSource(BaseSource):
         """
         index_url = f"https://{site.host}{SITEMAP_INDEX_PATH}"
         body = await self.http.get_text(index_url, cache_ttl=SITEMAP_CACHE_TTL)
+        # Kept for the run so that the catalogue files, which live in the same
+        # document, cost no second request. Not a cache with a lifetime: it dies
+        # with the connector instance, which the registry builds once per run.
+        self._index[site.host] = body
         listed = SITEMAP_LOC.findall(body)
         # The host is checked here for the reason ``_entry`` checks it on the
         # vacancy URLs: a sitemap is a document somebody else writes, and every
@@ -1454,6 +1911,256 @@ class HHSource(BaseSource):
             description_html=view.description,
             sitemap_lastmod=entry.lastmod,
         )
+
+    # ── the catalogue ─────────────────────────────────────────────────
+
+    async def _catalog_ids(
+        self,
+        site: HHSite,
+        *,
+        keywords: Sequence[str],
+        families: Sequence[RoleFamily],
+        headline: str | None,
+        spend: "Callable[[], None]",
+        stop: "Callable[[], bool]",
+    ) -> "_CatalogPass":
+        """The vacancy ids this run's share of the catalogue names.
+
+        A bounded number of pages, taken from where the last run left off and
+        leaving the cursor past them, so the slug list is swept across runs
+        instead of the same head of it being re-read every time.
+        """
+        if not keywords:
+            # Nothing to select by, so nothing is bought to find that out. A plan
+            # costs sixteen requests to resolve — hh's role directory and fifteen
+            # catalogue sitemaps — and a run with no profile behind it is the
+            # ordinary date-ordered walk, which is what it was before all this.
+            logger.debug("sources.hh.catalog_skipped", host=site.host, reason="no keywords")
+            return _CatalogPass()
+        plan = await self._catalog_plan(
+            site,
+            keywords=keywords,
+            families=families,
+            headline=headline,
+            spend=spend,
+            stop=stop,
+        )
+        if plan is None or not plan.slugs:
+            return _CatalogPass()
+
+        wanted, offset = pages_this_run(plan)
+        ids: set[str] = set()
+        opened: list[str] = []
+        for slug in wanted:
+            if stop():
+                break
+            opened.append(slug)
+            body = await self._catalog_page(site, slug)
+            spend()
+            if body is not None:
+                ids.update(VACANCY_ID_ON_PAGE.findall(body))
+        await self._save_plan(site, plan.model_copy(update={"offset": offset}))
+        logger.info(
+            "sources.hh.catalog_read",
+            host=site.host,
+            # The slugs themselves, not a count. Which eight of a hundred pages
+            # a run opens decides what the whole run collects, and a number does
+            # not say whether they were python pages or 1C ones.
+            opened=opened,
+            ids=len(ids),
+            slugs=len(plan.slugs),
+            next_offset=offset,
+        )
+        return _CatalogPass(
+            ids=frozenset(ids),
+            role_ids=frozenset(plan.role_ids),
+            opened=tuple(opened),
+            slugs=len(plan.slugs),
+        )
+
+    async def _catalog_page(self, site: HHSite, slug: str) -> str | None:
+        """One catalogue page, or None when there is nothing behind that slug.
+
+        A slug in the sitemap that answers 404 is ordinary — the sitemap is a
+        snapshot, professions are retired — and must not stop a run. A check for
+        robots must, and is logged with the page it arrived on for the same
+        reason ``_fetch_counted`` logs it: that line is the only record of where
+        a crawl was cut.
+        """
+        url = f"https://{site.host}/vacancies/{slug}"
+        try:
+            # No cache lifetime, like the sitemaps and for the same reason: this
+            # document's whole job is to say what is on hh now, so a developer
+            # with a warm disk cache would be handed a frozen id set and a run
+            # that discovers nothing.
+            return await self.http.get_text(url, cache_ttl=SITEMAP_CACHE_TTL)
+        except HHChallengedError:
+            logger.warning("sources.hh.challenged", host=site.host, url=url, stage="catalog")
+            raise
+        except SourceError as exc:
+            if exc.extra.get("response_status") in GONE_STATUSES:
+                logger.debug("sources.hh.catalog_gone", url=url)
+                return None
+            raise
+
+    async def _catalog_plan(
+        self,
+        site: HHSite,
+        *,
+        keywords: Sequence[str],
+        families: Sequence[RoleFamily],
+        headline: str | None,
+        spend: "Callable[[], None]",
+        stop: "Callable[[], bool]",
+    ) -> CatalogPlan | None:
+        """The stored plan, or a fresh one when it is stale or asks for the wrong work.
+
+        A plan that cannot be re-resolved is kept rather than dropped: crawling
+        last week's professions is better than crawling none, and the reason it
+        could not be refreshed is in the log beside it.
+        """
+        stored = await self.state_get(self._catalog_key(site))
+        plan: CatalogPlan | None = None
+        if stored:
+            try:
+                plan = CatalogPlan.model_validate(stored)
+            except ValidationError as exc:
+                logger.warning(
+                    "sources.hh.catalog_plan_unreadable",
+                    host=site.host,
+                    errors=exc.errors(include_input=False, include_url=False)[:2],
+                )
+        wanted = tuple(family.key for family in families)
+        fresh = plan is not None and datetime.now(UTC) - plan.resolved_at < CATALOG_TTL
+        # The headline is compared as well as the families, and it has to be: it
+        # is the strongest weight in the ranking, so a resume retitled from
+        # "Python Developer" to "Data Engineer" reorders the whole plan while
+        # leaving the set of families it matched untouched.
+        if fresh and plan is not None and plan.families == wanted and plan.headline == headline:
+            return plan
+        if stop():
+            return plan
+
+        directory = await self._role_directory(spend)
+        roles = roles_for(families, directory)
+        slugs = await self._catalog_slugs(site, spend=spend, stop=stop)
+        if not slugs:
+            logger.warning(
+                "sources.hh.catalog_not_resolved",
+                host=site.host,
+                detail="no catalogue slugs read; keeping whatever plan was stored",
+            )
+            return plan
+        chosen = slugs_for(roles, keywords, slugs, families=families, headline=headline)
+        if len(chosen) > MAX_CATALOG_SLUGS:
+            logger.warning(
+                "sources.hh.catalog_slugs_capped",
+                host=site.host,
+                matched=len(chosen),
+                kept=MAX_CATALOG_SLUGS,
+            )
+            chosen = chosen[:MAX_CATALOG_SLUGS]
+        refreshed = CatalogPlan(
+            resolved_at=datetime.now(UTC),
+            families=wanted,
+            headline=headline,
+            role_ids=tuple(role.id for role in roles),
+            slugs=chosen,
+            offset=0,
+        )
+        await self._save_plan(site, refreshed)
+        logger.info(
+            "sources.hh.catalog_resolved",
+            host=site.host,
+            families=list(wanted),
+            # The head of the ranked list, which is what the next run opens.
+            head=list(chosen[:CATALOG_HEAD_PAGES]),
+            roles=len(roles),
+            catalog_slugs=len(slugs),
+            chosen=len(chosen),
+        )
+        return refreshed
+
+    async def _role_directory(self, spend: "Callable[[], None]") -> tuple[DirectoryRole, ...]:
+        """hh's professional roles, fetched at most once per run.
+
+        A failure here is not fatal and not silent: without the directory the
+        families name nothing, the plan falls back to the profile's own keywords
+        against the slug list, and the crawl still runs. Cached even when empty,
+        so a second city does not ask a host that has just refused.
+        """
+        if self._directory is not None:
+            return self._directory
+        # Spent before the request rather than after it, so that a refusal costs
+        # the budget the same as an answer: it cost hh the same.
+        spend()
+        try:
+            payload = await self.http.get_json(ROLES_URL, cache_ttl=CATALOG_TTL)
+        except HHChallengedError:
+            raise
+        except (SourceError, OSError) as exc:
+            logger.warning("sources.hh.roles_unavailable", url=ROLES_URL, error=str(exc))
+            self._directory = ()
+            return self._directory
+        self._directory = read_directory(payload)
+        logger.info("sources.hh.roles_read", roles=len(self._directory))
+        return self._directory
+
+    async def _catalog_slugs(
+        self, site: HHSite, *, spend: "Callable[[], None]", stop: "Callable[[], bool]"
+    ) -> tuple[str, ...]:
+        """Every profession this host publishes a catalogue page for."""
+        files = await self._catalog_sitemaps(site, spend)
+        slugs: list[str] = []
+        dated = 0
+        for name, url in files:
+            if stop():
+                logger.info("sources.hh.catalog_file_not_read", host=site.host, file=name)
+                continue
+            body = await self.http.get_text(url, cache_ttl=SITEMAP_CACHE_TTL)
+            spend()
+            found, locs, lastmods = catalog_entries(body, site.host)
+            dated += lastmods
+            slugs.extend(found)
+            logger.debug(
+                "sources.hh.catalog_file", host=site.host, file=name, locs=locs, slugs=len(found)
+            )
+        if dated:
+            # Measured at zero on 2026-09-08, and the walk is built on that: the
+            # catalogue cannot be read by freshness, so its ids are ordered by
+            # the vacancy sitemap's dates instead. hh adding dates here would be
+            # a better way to do this, and somebody should be told.
+            logger.info("sources.hh.catalog_has_lastmod", host=site.host, entries=dated)
+        return tuple(dict.fromkeys(slugs))
+
+    async def _catalog_sitemaps(
+        self, site: HHSite, spend: "Callable[[], None]"
+    ) -> list[tuple[str, str]]:
+        """The ``vacancies{N}.xml`` files this host's index lists.
+
+        Reads the index out of the run's memo when the vacancy files have
+        already been taken from it, which is every path that reaches here today;
+        the fetch is kept for the one that would not, and pays for itself.
+        """
+        body = self._index.get(site.host)
+        if body is None:  # pragma: no cover - the walk always reads the index first
+            body = await self.http.get_text(
+                f"https://{site.host}{SITEMAP_INDEX_PATH}", cache_ttl=SITEMAP_CACHE_TTL
+            )
+            self._index[site.host] = body
+            spend()
+        found = catalog_sitemaps(body, site.host)
+        if not found:
+            logger.warning("sources.hh.no_catalog_sitemaps", host=site.host)
+        return found
+
+    def _catalog_key(self, site: HHSite) -> str:
+        """Where one host's catalogue plan is stored."""
+        return f"catalog:{site.host}"
+
+    async def _save_plan(self, site: HHSite, plan: CatalogPlan) -> None:
+        """Record the plan and its rotation cursor."""
+        await self.state_set(self._catalog_key(site), plan.model_dump(mode="json"))
 
     # ── position ──────────────────────────────────────────────────────
 
