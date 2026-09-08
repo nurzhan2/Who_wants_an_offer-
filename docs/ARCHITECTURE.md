@@ -87,6 +87,39 @@ system работодателя так не умеет: она читает те
 `app/schemas/ats.py`. Пороги — в конфиге (`ATS_*`), потому что правильное
 значение зависит от резюме, которые реально загружают.
 
+### Контактный блок
+
+Контакты (`profile_contact` + `profile_contact_link`) лежат отдельной таблицей,
+а не колонками в `candidate_profile`, и на профиле нет relationship, который бы
+на них указывал. Это граница приватности, выраженная схемой: чтобы дотянуться
+до телефона, нужен явный join через `ContactRepository` — единственный модуль,
+который эти строки читает и пишет.
+
+Контакты не попадают в эмбеддинг, не участвуют в скоринге и не уходят ни в один
+внешний запрос. Единственное их применение — подстановка в документ, который
+генерируется для самого владельца.
+
+Заполнение — правилами, а не моделью (`app/resume/contacts.py`): регулярки
+детерминированы, а выдуманная моделью цифра в телефоне неотличима от настоящей.
+Модель к этому моменту резюме уже прочитала, поэтому ФИО и город берутся из её
+разбора, а почта, телефон и ссылки — из текста.
+
+На каждом скалярном поле стоит флаг `*_edited`. Разбор повторяется при каждой
+загрузке резюме и переписывает только то, чего человек не трогал; поле,
+исправленное руками, больше не переписывает никто. Новая загрузка создаёт новый
+профиль, поэтому исправленные поля и добавленные вручную ссылки переносятся на
+него: телефон принадлежит человеку, а не документу.
+
+Ссылки — строками, а не колонками: набор мест, где человек держит профиль,
+открытый. `kind` — обычный слаг, не enum, по той же причине, по которой схема
+избегает `ALTER TYPE`.
+
+Экран «Мои данные» (`frontend/src/pages/MyData.tsx`) отправляет только те поля,
+которые человек действительно изменил: любое поле в PATCH помечается как
+исправленное вручную и перестаёт обновляться из новых резюме, поэтому форма,
+отправляющая весь блок, заморозила бы его целиком. Под каждым полем написано,
+откуда значение — из резюме или из правки.
+
 ### `sources/`
 - `base.py` — контракт: `SearchQuery`, `RawPosting`, `RateLimit`, `BaseSource`.
 - `registry.py` — `@register_source`, ленивый обход пакета, `get_enabled_sources()`.
@@ -259,6 +292,16 @@ profile_skill
   id, profile_id → candidate_profile, canonical_name, raw_name,
   years float, level enum(basic|working|strong|expert), last_used_year
 
+profile_contact
+  id, profile_id → candidate_profile unique,
+  full_name, phone, email, city,
+  full_name_edited, phone_edited, email_edited, city_edited bool
+
+profile_contact_link
+  id, contact_id → profile_contact, kind, url, label,
+  is_manual bool, position smallint
+  unique(contact_id, url)
+
 vacancy
   id, fingerprint unique, title, company, company_url,
   description_raw, description_md, seniority, min_years,
@@ -344,9 +387,12 @@ pipeline_run
 
 ```
 POST   /api/v1/resume/upload          multipart → profile_id, задача разбора
+GET    /api/v1/profile/active         профиль, против которого всё считается
 GET    /api/v1/profile/{id}
 GET    /api/v1/profile/{id}/ats-report   прочитает ли резюме робот работодателя
 PATCH  /api/v1/profile/{id}           ручная правка скиллов/предпочтений
+GET    /api/v1/profile/{id}/contacts  контактный блок: ФИО, телефон, почта, ссылки
+PATCH  /api/v1/profile/{id}/contacts  ручная правка контактов
 POST   /api/v1/profile/{id}/rescore   пересчёт матчей
 
 GET    /api/v1/vacancies              фильтры + пагинация + сортировка

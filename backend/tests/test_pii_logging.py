@@ -7,12 +7,19 @@ one well-meant ``logger.info("parsed", text=document.raw_text)`` turns a debug
 line into a privacy incident that nothing downstream will ever notice.
 
 Every test here runs a real fixture through the real code — extraction, the API
-provider, the profile builder, the upload endpoint — with the model and the
-embedding provider faked, captures everything that reaches the log stream, and
-asserts the identities carried by those fixtures are nowhere in it. Several
-distinct strings are checked each time (a name, an email, a phone number, a
-city), because a formatter that truncates or a field that carries only part of
-the document still leaks the part it carries.
+provider, the profile builder, the upload endpoint, the contact block — with the
+model and the embedding provider faked, captures everything that reaches the log
+stream, and asserts the identities carried by those fixtures are nowhere in it.
+Several distinct strings are checked each time (a name, an email, a phone
+number, a city, and the links a contact block holds), because a formatter that
+truncates or a field that carries only part of the document still leaks the part
+it carries.
+
+The contact block deserves its own mention. It is the one place where these
+strings stop being a by-product of parsing and become first-class columns that a
+person edits, an endpoint returns and a service logs about — which is exactly
+the shape of change that adds a ``logger.info("saved", phone=phone)`` without
+anybody thinking of it as a resume any more.
 
 Two tests exist to keep the rest honest, and they must never be deleted:
 
@@ -46,6 +53,7 @@ from app.core.config import settings
 from app.core.exceptions import ParsingError
 from app.core.logging import configure_logging, get_logger
 from app.db.enums import ParseStatus
+from app.db.repositories.contact import ContactRepository
 from app.db.repositories.profile import ProfileRepository
 from app.llm import usage as usage_ledger
 from app.llm.base import Document, LLMResult, LLMTask, LLMUsage
@@ -60,6 +68,7 @@ from app.schemas.llm import (
     WorkPeriod,
 )
 from app.services import resume as resume_service
+from factories import make_profile
 
 FIXTURES = Path(__file__).parent / "fixtures" / "resumes"
 
@@ -75,17 +84,25 @@ TRACEBACK_KEYS = frozenset({"exception", "stack"})
 
 @dataclass(frozen=True, slots=True)
 class Identity:
-    """The personal details one fixture carries. None of them may be logged."""
+    """The personal details one fixture carries. None of them may be logged.
+
+    ``links`` is empty for the resume files in this repository — none of them
+    carries a GitHub or a Telegram address — and populated for the contact
+    block below, which does. It defaults to empty rather than being a separate
+    type so that the guard test pinning fixtures to their strings keeps passing
+    unchanged: a fixture claims only what it actually contains.
+    """
 
     name: str
     email: str
     phone: str
     city: str
+    links: tuple[str, ...] = ()
 
     @property
     def secrets(self) -> tuple[str, ...]:
         """Every string that must not appear in a log line."""
-        return (self.name, self.email, self.phone, self.city)
+        return (self.name, self.email, self.phone, self.city, *self.links)
 
 
 #: The invented people in ``tests/fixtures/resumes``. Every string here is
@@ -717,4 +734,173 @@ async def test_the_upload_endpoint_logs_ids_formats_and_sizes_only(
     assert accepted["source_format"] == "txt"
     assert accepted["size_bytes"] == len(read_fixture(PLAIN_TEXT_RESUME))
     assert_absent(logs.text, identity, filename)
+    assert_no_prose(logs.records())
+
+
+# ── the contact block ─────────────────────────────────────────────────
+
+
+#: A resume carrying the one thing the checked-in fixtures do not: links. It is
+#: written here rather than added to ``tests/fixtures/resumes`` because those
+#: are generated files whose bytes several other suites assert on, and because
+#: an inline constant cannot drift from the strings the tests below search for
+#: — the drift risk that ``test_fixtures_really_carry_the_identities_searched_for``
+#: exists to catch for the files does not exist for this one.
+LINKED_RESUME = """\
+Тимур Черновиков
+Backend-разработчик
+
+Город: Шымкент, Казахстан
+Email: t.chernovikov@example.com
+Телефон: +7 700 000 00 17
+GitHub: https://github.com/chernovikov
+Telegram: https://t.me/chernovikov
+
+ОПЫТ РАБОТЫ
+ТОО «Бумажный Лис» — Шымкент
+Backend-разработчик
+05.2021 — по настоящее время
+Сервисы на FastAPI, очереди, интеграции.
+"""
+
+LINKED_IDENTITY = Identity(
+    name="Тимур Черновиков",
+    email="t.chernovikov@example.com",
+    phone="+7 700 000 00 17",
+    city="Шымкент",
+    links=("https://github.com/chernovikov", "https://t.me/chernovikov"),
+)
+
+CONTACTS_URL = f"{settings.api_v1_prefix}/profile/{{profile_id}}/contacts"
+
+
+@pytest.mark.unit
+def test_the_linked_resume_really_carries_the_identity_searched_for() -> None:
+    """The same guard the file fixtures get, for the inline one. An absence
+    assertion against strings the document never contained would pass for ever,
+    links included."""
+    for secret in LINKED_IDENTITY.secrets:
+        assert secret in LINKED_RESUME
+
+
+async def stored_profile(
+    profiles: ProfileRepository, session: AsyncSession, identity: Identity, raw_text: str
+) -> UUID:
+    """A parsed profile carrying one identity, ready for the contact step."""
+    profile = await profiles.create(make_profile(name=identity.name, raw_text=raw_text))
+    profile.locations = [identity.city]
+    await session.flush()
+    return profile.id
+
+
+async def test_prefilling_a_contact_block_logs_field_names_and_counts_only(
+    logs: LogSink, db_session: AsyncSession, profiles: ProfileRepository
+) -> None:
+    """The step that turns resume text into contact columns.
+
+    It has every one of these strings in hand at once — that is its whole job —
+    and it logs a line about what it did on every upload. What that line may
+    say is *which* fields were filled and how many links were found; naming the
+    fields is what makes the log useful for debugging, and it is also the exact
+    point where writing the values instead would feel natural.
+    """
+    profile_id = await stored_profile(profiles, db_session, LINKED_IDENTITY, LINKED_RESUME)
+
+    await resume_service.fill_contacts(db_session, profile_id)
+
+    # Anchor the negative: the block really was filled in, so "no phone number
+    # in the logs" is a statement about the logging and not about a no-op.
+    contact = await ContactRepository(db_session).get(profile_id)
+    assert contact is not None
+    assert contact.phone == LINKED_IDENTITY.phone
+    assert contact.email == LINKED_IDENTITY.email
+    assert {link.url for link in contact.links} == set(LINKED_IDENTITY.links)
+
+    prefilled = next(record for record in logs.records() if record["event"] == "contacts.prefilled")
+    assert prefilled["fields"] == ["full_name", "phone", "email", "city"]
+    assert prefilled["link_count"] == 2
+    assert_absent(logs.text, LINKED_IDENTITY)
+    assert_no_prose(logs.records())
+
+
+async def test_correcting_a_contact_block_by_hand_logs_none_of_what_was_typed(
+    logs: LogSink,
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+) -> None:
+    """The endpoint the owner types their own details into.
+
+    Every value in this request is personal data, it arrives as a request body
+    that middleware could log wholesale, and it goes back out in the response —
+    which is correct, because the response is the owner's own screen. The log
+    line is the only part of the round trip that must not carry it.
+    """
+    profile_id = await stored_profile(profiles, db_session, LINKED_IDENTITY, LINKED_RESUME)
+
+    response = await async_client.patch(
+        CONTACTS_URL.format(profile_id=profile_id),
+        json={
+            "full_name": LINKED_IDENTITY.name,
+            "phone": LINKED_IDENTITY.phone,
+            "email": LINKED_IDENTITY.email,
+            "city": LINKED_IDENTITY.city,
+            "links": [{"kind": "github", "url": LINKED_IDENTITY.links[0]}],
+        },
+    )
+
+    assert response.status_code == 200
+    # The owner gets their own details back; that is the product, not a leak.
+    assert response.json()["phone"] == LINKED_IDENTITY.phone
+    assert {"contacts.updated", "request_handled"} <= logs.events()
+    updated = next(record for record in logs.records() if record["event"] == "contacts.updated")
+    assert updated["fields"] == ["full_name", "phone", "email", "city", "links"]
+    assert_absent(logs.text, LINKED_IDENTITY)
+    assert_no_prose(logs.records())
+
+
+async def test_reading_a_contact_block_logs_nothing_about_its_contents(
+    logs: LogSink,
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+) -> None:
+    """A GET is the request most likely to be logged in full one day, because
+    it looks harmless: no body, no mutation, nothing to audit. Its *response*
+    is a whole contact block."""
+    profile_id = await stored_profile(profiles, db_session, LINKED_IDENTITY, LINKED_RESUME)
+    await resume_service.fill_contacts(db_session, profile_id)
+
+    response = await async_client.get(CONTACTS_URL.format(profile_id=profile_id))
+
+    assert response.status_code == 200
+    assert response.json()["email"] == LINKED_IDENTITY.email  # there was something to leak
+    assert "request_handled" in logs.events()
+    assert_absent(logs.text, LINKED_IDENTITY)
+    assert_no_prose(logs.records())
+
+
+async def test_a_contact_value_rejected_by_prefill_is_reported_without_quoting_it(
+    logs: LogSink, db_session: AsyncSession, profiles: ProfileRepository
+) -> None:
+    """Prefill drops a candidate that does not fit its column — a city field
+    holding a whole address line, say — and says so in the log. "Which value?"
+    is the first question anyone debugging that line asks, and the answer is
+    the one string this module may not print."""
+    overlong_city = f"{LINKED_IDENTITY.city}, " * 40
+    profile = await profiles.create(make_profile(name=LINKED_IDENTITY.name, raw_text=LINKED_RESUME))
+    profile.locations = [overlong_city]
+    await db_session.flush()
+
+    await resume_service.fill_contacts(db_session, profile.id)
+
+    rejected = next(
+        record for record in logs.records() if record["event"] == "contacts.prefill_rejected"
+    )
+    assert rejected["field"] == "city"
+    contact = await ContactRepository(db_session).get(profile.id)
+    assert contact is not None
+    assert contact.city is None  # dropped rather than truncated into something wrong
+    assert contact.phone == LINKED_IDENTITY.phone  # and the rest was still filled in
+    assert_absent(logs.text, LINKED_IDENTITY)
     assert_no_prose(logs.records())

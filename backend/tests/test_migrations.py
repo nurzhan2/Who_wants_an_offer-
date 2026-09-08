@@ -22,6 +22,8 @@ EXPECTED_TABLES = {
     "candidate_profile",
     "match",
     "pipeline_run",
+    "profile_contact",
+    "profile_contact_link",
     "profile_skill",
     "source_quota",
     "source_state",
