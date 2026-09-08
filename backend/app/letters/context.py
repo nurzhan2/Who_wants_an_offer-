@@ -42,7 +42,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from app.letters.guard import DEFAULT_MAX_LENGTH
-from app.resume.skills import default_canonicalizer, normalize
+from app.resume.skills import fold as fold_skill
 
 #: Longest description handed to the model. A posting is a page of prose; past
 #: this it is a company brochure, and every character is billed. Cutting at a
@@ -169,15 +169,13 @@ class LetterContext(Facts):
 def fold(name: str) -> str:
     """The key two spellings of one skill must share to intersect.
 
-    The dictionary first, so "Node.js" and "nodejs" meet at ``nodejs`` — the
-    canonical form the dictionary chose, then normalised; a normalised fold
-    second, so two identical spellings of a skill the dictionary has never heard
-    of still meet. Falling back rather than dropping matters:
-    the bundled dictionary is small, and a miss here silently shrinks the
-    intersection the whole letter is built on.
+    Re-exported from :func:`app.resume.skills.fold` rather than reimplemented:
+    the ATS audit reports the same intersection this letter is written around,
+    and two copies of the rule drifting apart would let a letter claim a skill
+    the audit calls unnamed. Kept as a name in this module because that is what
+    the rest of the package imports.
     """
-    canonical = default_canonicalizer().canonicalize(name)
-    return normalize(canonical if canonical is not None else name)
+    return fold_skill(name)
 
 
 def overlap_of(required: tuple[str, ...], profile: ProfileFacts) -> SkillOverlap:

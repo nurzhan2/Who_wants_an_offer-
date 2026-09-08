@@ -45,6 +45,25 @@ def normalize(spelling: str) -> str:
     return _SEPARATORS.sub("", spelling.strip().casefold())
 
 
+def fold(spelling: str) -> str:
+    """The key two spellings of one skill must share to be the same skill.
+
+    The dictionary first, so "Node.js" and "nodejs" meet at the canonical name
+    it chose, then normalised; a normalised fold second, so two spellings of a
+    skill the dictionary has never heard of still meet. Falling back rather than
+    dropping matters: the bundled dictionary is small, and a miss here silently
+    shrinks every set intersection built on it.
+
+    Lives here rather than in the two packages that need it —
+    :mod:`app.letters.context` computes the overlap a letter is written around,
+    :mod:`app.resume.ats_keywords` computes the one an audit reports — because
+    two copies of this rule drifting apart means a letter claiming a skill the
+    audit says is unstated, on the same document.
+    """
+    canonical = default_canonicalizer().canonicalize(spelling)
+    return normalize(canonical if canonical is not None else spelling)
+
+
 class SkillDictionaryError(ValueError):
     """The skill dictionary is malformed and cannot be used.
 

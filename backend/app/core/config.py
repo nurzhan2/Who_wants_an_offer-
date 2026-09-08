@@ -231,6 +231,28 @@ class Settings(BaseSettings):
     ats_broken_glyph_ratio: Annotated[float, Field(gt=0, lt=1)] = 0.05
     #: Above this share of words inside tables, sectioning is at risk.
     ats_table_word_ratio: Annotated[float, Field(gt=0, le=1)] = 0.30
+    #: At or above this lightness, a character is the colour of the paper. 0.9
+    #: rather than 1.0 because "#fefefe" is the spelling that gets used when
+    #: somebody knows a checker is looking for pure white.
+    ats_invisible_luminance: Annotated[float, Field(gt=0, le=1)] = 0.90
+    #: Below this lightness a filled shape is a dark banner, and light text on
+    #: it is a design rather than a hidden block.
+    ats_dark_fill_luminance: Annotated[float, Field(ge=0, lt=1)] = 0.50
+    #: Points below which text is not meant to be read by a person. Smaller than
+    #: any real footnote: 6pt fine print exists, 3pt does not.
+    ats_min_font_size: Annotated[float, Field(gt=0)] = 4.0
+    #: Invisible characters below this count are an artefact; at or above it
+    #: they are a block somebody placed. One word is about this long.
+    ats_hidden_char_limit: Annotated[int, Field(ge=1)] = 20
+    #: A resume shorter than this has nothing for a keyword filter to match.
+    #: Measured rather than guessed: a complete but terse one-page resume in
+    #: this project's fixture corpus runs 131 to 204 words, so a floor of 150
+    #: reported finished resumes as too short. Below 100 a document cannot be
+    #: carrying work history, skills and education at all.
+    ats_min_resume_words: Annotated[int, Field(ge=0)] = 100
+    #: Longer than this and the import truncates — always from the end, which is
+    #: where the early career and the education live.
+    ats_max_resume_words: Annotated[int, Field(ge=1)] = 1200
 
     # ── Resume upload ─────────────────────────────────────────────────
     resume_max_file_size_mb: Annotated[int, Field(ge=1, le=100)] = 10

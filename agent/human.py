@@ -65,11 +65,23 @@ from typing import Final, TextIO, final
 
 from agent.letter import SafeLetter
 from agent.mandate import SendMandate, digest, mint
+from agent.queue import ATSCard
 from agent.state_page import printable
 
 #: Typed in full to proceed. Not "y": a single character is something a stuck
 #: key produces, and this is the last gate before something irreversible.
 CONFIRM_WORD: Final[str] = "отправляем"
+
+#: The audit's one-word verdict, in the words the card prints. The backend's
+#: vocabulary is English and stable (``app.schemas.ats.Overall``); the console is
+#: read by the person whose account this is. An unknown value is printed as it
+#: arrived rather than guessed at, so a backend that grows a fourth verdict
+#: shows something true here instead of the wrong one of three.
+ATS_VERDICTS: Final[dict[str, str]] = {
+    "ok": "робот прочитает",
+    "degraded": "робот прочитает не всё",
+    "unreadable": "робот не прочитает",
+}
 
 #: What hh's resume-visibility sentence is filed under on one card. Says out
 #: loud that it is not about this vacancy, because the line under it names a
@@ -107,6 +119,10 @@ class Candidate:
     #: including the ones no run has ever opened a form for. A card that files it
     #: under "what hh said about this job" is a card that reads it as small.
     hh_visibility: str | None = None
+    #: The backend's ATS audit of this letter against this vacancy, carried
+    #: from the queue untouched. This package does not audit anything; it shows
+    #: the answer at the last moment it can still change a decision.
+    ats: ATSCard | None = None
 
     def render(self) -> str:
         """Exactly what the human is shown. The mandate is bound to this text.
@@ -196,6 +212,7 @@ class Candidate:
             f"  вакансия {self.vacancy_id}",
             f"  {self.url}",
             *self._score_lines(),
+            *self._ats_lines(),
         ]
         # Truthiness rather than ``is not None``: an empty string would print a
         # heading with nothing under it, which reads as a warning nobody wrote.
@@ -230,6 +247,44 @@ class Candidate:
         lines = [f"  соответствие: {self.score:.1f} из 100"]
         if self.score_explanation:
             lines.extend(f"  | {line}" for line in self.score_explanation.splitlines())
+        return lines
+
+    def _ats_lines(self) -> list[str]:
+        """What a machine reading this letter will get out of it.
+
+        The last place the ATS report is shown, and the only one where the next
+        click sends an application. Printed on the card rather than left to the
+        dashboard for the same reason the score is: a person is being asked to
+        approve this letter for this vacancy, and «названо 3 из 9 требований» is
+        something they can act on by dropping the item and regenerating it.
+
+        Two lists, never merged. The named one is requirements the owner *has*
+        and this letter does not mention — that is a letter to rewrite. The
+        counted one is requirements nobody holds, and it stays a number: naming
+        them here, seconds before sending, would read as a list of things to
+        claim, which is the one thing this card must never suggest.
+
+        Absence is printed too. A letter nobody audited and a letter that passed
+        must not look the same to somebody approving an application.
+        """
+        card = self.ats
+        if card is None:
+            return ["  проверка ATS: не выполнялась"]
+
+        lines = [
+            f"  проверка ATS: {ATS_VERDICTS.get(card.overall, card.overall)}"
+            + (f", {card.score:.0f} из 100" if card.score is not None else "")
+        ]
+        lines.extend(f"  | не прочитает: {title}" for title in card.critical)
+        if card.requirements_total:
+            lines.append(
+                f"  | требований вакансии названо дословно: "
+                f"{card.requirements_present} из {card.requirements_total}"
+            )
+        if card.unstated:
+            lines.append("  | есть в профиле, но не названо в письме: " + ", ".join(card.unstated))
+        if card.absent:
+            lines.append(f"  | требований, которых нет в профиле: {card.absent}")
         return lines
 
 

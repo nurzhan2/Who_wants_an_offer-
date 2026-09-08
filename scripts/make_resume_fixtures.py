@@ -30,8 +30,17 @@ fly. Six files, each aimed at one thing that breaks a naive extractor:
     phone number is an image. Everything an employer needs to *read* survives;
     the only thing they need to *reply* does not.
 
-The last two are for the ATS audit rather than the extractor, so they skip the
-traps below: their whole content is the one defect each is named after.
+``hidden_keywords.pdf``
+    ``single_column_ru.pdf`` with a block of keywords painted white under it —
+    the trick every "beat the ATS" guide recommends. The audit has to call it a
+    defect rather than a technique.
+``dark_banner.pdf``
+    The same resume with its name in white on a dark header band. An honest
+    design that a naive hidden-text check accuses of cheating, so it is the
+    fixture that keeps the check from doing that.
+
+The last four are for the ATS audit rather than the extractor, so they skip the
+traps below: their whole content is the one thing each is named after.
 
 Every text fixture carries the same four traps on purpose, because the tests assert
 on them: overlapping employment (a full-time job and a freelance one running at
@@ -682,6 +691,74 @@ def build_image_contacts() -> bytes:
     return render_pdf(draw)
 
 
+#: The keyword block a "beat the ATS" guide tells people to paste at the bottom
+#: of a resume in white 8pt. Real advice, given constantly, and the reason the
+#: audit has a check for it: an applicant tracking system compares the rendered
+#: page with the text layer, finds this, and files the *candidate* — not the
+#: file — as having tried it on.
+HIDDEN_KEYWORDS = (
+    "Python Python Python SQL SQL SQL Airflow Airflow Kafka Kafka Spark Spark "
+    "PostgreSQL PostgreSQL ClickHouse dbt Docker Kubernetes AWS ETL ELT "
+    "data engineer senior lead big data machine learning"
+)
+
+
+def build_hidden_keywords() -> bytes:
+    """A well-formed resume with a white keyword block under it.
+
+    Everything above the block is ``single_column_ru.pdf``: the point of the
+    fixture is that the *only* difference is text painted the colour of the
+    paper, so a finding on it cannot be coming from anywhere else.
+    """
+
+    def draw(canvas: Canvas) -> None:
+        y = draw_column(
+            canvas,
+            SINGLE_COLUMN_RU,
+            x=48,
+            top=PAGE_HEIGHT - 60,
+            width=PAGE_WIDTH - 96,
+            leading=12.4,
+        )
+        canvas.setFillColorRGB(1, 1, 1)
+        canvas.setFont(FONT, 6)
+        for offset, chunk in enumerate(simpleSplit(HIDDEN_KEYWORDS, FONT, 6, PAGE_WIDTH - 96)):
+            canvas.drawString(48, y - 14 - offset * 7, chunk)
+
+    return render_pdf(draw)
+
+
+def build_dark_banner() -> bytes:
+    """The same resume with its name in white on a dark header band.
+
+    A common and entirely honest design, and the one thing that would make a
+    naive "white text is hidden text" check accuse somebody of cheating for
+    using a template. The fixture exists so the audit has to keep telling the
+    two apart.
+    """
+
+    def draw(canvas: Canvas) -> None:
+        canvas.setFillColorRGB(0.12, 0.16, 0.22)
+        canvas.rect(0, PAGE_HEIGHT - 96, PAGE_WIDTH, 96, stroke=0, fill=1)
+        canvas.setFillColorRGB(1, 1, 1)
+        canvas.setFont(FONT_BOLD, 18)
+        canvas.drawString(48, PAGE_HEIGHT - 46, "Игорь Образцов")
+        canvas.setFont(FONT, 11)
+        canvas.drawString(48, PAGE_HEIGHT - 66, "Data Engineer")
+        canvas.drawString(48, PAGE_HEIGHT - 82, "i.obraztsov@example.com  ·  +7 700 000 00 11")
+        canvas.setFillColorRGB(0, 0, 0)
+        draw_column(
+            canvas,
+            SINGLE_COLUMN_RU[5:],
+            x=48,
+            top=PAGE_HEIGHT - 120,
+            width=PAGE_WIDTH - 96,
+            leading=12.4,
+        )
+
+    return render_pdf(draw)
+
+
 def build_docx() -> bytes:
     """A resume whose content lives in a table, skills row included."""
     document: DocxDocument = Document()
@@ -747,6 +824,8 @@ def main() -> None:
     write("plain.txt", PLAIN_TXT.encode("utf-8"))
     write("scanned.pdf", build_scanned())
     write("image_contacts.pdf", build_image_contacts())
+    write("hidden_keywords.pdf", build_hidden_keywords())
+    write("dark_banner.pdf", build_dark_banner())
 
     expected = OUT_DIR / "two_column_ru.expected.json"
     if not expected.is_file():
