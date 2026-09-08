@@ -64,7 +64,7 @@ changes, so it stays the date an outcome was *first* seen, which is what a
 time-to-answer measurement needs.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -87,6 +87,8 @@ from app.db.models import (
     VacancySkill,
     VacancySource,
 )
+from app.resume import ats_audit
+from app.resume.ats_keywords import HeldSkill, match_requirements
 from app.schemas.agent import (
     CONTRACT_VERSION,
     AgentStatus,
@@ -97,7 +99,9 @@ from app.schemas.agent import (
     ResultAck,
     ResultsResponse,
 )
+from app.schemas.ats import ATSSummary, DocumentKind
 from app.schemas.match import MatchComponentScores, MatchedSkill, MissingSkill
+from app.services import ats as ats_service
 
 logger = get_logger(__name__)
 
@@ -159,6 +163,11 @@ async def build_queue(
         )
     ).all()
 
+    # Read once for the whole batch rather than per item: it is the same
+    # candidate for every vacancy in the queue, and the audit below needs it to
+    # tell "not written in this letter" from "not a skill this person has".
+    held = await ats_service.held_skills(session, profile)
+
     items: list[QueueItem] = []
     seen: set[UUID] = set()
     for row in rows:
@@ -170,7 +179,7 @@ async def build_queue(
         if item is None:
             continue
         seen.add(row.vacancy_id)
-        items.append(item)
+        items.append(item.model_copy(update={"ats": _ats_summary(item, row, held)}))
 
     logger.info(
         "agent.queue.served",
@@ -409,6 +418,35 @@ def _to_item(row: Any) -> QueueItem | None:
         anonymous=bool(derived.get("anonymous", False)),
         employer_on_additional_check=bool(derived.get("employer_on_additional_check", False)),
     )
+
+
+def _ats_summary(item: QueueItem, row: Any, held: Sequence[HeldSkill]) -> ATSSummary | None:
+    """The letter this item carries, audited against this vacancy.
+
+    The third of the report's three display places, and the last one: after this
+    card the next thing that happens is an application. The card gets the
+    summary rather than the report because it is printed to a console — see
+    :class:`app.schemas.ats.ATSSummary` — but it is a projection of the same
+    object the vacancy screen renders, built by the same code, so the two cannot
+    disagree.
+
+    No extra query. The requirement list is in ``row.raw``, which the queue
+    statement already selected, and the candidate's skills were read once for
+    the batch. An item with no letter has nothing to audit and gets ``None``,
+    which the card must show as "not checked" rather than as a pass.
+    """
+    if not item.letter:
+        return None
+    requirements = [
+        name.strip()
+        for name in _derived(row.raw).get("key_skills") or []
+        if isinstance(name, str) and name.strip()
+    ]
+    keywords = match_requirements(item.letter, requirements, held)
+    report = ats_audit.audit_generated(
+        item.letter, kind=DocumentKind.COVER_LETTER, keywords=keywords
+    )
+    return ATSSummary.of(report)
 
 
 def _explanation(row: Any) -> MatchExplanation:

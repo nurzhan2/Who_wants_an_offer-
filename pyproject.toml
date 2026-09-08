@@ -108,7 +108,16 @@ known-first-party = ["app", "factories", "helpers"]
 # Every finding this module reports is written for the person reading it, in
 # Russian, and the docstring quotes a real mangled extraction. RUF001/RUF002
 # fire on almost every word here and would bury a genuine homoglyph.
-"backend/app/resume/ats_audit.py" = ["RUF001", "RUF002"]
+"backend/app/resume/ats_audit.py" = ["RUF001", "RUF002", "RUF003"]
+# The same, for the module that reads a document against a vacancy's
+# requirement list: its docstring quotes the Russian spellings a keyword filter
+# fails on, which is the fact the whole module exists for.
+"backend/app/resume/ats_keywords.py" = ["RUF001", "RUF002", "RUF003"]
+"backend/tests/test_ats_keywords.py" = ["RUF001", "RUF002"]
+"backend/tests/test_ats_service.py" = ["RUF001", "RUF002"]
+# Its new cases assert on a Russian resume text layer read against a Russian
+# posting, which is the comparison the endpoint exists to make.
+"backend/tests/test_profile_api.py" = ["RUF001", "RUF002"]
 # Its assertions are about Russian resume text and the Russian findings raised
 # on it, so the same reasoning applies as for the module under test.
 "backend/tests/test_ats_audit.py" = ["RUF001", "RUF002"]

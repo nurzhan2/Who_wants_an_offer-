@@ -39,7 +39,7 @@ import json
 import sys
 import time as time_module
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, time
 from pathlib import Path
 from typing import Any
@@ -62,8 +62,8 @@ from agent.gate import InterceptionEscapedError, SubmitGate
 from agent.human import CONFIRM_WORD, CancelledError, Candidate, confirm
 from agent.journal import Entry, Journal
 from agent.letter import check as check_letter
-from agent.mandate import SendMandate, mint
-from agent.queue import QueueFormatError, QueueItem, Result
+from agent.mandate import SendMandate, digest, mint
+from agent.queue import ATSCard, QueueFormatError, QueueItem, Result
 from agent.selectors import LetterFieldUnknownError, Scope, Selector
 from agent.state import (
     Actor,
@@ -2411,3 +2411,140 @@ def test_dropping_the_only_card_leaves_the_vacancy_for_next_time(
         entry = journal.get(str(int(VACANCY) + offset))
         assert entry is not None
         assert entry.status is Status.QUEUED
+
+
+# ── the ATS report on the confirmation card ───────────────────────────
+#
+# The third and last place the backend's audit is shown, and the only one where
+# the next thing that happens is an application leaving under the owner's name.
+# The card neither computes nor edits it — the audit runs in the backend, over
+# the same report the vacancy screen renders — so what is defended here is that
+# it arrives, that it is printed in terms a person can act on, and that the one
+# thing it must never print stays unprinted.
+
+
+def a_card(**ats: object) -> str:
+    """One rendered card, carrying an ATS summary built from these fields."""
+    candidate = Candidate(
+        vacancy_id=VACANCY,
+        title="Python-разработчик",
+        company="Inspire",
+        url=PAGE_URL,
+        letter=check_letter("Здравствуйте! Работал с Python.", required=False),
+        ats=ATSCard(**ats),  # type: ignore[arg-type]
+    )
+    return candidate.render()
+
+
+def test_the_card_prints_how_much_of_the_vacancy_the_letter_names() -> None:
+    """«названо 1 из 3» is something a person can act on by dropping the item."""
+    card = a_card(overall="degraded", score=90.0, requirements_total=3, requirements_present=1)
+
+    assert "проверка ATS" in card
+    assert "1 из 3" in card
+
+
+def test_the_card_names_what_is_fixable_and_only_counts_what_is_not() -> None:
+    """The asymmetry the whole feature turns on, at the last possible moment.
+
+    A requirement the owner *has* and this letter does not mention is a letter
+    to regenerate, so it is named. A requirement they do not have stays a
+    number: a list of those, printed seconds before an application, reads as a
+    list of things to claim, and this card is the last place that could be
+    suggested.
+    """
+    card = a_card(
+        overall="degraded",
+        requirements_total=5,
+        requirements_present=2,
+        unstated=("PostgreSQL", "Docker"),
+        absent=1,
+    )
+
+    assert "PostgreSQL, Docker" in card
+    assert "требований, которых нет в профиле: 1" in card
+
+
+def test_a_letter_nobody_audited_does_not_print_as_one_that_passed() -> None:
+    """Same rule the score already follows: silence is not a pass."""
+    candidate = Candidate(
+        vacancy_id=VACANCY,
+        title="Python-разработчик",
+        company="Inspire",
+        url=PAGE_URL,
+        letter=None,
+    )
+
+    assert "проверка ATS: не выполнялась" in candidate.render()
+
+
+def test_a_critical_finding_is_printed_in_words() -> None:
+    """The card is read by a person; a finding code is for a client."""
+    card = a_card(overall="unreadable", critical=("В документе есть скрытый текст",))
+
+    assert "робот не прочитает" in card
+    assert "не прочитает: В документе есть скрытый текст" in card
+
+
+def test_an_unknown_verdict_is_printed_as_it_arrived() -> None:
+    """A backend that grows a fourth verdict must not be shown as one of three."""
+    assert "что-то новое" in a_card(overall="что-то новое")
+
+
+def test_the_audit_is_bound_into_the_mandate() -> None:
+    """Anything on the card is part of what was approved.
+
+    The mandate is a digest of the rendered text, so a decision made while
+    reading «названо 1 из 9» cannot be reused for a payload that no longer
+    carries it. That is the rule ``Candidate.render`` states about every field,
+    and it has to hold for this one too.
+    """
+    quiet = Candidate(
+        vacancy_id=VACANCY,
+        title="Python-разработчик",
+        company="Inspire",
+        url=PAGE_URL,
+        letter=check_letter("Здравствуйте! Работал с Python.", required=False),
+    )
+    audited = replace(
+        quiet, ats=ATSCard(overall="degraded", requirements_total=9, requirements_present=1)
+    )
+
+    assert digest(quiet.render()) != digest(audited.render())
+
+
+def test_a_summary_the_backend_did_not_send_is_not_invented() -> None:
+    """An item whose audit did not run must not parse into one that passed."""
+    assert ATSCard.from_json(None) is None
+    assert ATSCard.from_json({"score": 100}) is None
+    assert ATSCard.from_json({"overall": "ok"}) == ATSCard(overall="ok")
+
+
+def test_the_summary_survives_the_queue_wire() -> None:
+    """It reaches the card through ``QueueItem``, so it is parsed there."""
+    item = QueueItem.from_json(
+        {
+            "vacancy_id": VACANCY,
+            "url": PAGE_URL,
+            "title": "Python-разработчик",
+            "ats": {
+                "overall": "degraded",
+                "score": 90,
+                "unstated": ["PostgreSQL"],
+                "requirements_total": 3,
+                "requirements_present": 2,
+                "absent": 0,
+            },
+        }
+    )
+
+    assert item.ats is not None
+    assert item.ats.unstated == ("PostgreSQL",)
+    assert item.ats.requirements_present == 2
+
+
+def test_an_older_backend_that_sends_no_summary_still_parses() -> None:
+    """The wire stays additive in the direction the contract allows."""
+    item = QueueItem.from_json({"vacancy_id": VACANCY, "url": PAGE_URL, "title": "x"})
+
+    assert item.ats is None

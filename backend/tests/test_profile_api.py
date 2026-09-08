@@ -32,10 +32,11 @@ from app.core.exceptions import PROBLEM_JSON
 from app.db.enums import ParseStatus, Seniority, SkillLevel
 from app.db.models import CandidateProfile, ProfileSkill
 from app.db.repositories.profile import ProfileRepository
+from app.db.repositories.vacancy import VacancyRepository
 from app.db.session import get_session
 from app.schemas.ats import ATSReport, Finding, FindingCode, Severity
 from app.schemas.profile import CandidateProfileUpdate
-from factories import make_profile
+from factories import make_profile, make_vacancy
 
 PROFILES_URL = "/api/v1/profile"
 
@@ -545,3 +546,88 @@ async def test_the_profile_response_does_not_carry_the_report(
     body = (await async_client.get(url_for(reserved.id))).json()
 
     assert "ats_report" not in body
+
+
+# ── GET /{id}/ats-report/{vacancy_id} ─────────────────────────────────
+#
+# The same audit, read against one vacancy's requirement list. One endpoint
+# rather than one per screen: the vacancy page, the preview before a document is
+# generated and the confirmation card before an application are three views of
+# one question, and three endpoints would eventually answer it three ways.
+
+
+def vacancy_ats_url(profile_id: UUID | str, vacancy_id: UUID | str) -> str:
+    """The audit of one profile's resume against one vacancy."""
+    return f"{PROFILES_URL}/{profile_id}/ats-report/{vacancy_id}"
+
+
+@pytest_asyncio.fixture
+async def scored_vacancy(db_session: AsyncSession) -> UUID:
+    """A posting whose payload carries the employer's own spellings."""
+    upserted = await VacancyRepository(db_session).upsert_by_external_id(
+        make_vacancy("profile-api-ats"),
+        source_slug="hh",
+        external_id="hh-profile-api-ats",
+        url="https://e.test/profile-api-ats",
+        raw={"_derived": {"key_skills": ["Python", "PostgreSQL", "Kubernetes"]}},
+    )
+    await db_session.flush()
+    return upserted.vacancy_id
+
+
+@pytest.mark.db
+async def test_the_vacancy_report_answers_in_three_buckets(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+    profile: CandidateProfile,
+    scored_vacancy: UUID,
+) -> None:
+    """What the screen renders, and the distinction it has to keep.
+
+    The profile holds python and postgresql and its text names only Python, so
+    one requirement is covered, one is a line to rewrite, and one is not
+    something any document can fix. Those are three different sentences in the
+    interface, so they are three different values here.
+    """
+    # The keyword half reads ``raw_text``, because that is the text layer an
+    # employer's parser is given — the same one the structural half measured.
+    profile.raw_text = "Backend-инженер. Опыт: Python, Docker. Работал с постгрес."
+    await profiles.set_ats_report(profile.id, CLEAN_REPORT)
+    await db_session.flush()
+
+    response = await async_client.get(vacancy_ats_url(profile.id, scored_vacancy))
+
+    assert response.status_code == 200
+    reported = response.json()["keywords"]["requirements"]
+    statuses = {item["requirement"]: item["status"] for item in reported}
+    assert statuses == {"Python": "present", "PostgreSQL": "unstated", "Kubernetes": "absent"}
+
+
+@pytest.mark.db
+async def test_the_vacancy_report_still_carries_the_structural_half(
+    async_client: AsyncClient,
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+    profile: CandidateProfile,
+    scored_vacancy: UUID,
+) -> None:
+    """One report, not two. The file's own defects do not disappear."""
+    await profiles.set_ats_report(profile.id, SCAN_REPORT)
+    await db_session.flush()
+
+    body = (await async_client.get(vacancy_ats_url(profile.id, scored_vacancy))).json()
+
+    assert body["overall"] == "unreadable"
+    assert [f["code"] for f in body["findings"]] == [FindingCode.NO_TEXT_LAYER.value]
+
+
+@pytest.mark.db
+async def test_a_profile_with_no_stored_audit_is_a_404_here_too(
+    async_client: AsyncClient, profile: CandidateProfile, scored_vacancy: UUID
+) -> None:
+    """Absence of an audit is not a clean audit, on either endpoint."""
+    response = await async_client.get(vacancy_ats_url(profile.id, scored_vacancy))
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith(PROBLEM_JSON)

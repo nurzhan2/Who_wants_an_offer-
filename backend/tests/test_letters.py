@@ -61,6 +61,7 @@ from app.db.models import Application, VacancySkill
 from app.db.repositories import MatchRepository, ProfileRepository, VacancyRepository
 from app.letters import examples as few_shot
 from app.letters import prompt as prompt_builder
+from app.letters import service as letters_service
 from app.letters import store
 from app.letters.context import (
     ProfileFacts,
@@ -86,6 +87,7 @@ from app.letters.examples import (
 )
 from app.letters.generator import (
     CoverLetterDraft,
+    GeneratedLetter,
     LetterUnwritableError,
     compose_fallback,
     generate,
@@ -105,6 +107,7 @@ from app.llm import prompts
 from app.llm.base import LLMResult, LLMTask, LLMUsage
 from app.llm.router import LLMRouter
 from app.resume.skills import default_canonicalizer
+from app.schemas.ats import DocumentKind, DocumentOrigin, FindingCode
 from factories import make_match, make_profile, make_upsert_item, make_vacancy
 
 #: A letter long enough to clear the "this is not a letter" floor, so a test
@@ -1828,3 +1831,104 @@ async def test_a_run_with_no_outcomes_asks_the_model_exactly_what_it_used_to(
     assert outcome.evidence.sent == 1
     assert outcome.evidence.answered == 0
     assert outcome.evidence.positive == 0
+
+
+# ── the system checking its own output ────────────────────────────────
+#
+# Every check above asks whether the letter obeys the rules about letters. These
+# ask the other question: what does an employer's parser get out of the text
+# this run produced, and against the requirement list of the vacancy it was
+# written for. The audit runs before the save rather than on the way to a
+# screen, so a document that fails it never becomes a thing a person can send by
+# clicking once.
+
+
+@pytest.mark.db
+async def test_a_saved_letter_carries_its_own_ats_audit(
+    db_session: AsyncSession, vacancies: VacancyRepository, profiles: ProfileRepository
+) -> None:
+    """The report travels with the outcome, read against this vacancy.
+
+    Requirement 1 and requirement 2 of the brief meeting in one place: the audit
+    is applied to a document the system wrote, and it is applied *against the
+    posting*, so what it reports is which of this employer's own words the
+    letter says.
+    """
+    created = await profiles.create(make_profile(skills=("python",)))
+    upserted = await vacancies.upsert_by_external_id(
+        make_vacancy("letters-ats"),
+        source_slug="hh",
+        external_id="hh-ats",
+        url="https://e.test/ats",
+        raw={"_derived": {"key_skills": ["Python", "Kubernetes"]}},
+    )
+    profile = await store.load_profile_facts(db_session, created.id)
+    assert profile is not None
+
+    outcome = await write_letter(
+        db_session, upserted.vacancy_id, profile, router=FakeRouter(LLMError("no provider"))
+    )
+
+    assert outcome.saved is True
+    assert outcome.ats is not None
+    assert outcome.ats.origin is DocumentOrigin.GENERATED
+    assert outcome.ats.document_kind is DocumentKind.COVER_LETTER
+    assert outcome.ats.keywords is not None
+    # Kubernetes is not in the profile, so it is reported and nothing is
+    # suggested about it. Python is, so the letter is expected to name it.
+    assert {r.requirement for r in outcome.ats.keywords.absent} == {"Kubernetes"}
+
+
+@pytest.mark.db
+async def test_a_letter_that_fails_its_own_audit_is_not_saved(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hidden characters reaching a letter are not saved and not reported quiet.
+
+    A letter is written from a job description somebody else wrote, so an
+    invisible keyword block in the text is a thing that arrived rather than a
+    thing anyone chose — and it would go out under the owner's name. The module
+    already refuses to save a letter that breaks a hard constraint; this is one.
+    """
+    created = await profiles.create(make_profile(skills=("python",)))
+    upserted = await vacancies.upsert_by_external_id(
+        make_vacancy("letters-hidden"),
+        source_slug="hh",
+        external_id="hh-hidden",
+        url="https://e.test/hidden",
+        raw={"_derived": {"key_skills": ["Python"]}},
+    )
+    profile = await store.load_profile_facts(db_session, created.id)
+    assert profile is not None
+
+    smuggled = "Здравствуйте! Работал с Python.​​​​Kubernetes Kafka Spark"
+    monkeypatch.setattr(
+        letters_service,
+        "generate",
+        _returns(GeneratedLetter(text=smuggled, language="ru", source="model", attempts=1)),
+    )
+
+    outcome = await write_letter(db_session, upserted.vacancy_id, profile)
+
+    assert outcome.skipped == "letter_failed_audit"
+    assert outcome.saved is False
+    assert outcome.ats is not None
+    assert FindingCode.HIDDEN_TEXT in {f.code for f in outcome.ats.findings}
+    assert await store.existing_letter(db_session, upserted.vacancy_id) is None
+
+
+def _returns(letter: GeneratedLetter) -> Any:
+    """A stand-in for :func:`app.letters.generator.generate`.
+
+    Patched rather than coaxed out of the real generator: the text needed here
+    is one an honest generator will not produce, which is the point — it models
+    text arriving from the posting rather than from us.
+    """
+
+    async def _generate(*_args: Any, **_kwargs: Any) -> GeneratedLetter:
+        return letter
+
+    return _generate

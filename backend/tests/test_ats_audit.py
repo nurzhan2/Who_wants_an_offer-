@@ -32,7 +32,14 @@ import pytest
 from app.core.config import settings
 from app.resume import ats_audit, extractor
 from app.resume.ats_audit import PageFacts
-from app.schemas.ats import ATSReport, FindingCode, Overall, Severity
+from app.schemas.ats import (
+    ATSReport,
+    DocumentKind,
+    DocumentOrigin,
+    FindingCode,
+    Overall,
+    Severity,
+)
 from app.schemas.llm import ExtractedSkill, ProfileExtraction, WorkPeriod
 
 pytestmark = pytest.mark.unit
@@ -559,3 +566,237 @@ def test_a_line_carrying_a_heading_part_way_along_is_not_trusted() -> None:
 
     assert any("Северный Компас" in line for line in lines)
     assert not any("Тихий Пеликан" in line for line in lines)
+
+
+# ── the boundary: what the audit refuses to teach ─────────────────────
+#
+# The brief that added these checks drew a line and asked for it to be defended
+# by a test rather than by a paragraph. An audit of "will a robot read this"
+# sits one short step from "here is how to fool the robot": the advice is
+# everywhere, it works on the crudest filters, and a coverage number is exactly
+# the thing it optimises. So the two tests below assert the refusal directly —
+# the trick is reported as a defect, and no finding the audit can raise ever
+# suggests it.
+
+
+def test_hidden_keywords_are_reported_as_a_defect() -> None:
+    """White text under a resume is the trick, and it must read as a problem.
+
+    The fixture is ``single_column_ru.pdf`` with one addition: a keyword block
+    painted the colour of the paper. That file scores 100 with nothing reported,
+    so every part of this finding comes from the hidden block and from nothing
+    else.
+    """
+    report = audit_fixture("hidden_keywords.pdf")
+    finding = next(f for f in report.findings if f.code is FindingCode.HIDDEN_TEXT)
+
+    assert finding.severity is Severity.CRITICAL
+    assert not report.is_machine_readable
+    assert report.score < 100
+    # The fix says to delete it, not to make it subtler.
+    assert "Удали" in finding.fix
+
+
+def test_white_text_on_a_dark_banner_is_not_hidden_text() -> None:
+    """The false positive that would make the check unusable.
+
+    A dark header band with the candidate's name in white is a template, not a
+    trick, and accusing somebody of cheating for using one is worse than missing
+    a real case: it is an audit telling them to rebuild a file that was fine.
+    """
+    report = audit_fixture("dark_banner.pdf")
+
+    assert FindingCode.HIDDEN_TEXT not in codes(report)
+    assert report.score == 100
+
+
+def test_invisible_characters_in_plain_text_are_caught_too() -> None:
+    """A cover letter has no colours; it can still carry a hidden block.
+
+    Zero-width characters survive a paste into a web form, and the text they are
+    threaded through was written from a job description somebody else wrote.
+    """
+    stuffed = "Опыт: Python, SQL.​​​​Kubernetes Kafka Spark"
+    finding = ats_audit.check_hidden_text([page(stuffed)])
+
+    assert finding is not None
+    assert finding.code is FindingCode.HIDDEN_TEXT
+
+
+def test_keyword_stuffing_is_reported_rather_than_rewarded() -> None:
+    """The other half of the boundary.
+
+    Repetition is what a document optimising for a coverage number converges on,
+    so the audit that produces that number has to be the thing that catches it.
+    """
+    finding = ats_audit.check_stuffing([page("Python " * 20 + "SQL Docker Kafka")])
+
+    assert finding is not None
+    assert finding.code is FindingCode.KEYWORD_STUFFING
+    assert "python" in (finding.example_fragment or "")
+
+
+def test_a_short_run_of_one_word_is_stuffing_even_when_the_total_is_small() -> None:
+    """A total count cannot catch a block; four in a row is not a sentence."""
+    block = page("бэкенд разработчик Kafka Kafka Kafka Kafka")
+    assert ats_audit.check_stuffing([block]) is not None
+    assert ats_audit.check_stuffing([page("Kafka Kafka Kafka в трёх проектах")]) is None
+
+
+NEVER_SUGGEST = ("белым", "невидим", "скрыт", "мелким шрифтом", "повтори", "набей", "добав ключев")
+
+
+def test_no_finding_ever_advises_gaming_the_parser() -> None:
+    """Every fix the audit can print, read for the advice it must never give.
+
+    Asserted over the findings actually raised by every fixture rather than over
+    a list of strings maintained by hand: a check added later comes with its own
+    wording, and a rule that only covers the wording that existed when it was
+    written is a rule that stops holding on the day it matters.
+    """
+    raised = [
+        finding
+        for name in (*ALL_FIXTURES, "hidden_keywords.pdf", "dark_banner.pdf")
+        for finding in audit_fixture(name).findings
+    ]
+    assert raised, "no findings to check — the fixtures stopped raising any"
+
+    for finding in raised:
+        advice = f"{finding.title} {finding.explanation} {finding.fix}".casefold()
+        # The one legitimate use of these words is the finding that reports the
+        # trick, which necessarily names it.
+        if finding.code is FindingCode.HIDDEN_TEXT:
+            continue
+        for phrase in NEVER_SUGGEST:
+            assert phrase not in advice, f"{finding.code}: {advice}"
+
+
+# ── the checks the brief asked for on top of the existing ones ────────
+
+
+def test_mixed_date_formats_are_reported() -> None:
+    """Two habits in one document, not one typo."""
+    mixed = page("04.2022 — 09.2023\nмарт 2019 — январь 2020\nфевраль 2018 — май 2018")
+    assert ats_audit.check_date_format([mixed]) is not None
+
+    consistent = page("04.2022 — 09.2023\n01.2019 — 03.2020\n02.2018 — 05.2018")
+    assert ats_audit.check_date_format([consistent]) is None
+
+
+def test_one_stray_date_in_another_format_is_not_worth_an_instruction() -> None:
+    """Below the threshold on purpose: a rule that fires on everything is noise."""
+    almost = page("04.2022 — 09.2023\n01.2019 — 03.2020\nдиплом: июнь 2016")
+    assert ats_audit.check_date_format([almost]) is None
+
+
+def test_length_is_reported_at_both_ends() -> None:
+    """Too little to match against, or long enough that the import truncates."""
+    assert ats_audit.check_length([page("слово " * 40)]) is not None
+    assert ats_audit.check_length([page("слово " * 2000)]) is not None
+    assert ats_audit.check_length([page("слово " * 400)]) is None
+    # An empty document is the no-text-layer finding's business, not this one's.
+    assert ats_audit.check_length([page("")]) is None
+
+
+def test_employment_gaps_are_reported_without_advising_a_cover_up() -> None:
+    """A gap is a fact about a life. The audit says what the arithmetic does."""
+    extraction = ProfileExtraction(
+        work_periods=[
+            WorkPeriod(company="Северный Компас", title="DE", start="2018-01", end="2019-06"),
+            WorkPeriod(company="Тихий Пеликан", title="DE", start="2021-03", end="2023-04"),
+        ]
+    )
+    finding = ats_audit.check_gaps(extraction)
+
+    assert finding is not None
+    assert finding.severity is Severity.INFO
+    # Costs nothing: it is not a defect in the document.
+    assert finding.penalty == 0
+    assert "не нужно" in finding.fix
+
+
+def test_touching_periods_raise_no_gap() -> None:
+    """The check has to stay quiet on an ordinary career."""
+    extraction = ProfileExtraction(
+        work_periods=[
+            WorkPeriod(company="Северный Компас", title="DE", start="2018-01", end="2019-06"),
+            WorkPeriod(company="Тихий Пеликан", title="DE", start="2019-08", end="2023-04"),
+        ]
+    )
+    assert ats_audit.check_gaps(extraction) is None
+
+
+# ── auditing what the system wrote itself ─────────────────────────────
+
+
+def test_a_generated_letter_is_audited_with_the_letter_checks_only() -> None:
+    """A cover letter has no sections and no dates, so it is not asked for them.
+
+    Running the resume check set over one would report four defects on a
+    perfectly good letter, and an audit that cries wolf on the wrong document is
+    one nobody reads on the right one.
+    """
+    report = ats_audit.audit_generated(
+        "Здравствуйте! Работал с Python и PostgreSQL в двух проектах.",
+        kind=DocumentKind.COVER_LETTER,
+    )
+
+    assert report.origin is DocumentOrigin.GENERATED
+    assert report.document_kind is DocumentKind.COVER_LETTER
+    assert set(report.checks_run) == {FindingCode.HIDDEN_TEXT, FindingCode.KEYWORD_STUFFING}
+    assert report.findings == []
+    assert report.score == 100
+
+
+def test_a_generated_letter_carrying_a_hidden_block_fails_its_own_audit() -> None:
+    """The point of turning the audit on our own output."""
+    report = ats_audit.audit_generated(
+        "Здравствуйте!​​​​​Python Kubernetes Kafka",
+        kind=DocumentKind.COVER_LETTER,
+    )
+
+    assert not report.is_machine_readable
+    assert FindingCode.HIDDEN_TEXT in codes(report)
+
+
+def test_a_generated_resume_gets_the_text_level_checks() -> None:
+    """The kind picks the checks, so the caller cannot pick the flattering set."""
+    report = ats_audit.audit_generated("текст " * 200, kind=DocumentKind.RESUME)
+
+    assert FindingCode.MISSING_SECTIONS in report.checks_run
+    assert FindingCode.CONTACTS_NOT_TEXT in report.checks_run
+
+
+def test_checks_run_never_claims_a_comparison_that_did_not_happen() -> None:
+    """Absence of a comparison must not read as a clean one."""
+    without = audit_fixture("single_column_ru.pdf")
+    assert FindingCode.REQUIREMENTS_NOT_NAMED not in without.checks_run
+    assert FindingCode.CONTENT_LOST not in without.checks_run
+    assert without.keywords is None
+
+
+def test_a_report_stored_before_these_fields_existed_still_validates() -> None:
+    """The models are a JSONB column, so adding a field is a schema change.
+
+    Every report already written to ``candidate_profile.ats_report`` has to keep
+    loading, and has to load as what it actually was — an uploaded resume,
+    compared against no vacancy. A new field that defaulted to anything else
+    would silently retitle history.
+    """
+    stored = {
+        "score": 88,
+        "findings": [],
+        "checks_run": ["TEXT_IN_TABLES"],
+        "sections_detected": ["skills"],
+        "coverage": None,
+        "source_format": "pdf",
+        "page_count": 1,
+        "word_count": 204,
+    }
+
+    report = ATSReport.model_validate(stored)
+
+    assert report.keywords is None
+    assert report.document_kind is DocumentKind.RESUME
+    assert report.origin is DocumentOrigin.UPLOADED
+    assert report.overall is Overall.OK

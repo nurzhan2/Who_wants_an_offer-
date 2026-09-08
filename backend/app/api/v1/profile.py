@@ -11,6 +11,7 @@ from app.db.session import get_session
 from app.schemas.ats import ATSReport
 from app.schemas.contact import ProfileContactRead, ProfileContactUpdate
 from app.schemas.profile import CandidateProfileRead, CandidateProfileUpdate
+from app.services import ats as ats_service
 from app.services import contacts as contact_service
 from app.services import resume as resume_service
 
@@ -165,3 +166,35 @@ async def update_contacts(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
     await session.commit()
     return updated
+
+
+@router.get(
+    "/{profile_id}/ats-report/{vacancy_id}",
+    response_model=ATSReport,
+    summary="The same audit, read against one vacancy's requirements",
+)
+async def read_ats_report_for_vacancy(
+    profile_id: UUID,
+    vacancy_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> ATSReport:
+    """Return the readability audit plus what this vacancy asks for.
+
+    The same object as the endpoint above, with its keyword half filled in.
+    One endpoint rather than one per screen: the vacancy page, the preview
+    before a document is generated and the confirmation card before an
+    application is sent are three views of one question, and three endpoints
+    would eventually answer it three ways.
+
+    The three buckets in ``keywords`` are not three degrees of the same thing.
+    ``unstated`` is fixable by regenerating a document from the profile that is
+    already stored; ``absent`` is not fixable by writing anything, and no part
+    of this response suggests otherwise.
+    """
+    report = await ats_service.report_for_vacancy(session, profile_id, vacancy_id)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No ATS report recorded for this profile",
+        )
+    return report
