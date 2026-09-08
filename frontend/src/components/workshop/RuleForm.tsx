@@ -40,8 +40,8 @@ const CREATABLE: RuleKind[] = [
 ]
 
 const FIELD =
-  'w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none'
-const LABEL = 'block text-xs font-medium uppercase tracking-wide text-slate-500'
+  'w-full rounded-md border border-slate-300 px-3 py-2 text-sm text-ink focus:border-slate-500 focus:outline-none'
+const LABEL = 'block text-xs font-medium uppercase tracking-wide text-muted'
 
 interface Props {
   busy: boolean
@@ -104,7 +104,7 @@ export function RuleForm({ busy, error, onSubmit }: Props) {
         onSubmit({ scope, severity, params: params(), message })
       }}
     >
-      <h3 className="text-sm font-semibold text-slate-900">Новое правило</h3>
+      <h3 className="text-sm font-semibold text-ink">Новое правило</h3>
 
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="space-y-1">
@@ -153,7 +153,7 @@ export function RuleForm({ busy, error, onSubmit }: Props) {
         </label>
       </div>
 
-      <p className="text-xs text-slate-500">{SEVERITY_HINTS[severity]}</p>
+      <p className="text-xs text-muted">{SEVERITY_HINTS[severity]}</p>
 
       <div className="grid gap-3 sm:grid-cols-2">
         {usesSection && (
@@ -248,14 +248,14 @@ export function RuleForm({ busy, error, onSubmit }: Props) {
           placeholder="В навыках не меньше 21 пункта"
           required
         />
-        <span className="block text-xs text-slate-500">
+        <span className="block text-xs text-muted">
           Этот текст видите только вы. Модели его не показывают — она получает описание,
           собранное из полей выше.
         </span>
       </label>
 
       {error != null && (
-        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-ink">
           <p>{error instanceof Error ? error.message : 'Не удалось сохранить правило'}</p>
           {claims.length > 0 && (
             <p className="mt-2 text-xs">

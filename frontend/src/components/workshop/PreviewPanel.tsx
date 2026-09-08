@@ -26,7 +26,7 @@ interface Props {
 
 function Violations({ title, tone, items }: { title: string; tone: 'red' | 'amber'; items: Violation[] }) {
   const tones = {
-    red: 'border-red-200 bg-red-50 text-red-900',
+    red: 'border-red-200 bg-red-50 text-ink',
     amber: 'border-amber-200 bg-amber-50 text-amber-900',
   }
   return (
@@ -51,8 +51,8 @@ export function PreviewPanel({ vacancies, query, onQuery, busy, error, preview, 
   return (
     <section className="space-y-4 rounded-lg border border-slate-200 bg-white p-4">
       <div>
-        <h3 className="text-sm font-semibold text-slate-900">Предпросмотр</h3>
-        <p className="mt-1 text-sm text-slate-600">
+        <h3 className="text-sm font-semibold text-ink">Предпросмотр</h3>
+        <p className="mt-1 text-sm text-muted">
           Пробное письмо по текущим правилам и эталонам, на любой вакансии из базы. Ничего не
           сохраняется — в очередь откликов это письмо не попадёт.
         </p>
@@ -91,14 +91,14 @@ export function PreviewPanel({ vacancies, query, onQuery, busy, error, preview, 
       </button>
 
       {error != null && (
-        <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+        <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-ink">
           {error instanceof Error ? error.message : 'Не удалось сгенерировать письмо'}
         </p>
       )}
 
       {preview && (
         <div className="space-y-3">
-          <p className="text-xs text-slate-500">
+          <p className="text-xs text-muted">
             Правил применено: {preview.rules_applied} · эталонов показано:{' '}
             {preview.references_used} · прошлых писем в примерах: {preview.examples_used}
             {preview.written && ` · попыток: ${String(preview.attempts)}`}
@@ -117,7 +117,7 @@ export function PreviewPanel({ vacancies, query, onQuery, busy, error, preview, 
           )}
 
           {!preview.written && preview.detail && (
-            <p className="text-xs text-slate-500">{preview.detail}</p>
+            <p className="text-xs text-muted">{preview.detail}</p>
           )}
 
           {preview.warnings.length > 0 && (
@@ -129,7 +129,7 @@ export function PreviewPanel({ vacancies, query, onQuery, busy, error, preview, 
           )}
 
           {preview.written && preview.text && (
-            <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800">
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-ink">
               {preview.text}
             </pre>
           )}

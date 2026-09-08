@@ -1,0 +1,129 @@
+/**
+ * The Russian a person reads, and the one place vocabularies are translated.
+ *
+ * Two of these maps are *ours* and closed — the match buckets, the run statuses
+ * — so an unknown key in them is a bug and shows as the raw value rather than
+ * as a friendly guess.
+ *
+ * One of them is not ours at all. `hh_last_state` is hh's own vocabulary, it is
+ * open, and hh adds to it; the backend passes it through verbatim for exactly
+ * that reason. So :func:`outcomeLabel` translates what it recognises and shows
+ * the rest as hh wrote it. A state we have never seen must reach the screen
+ * looking like a state we have never seen, not like "нет ответа".
+ */
+
+import type { ApplicationStatus, Bucket, ParseStatus, Remote, RunStatus } from '@/types/api'
+
+export const BUCKETS: Record<Bucket, string> = {
+  apply_now: 'откликаться сейчас',
+  strong: 'сильное совпадение',
+  stretch: 'дотянуться можно',
+  skip: 'мимо',
+  filtered: 'отсеяно фильтром',
+}
+
+export const RUN_STATUS: Record<RunStatus, string> = {
+  running: 'идёт',
+  success: 'успех',
+  partial: 'частично',
+  failed: 'сбой',
+}
+
+export const PARSE_STATUS: Record<ParseStatus, string> = {
+  pending: 'разбирается',
+  ready: 'разобрано',
+  failed: 'не разобрано',
+}
+
+export const REMOTE: Record<Remote, string> = {
+  no: 'офис',
+  hybrid: 'гибрид',
+  full: 'удалённо',
+}
+
+export const APPLICATION_STATUS: Record<ApplicationStatus, string> = {
+  saved: 'отложено',
+  applied: 'отправлено',
+  screening: 'скрининг',
+  interview: 'интервью',
+  offer: 'оффер',
+  rejected: 'отказ',
+}
+
+/** The board's own columns: where an application is in *this* project. */
+export const STAGES: Record<string, string> = {
+  queued: 'в очереди',
+  needs_manual: 'нужен человек',
+  sent: 'отправлено',
+  other: 'вне очереди',
+}
+
+export const STAGE_NOTES: Record<string, string> = {
+  queued: 'Письмо написано, ждёт подтверждения в CLI.',
+  needs_manual: 'Агент остановился и оставил причину.',
+  sent: 'Агент записал отправку: есть дата и текст письма.',
+  other: 'Строки, заведённые руками: ни в очереди, ни отправленные.',
+}
+
+/** What hh has said, grouped by the backend into four answers plus a fallback. */
+export const OUTCOMES: Record<string, string> = {
+  viewed: 'просмотрен',
+  waiting: 'ожидание',
+  invitation: 'приглашение',
+  rejection: 'отказ',
+  other: 'другое',
+}
+
+/** hh's own state names, for the ones that have actually been observed. */
+const HH_STATES: Record<string, string> = {
+  RESPONSE: 'просмотрен',
+  VIEWED: 'просмотрен',
+  PENDING: 'ожидание',
+  NEW: 'новый',
+  INVITATION: 'приглашение',
+  INTERVIEW: 'интервью',
+  PHONE_INTERVIEW: 'телефонное интервью',
+  DISCARD: 'отказ',
+  REJECTED: 'отказ',
+}
+
+export function outcomeLabel(state: string | null): string | null {
+  if (!state) return null
+  // Unknown states are shown as hh wrote them. hh's vocabulary is open, and a
+  // fallback of "нет ответа" would turn an outcome we have not seen before into
+  // the absence of one.
+  return HH_STATES[state] ?? state
+}
+
+export const EVIDENCE: Record<string, string> = {
+  other_profile: 'есть в другом резюме',
+  resume_text: 'названо в тексте этого CV',
+}
+
+export const SKILL_LEVEL: Record<string, string> = {
+  basic: 'базово',
+  working: 'уверенно',
+  strong: 'сильно',
+  expert: 'экспертно',
+}
+
+export const ATS_OVERALL: Record<string, string> = {
+  ok: 'читается',
+  degraded: 'читается частично',
+  unreadable: 'не читается',
+}
+
+export const ATS_SEVERITY: Record<string, string> = {
+  critical: 'критично',
+  warning: 'предупреждение',
+  info: 'к сведению',
+}
+
+/** Why the workshop wrote nothing. Each is an answer, not a failure. */
+export const SKIPPED: Record<string, string> = {
+  vacancy_not_found: 'Вакансия исчезла из базы.',
+  letter_exists: 'Письмо уже написано — нажмите «переписать», чтобы заменить.',
+  dry_run: 'Пробный запуск: ничего не сохранено.',
+  letter_unwritable: 'Ни один вариант не прошёл проверки. Ничего не сохранено.',
+  no_active_profile: 'Нет активного резюме.',
+}

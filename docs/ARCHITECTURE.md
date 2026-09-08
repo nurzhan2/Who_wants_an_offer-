@@ -562,9 +562,12 @@ pipeline_run
 
 ## API (v1)
 
+Что реализовано:
+
 ```
 POST   /api/v1/resume/upload          multipart → profile_id, задача разбора
 GET    /api/v1/profile/active         профиль, против которого всё считается
+GET    /api/v1/profile/active         активное резюме, без знания его id
 GET    /api/v1/profile/{id}
 GET    /api/v1/profile/{id}/ats-report   прочитает ли резюме робот работодателя
 GET    /api/v1/profile/{id}/ats-report/{vacancy_id}  то же + требования вакансии
@@ -573,15 +576,18 @@ GET    /api/v1/profile/{id}/contacts  контактный блок: ФИО, т�
 PATCH  /api/v1/profile/{id}/contacts  ручная правка контактов
 POST   /api/v1/profile/{id}/rescore   пересчёт матчей
 
-GET    /api/v1/vacancies              фильтры + пагинация + сортировка
-GET    /api/v1/vacancies/{id}
-GET    /api/v1/vacancies/{id}/match   полный разбор соответствия
-POST   /api/v1/vacancies/{id}/cover-letter
+GET    /api/v1/overview               экран «Обзор» целиком, одним запросом
+GET    /api/v1/vacancies              фильтры + keyset-пагинация + фасеты
+GET    /api/v1/vacancies/{id}         карточка: score, требования, письмо
+GET    /api/v1/tracker/board          канбан откликов: этапы и исходы
+GET    /api/v1/documents              резюме с ATS-отчётом и все письма
+GET    /api/v1/documents/queue        вакансии, которым стоит написать письмо
+POST   /api/v1/documents/letters      написать письмо и сохранить его
 
 GET    /api/v1/sources                список, статус, лимиты, причина неактивности
-POST   /api/v1/pipeline/run           ручной запуск, ?source=&dry_run=&force=
-GET    /api/v1/pipeline/runs          история прогонов
-GET    /api/v1/pipeline/runs/{id}
+POST   /api/v1/pipeline/run           ставит краул в очередь, отдаёт job
+GET    /api/v1/pipeline/jobs[/{id}]   опрос запущенного краула
+GET    /api/v1/pipeline/runs[/{id}]   история прогонов
 
 GET    /api/v1/analytics/skill-gaps   топ недостающих скиллов по рынку
 GET    /api/v1/analytics/salary       распределение по совпадающим вакансиям
@@ -625,3 +631,40 @@ GET    /api/v1/documents/{id}/file                   скачать версию
 `city`, `country`, `salary_min`, `currency`, `seniority`, `posted_within_days`,
 `has_salary`, `missing_skills_max`, `company`, `q` (полнотекст),
 `exclude_applied`, `sort` (`score|published_at|salary`).
+GET    /api/v1/applications/queue     ← локальный агент, только по токену
+POST   /api/v1/applications/results   ← он же, отчёт об отправке
+```
+
+Ещё не написано: `POST /profile/{id}/rescore`, `/analytics/skill-gaps`,
+`/analytics/salary`, ручное редактирование трекера.
+
+**Дашборд не отправляет отклики и не будет.** Отправка — `wwao apply --send`,
+где письмо печатается на карточке подтверждения и человек за клавиатурой
+говорит «да» этому письму для этой вакансии; браузер такой гарантии не даёт.
+Единственная запись, которую делает дашборд, — `POST /documents/letters`, и она
+создаёт документ. Приложение-агент живёт за отдельным префиксом
+`/applications` под локальным токеном именно поэтому: экран и шов к агенту не
+делят пространство имён.
+
+Фильтры `/vacancies` — одна Pydantic-модель `VacancyQuery`, разложенная в
+query-параметры: `score_min`, `score_max`, `bucket`, `source`, `remote`,
+`city`, `country`, `salary_min`, `include_unpriced`, `currency`, `seniority`,
+`posted_within_days`, `has_salary`, `missing_skills_max`, `company`, `q`
+(полнотекст), `exclude_applied`, `include_filtered`, `sort`
+(`score|published_at|salary`), `direction`, плюс `cursor`, `limit`,
+`with_total`, `with_facets`.
+
+Две подробности этой модели стоят того, чтобы их знать.
+
+*`include_unpriced` по умолчанию `true`.* `salary_min_normalized >= x` ложно для
+NULL, а пять вакансий из шести на этом корпусе зарплату не называют, так что
+порог сам по себе отвечает шестой — молча. Читающий такой список делает вывод о
+рынке, а не о поле. `include_unpriced=false` — это другой вопрос, и его задают
+осознанно.
+
+*Модель одна на весь хендлер, и это не стиль.* FastAPI раскладывает
+Pydantic-модель в отдельные query-параметры только пока она — единственное
+query-поле обработчика. Рядом с обычным `limit` та же модель молча становится
+одним непрозрачным параметром: все фильтры игнорируются, ответ 200. Поэтому
+пагинация лежит внутри `VacancyQuery`, а `.filters()` отдаёт репозиторию только
+фильтрующую половину.

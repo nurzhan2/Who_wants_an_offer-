@@ -56,9 +56,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import LLMError
 from app.db.base import uuid7
-from app.db.enums import ApplicationStatus
+from app.db.enums import ApplicationStatus, RuleScope
 from app.db.models import Application, VacancySkill
 from app.db.repositories import MatchRepository, ProfileRepository, VacancyRepository
+from app.documents.rules import version as _rules_version
 from app.letters import examples as few_shot
 from app.letters import prompt as prompt_builder
 from app.letters import service as letters_service
@@ -109,6 +110,11 @@ from app.llm.router import LLMRouter
 from app.resume.skills import default_canonicalizer
 from app.schemas.ats import DocumentKind, DocumentOrigin, FindingCode
 from factories import make_match, make_profile, make_upsert_item, make_vacancy
+
+#: The rules a letter saved directly in a test is recorded under. The store
+#: records what it is given; using the real fingerprint keeps these rows
+#: readable beside the ones the writer makes.
+RULES_VERSION = _rules_version(scope=RuleScope.COVER_LETTER)
 
 #: A letter long enough to clear the "this is not a letter" floor, so a test
 #: about links is not accidentally a test about length.
@@ -888,13 +894,18 @@ async def test_a_letter_is_stored_on_the_application_row_and_replaced_in_place(
     )
 
     first_id, created = await store.save_letter(
-        db_session, vacancy_id=upserted.vacancy_id, text="Здравствуйте!", profile_id=profile.id
+        db_session,
+        vacancy_id=upserted.vacancy_id,
+        text="Здравствуйте!",
+        profile_id=profile.id,
+        rules_version=RULES_VERSION,
     )
     second_id, created_again = await store.save_letter(
         db_session,
         vacancy_id=upserted.vacancy_id,
         text="Здравствуйте ещё раз!",
         profile_id=profile.id,
+        rules_version=RULES_VERSION,
     )
 
     rows = await db_session.scalar(
@@ -934,7 +945,11 @@ async def test_the_queue_is_best_first_and_skips_what_is_already_written(
 
     queued = await store.queue(db_session, profile_id=profile.id, limit=10)
     await store.save_letter(
-        db_session, vacancy_id=best.vacancy_id, text="уже написано", profile_id=profile.id
+        db_session,
+        vacancy_id=best.vacancy_id,
+        text="уже написано",
+        profile_id=profile.id,
+        rules_version=RULES_VERSION,
     )
     after = await store.queue(db_session, profile_id=profile.id, limit=10)
     forced = await store.queue(db_session, profile_id=profile.id, limit=10, include_written=True)

@@ -42,9 +42,10 @@ import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from app.db.enums import RuleSeverity
+from app.db.enums import RuleScope, RuleSeverity
 from app.documents import guard
 from app.documents.context import MAX_EXPERIENCE_ENTRIES, MAX_SUMMARY_CHARS
+from app.letters import guard as letter_guard
 from app.workshop.rules import RuleSpec
 
 #: How the identity is spelled, so a stored value says what produced it. The
@@ -73,14 +74,31 @@ class HardRule:
     value: str
 
 
-def current(rules: Sequence[RuleSpec] = ()) -> tuple[HardRule, ...]:
-    """The hard rules in force for a CV right now.
+def current(
+    rules: Sequence[RuleSpec] = (), *, scope: RuleScope = RuleScope.CV
+) -> tuple[HardRule, ...]:
+    """The hard rules in force for a document of this kind right now.
 
     The structural ones first, from the constants that enforce them, so this
-    cannot drift from what :mod:`app.documents.guard` actually checks. Then the
-    workshop's, hard ones only: a soft rule is a warning printed beside a
-    document that was handed over, and this list is the set that can stop one.
+    cannot drift from what the guards actually check. Then the workshop's, hard
+    ones only: a soft rule is a warning printed beside a document that was
+    handed over, and this list is the set that can stop one.
+
+    A cover letter has its own built-in half — no links, no address, length
+    bounds — and it is identified by ``app.letters.guard.VERSION`` rather than
+    restated here, because that module is the one that enforces it and its
+    docstring explains why the number is bumped by hand rather than derived.
     """
+    structural: tuple[HardRule, ...]
+    if scope is RuleScope.COVER_LETTER:
+        structural = (
+            HardRule(
+                key="letter_builtin",
+                ru="встроенные проверки письма: без ссылок, без адреса, длина в границах",
+                value=str(letter_guard.VERSION),
+            ),
+        )
+        return structural + _authored(rules)
     structural = (
         HardRule(
             key="facts_traceable",
@@ -113,7 +131,12 @@ def current(rules: Sequence[RuleSpec] = ()) -> tuple[HardRule, ...]:
             value="always",
         ),
     )
-    authored = tuple(
+    return structural + _authored(rules)
+
+
+def _authored(rules: Sequence[RuleSpec]) -> tuple[HardRule, ...]:
+    """The owner's own hard rules, as entries in the set."""
+    return tuple(
         HardRule(
             key=f"workshop:{rule.id}",
             ru=rule.message,
@@ -126,16 +149,21 @@ def current(rules: Sequence[RuleSpec] = ()) -> tuple[HardRule, ...]:
         for rule in rules
         if rule.severity is RuleSeverity.HARD
     )
-    return structural + authored
 
 
-def version(rules: Sequence[RuleSpec] = ()) -> str:
-    """Identity of the rule set in force, for the row a document is stored in."""
-    material = "\n".join(f"{rule.key}={rule.value}" for rule in current(rules))
+def version(rules: Sequence[RuleSpec] = (), *, scope: RuleScope = RuleScope.CV) -> str:
+    """Identity of the rule set in force, for the row a document is stored in.
+
+    The one such identity in the project. A letter used to carry a hand-bumped
+    integer instead, which named only the built-in half and so reported two
+    letters written either side of a workshop edit as written under the same
+    rules — the one question the value exists to answer.
+    """
+    material = "\n".join(f"{rule.key}={rule.value}" for rule in current(rules, scope=scope))
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:DIGEST_CHARS]
     return f"{VERSION_PREFIX}:{digest}"
 
 
-def describe(rules: Sequence[RuleSpec] = ()) -> tuple[str, ...]:
+def describe(rules: Sequence[RuleSpec] = (), *, scope: RuleScope = RuleScope.CV) -> tuple[str, ...]:
     """The rules as a person reads them, for the screen that withholds a document."""
-    return tuple(rule.ru for rule in current(rules))
+    return tuple(rule.ru for rule in current(rules, scope=scope))

@@ -54,13 +54,18 @@ def _load_seed_module() -> ModuleType:
 seed_module = _load_seed_module()
 
 #: Rows the seed's own docstring promises, per table.
+#:
+#: Two profiles rather than one since the vacancy card gained its middle
+#: column: "the candidate has this and *this* CV does not say so" can only be
+#: seeded from a second resume, because an earlier CV is the only evidence in
+#: this database that is not the CV being scored.
 EXPECTED_ROWS: dict[str, int] = {
-    "candidate_profile": 1,
-    "profile_skill": 20,
+    "candidate_profile": 2,
+    "profile_skill": 24,
     "vacancy": 60,
     "vacancy_source": 65,
     "match": 60,
-    "application": 3,
+    "application": 6,
 }
 
 SEEDED_VACANCIES = select(Vacancy.id).where(Vacancy.fingerprint.in_(seed_module.FINGERPRINTS))
@@ -228,31 +233,72 @@ async def test_seeding_twice_leaves_the_same_row_counts(db_session: AsyncSession
     assert await _counts(db_session) == after_first_run == EXPECTED_ROWS
 
 
-async def test_seeding_twice_keeps_the_same_profile(db_session: AsyncSession) -> None:
-    """A second candidate profile would silently re-point every dashboard query."""
+async def test_seeding_twice_keeps_the_same_profiles(db_session: AsyncSession) -> None:
+    """A third profile would silently re-point every dashboard query.
+
+    "The active profile" is a flag, and the dashboard resolves it by asking for
+    the newest active row. A second run that inserted another one would make
+    that answer depend on insertion order — every screen would then be drawn for
+    a resume nobody uploaded.
+    """
     first_summary = await seed_module.seed(db_session)
-    profile_id = await db_session.scalar(SEEDED_PROFILES)
+    before = set((await db_session.execute(SEEDED_PROFILES)).scalars().all())
 
     second_summary = await seed_module.seed(db_session)
 
-    profile_ids = (await db_session.execute(SEEDED_PROFILES)).scalars().all()
+    after = set((await db_session.execute(SEEDED_PROFILES)).scalars().all())
 
     assert first_summary == second_summary
-    assert list(profile_ids) == [profile_id]
+    assert after == before
+    assert len(after) == EXPECTED_ROWS["candidate_profile"]
 
 
-async def test_the_tracker_holds_three_different_statuses(db_session: AsyncSession) -> None:
-    """Each application status is its own column on the board.
+async def test_exactly_one_seeded_resume_is_active(db_session: AsyncSession) -> None:
+    """The older one is kept and must never be the one everything scores against."""
+    await seed_module.seed(db_session)
 
-    Three rows all sitting in ``applied`` would leave the interview and saved
-    columns empty, which is exactly the layout nobody would have looked at.
+    active = (
+        (
+            await db_session.execute(
+                select(CandidateProfile.id).where(
+                    CandidateProfile.id.in_(SEEDED_PROFILES),
+                    CandidateProfile.is_active.is_(True),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    assert list(active) == [seed_module.SEED_PROFILE_ID]
+
+
+async def test_the_tracker_fills_every_column_of_the_board(db_session: AsyncSession) -> None:
+    """A column with no row in the seed is a layout nobody ever looks at.
+
+    The board has two axes — where an application is in this project's pipeline,
+    and what hh has since said about it — and a seed that left either half empty
+    would be a seed the frontend cannot be built against. ``sent`` is checked on
+    ``sent_at`` rather than on the agent's status for the same reason the board
+    is: only the process that did the typing writes that column.
     """
     await seed_module.seed(db_session)
 
-    statuses = (
+    rows = (
         await db_session.execute(
-            select(Application.status).where(Application.vacancy_id.in_(SEEDED_VACANCIES))
+            select(
+                Application.status,
+                Application.agent_status,
+                Application.sent_at,
+                Application.hh_last_state,
+            ).where(Application.vacancy_id.in_(SEEDED_VACANCIES))
         )
-    ).scalars()
+    ).all()
 
-    assert len(set(statuses)) == EXPECTED_ROWS["application"]
+    assert {row.agent_status for row in rows} >= {"queued", "needs_manual", "sent"}
+    assert any(row.sent_at is not None for row in rows)
+    assert {row.hh_last_state for row in rows} >= {"RESPONSE", "INVITATION", "DISCARD"}
+    # A row typed in by hand: no agent ever touched it, and the board shows it
+    # apart from the queue rather than pretending it is waiting to be sent.
+    assert any(row.agent_status is None for row in rows)
+    assert len({row.status for row in rows}) >= 3

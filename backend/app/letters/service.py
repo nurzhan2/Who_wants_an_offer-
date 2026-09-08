@@ -51,7 +51,7 @@ from app.schemas.ats import ATSReport, DocumentKind
 from app.services import ats as ats_service
 from app.workshop import store as workshop_store
 from app.workshop.references import ReferenceText
-from app.workshop.rules import RuleSpec, RuleViolation
+from app.workshop.rules import BUILTIN_RULES, RuleSpec, RuleViolation
 
 logger = get_logger(__name__)
 
@@ -222,8 +222,30 @@ async def write_letter(
             skipped="letter_failed_audit",
         )
 
+    # Imported here rather than at module scope: ``app.documents`` loads the CV
+    # service, which imports this module, so a top-level import closes that
+    # circle. Moving the fingerprint into a module of its own would give one
+    # function two homes, which is what the merge was cleaning up.
+    from app.documents import rules as document_rules
+
     await store.save_letter(
-        session, vacancy_id=vacancy_id, text=letter.text, profile_id=profile.profile_id
+        session,
+        vacancy_id=vacancy_id,
+        text=letter.text,
+        profile_id=profile.profile_id,
+        # The rules that actually judged this letter: the built-in guard and
+        # whatever the owner had active in the workshop at the time. Recorded as
+        # the same fingerprint a generated document carries, so the two tables
+        # answer "which rules wrote this" in one vocabulary.
+        rules_version=document_rules.version(
+            # The workshop's two undeletable rules are enforced inside
+            # ``generate`` rather than carried on ``bench`` — that is what stops
+            # them being checked twice — but they judged this letter as much as
+            # the owner's own did, so the identity of the set includes them.
+            tuple(rule for rule in BUILTIN_RULES if rule.applies_to(RuleScope.COVER_LETTER))
+            + tuple(bench.rules),
+            scope=RuleScope.COVER_LETTER,
+        ),
     )
 
     logger.info(

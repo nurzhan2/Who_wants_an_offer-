@@ -33,8 +33,8 @@ function Section({ title, hint, children }: { title: string; hint: string; child
   return (
     <section className="space-y-4">
       <div>
-        <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
-        <p className="mt-1 text-sm text-slate-600">{hint}</p>
+        <h2 className="text-lg font-semibold text-ink">{title}</h2>
+        <p className="mt-1 text-sm text-muted">{hint}</p>
       </div>
       {children}
     </section>
@@ -79,9 +79,9 @@ export function Workshop() {
           warnings={createReference.data?.warnings ?? []}
           onSubmit={(input) => { createReference.mutate(input); }}
         />
-        {references.isPending && <p className="text-sm text-slate-500">Загружаем эталоны…</p>}
+        {references.isPending && <p className="text-sm text-muted">Загружаем эталоны…</p>}
         {references.isError && (
-          <p className="text-sm text-red-600">Не удалось загрузить эталоны.</p>
+          <p className="text-sm text-ink">Не удалось загрузить эталоны.</p>
         )}
         {references.data && (
           <ReferenceList
@@ -107,8 +107,8 @@ export function Workshop() {
           error={createRule.error}
           onSubmit={(payload) => { createRule.mutate(payload); }}
         />
-        {rules.isPending && <p className="text-sm text-slate-500">Загружаем правила…</p>}
-        {rules.isError && <p className="text-sm text-red-600">Не удалось загрузить правила.</p>}
+        {rules.isPending && <p className="text-sm text-muted">Загружаем правила…</p>}
+        {rules.isError && <p className="text-sm text-ink">Не удалось загрузить правила.</p>}
         {rules.data && (
           <RuleList
             rules={rules.data}

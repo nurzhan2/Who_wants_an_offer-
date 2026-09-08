@@ -193,6 +193,7 @@ from pydantic import (
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.db.enums import RemoteType, SalaryPeriod
+from app.schemas.crawl import CrawlPosition, SavedState
 from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
 from app.sources.hh_roles import (
     DirectoryRole,
@@ -364,6 +365,13 @@ CATALOG_TTL = timedelta(days=7)
 #: 50th. ``BaseSource.record_progress`` replaced the guess with the pipeline
 #: saying what it has actually written.
 MAX_HELD = 5_000
+
+#: Prefix of the ``source_state`` key holding one sitemap file's position, and
+#: of the one holding its measured size. Constants rather than inline f-strings
+#: because :meth:`HHSource.describe_position` reads back what the crawl wrote,
+#: and two spellings of the same key is a bug that looks like an empty screen.
+POSITION_PREFIX = "sitemap:"
+CENSUS_PREFIX = "sitemap-size:"
 
 #: Finished stretches kept per sitemap file. On overflow the oldest is dropped,
 #: which makes those entries due again; the alternative, merging two stretches
@@ -1031,6 +1039,34 @@ def _collapse(spans: Iterable[Span]) -> tuple[Span, ...]:
     return tuple(collapsed[:MAX_SPANS])
 
 
+class FileCensus(BaseModel):
+    """How big one sitemap file was, and how much of it was still due.
+
+    Written beside the position rather than inside it, and that separation is
+    the point. :class:`FileWatermark` is a claim — "these stretches are
+    covered" — and every run that finishes work extends it. This is an
+    observation of somebody else's file at one moment, and a run that is
+    stopped by a check for robots leaves it exactly as true as it was.
+    Merging the two would mean a rescue write during an unwind either
+    republishing a stale count as fresh, or dropping the position to avoid it.
+
+    It exists because the position alone cannot answer "how much is left".
+    Stretches are intervals over ``(lastmod, id)``; nothing in them counts
+    entries, and the file's own size is hh's fact, known only while a run is
+    holding the file. So the walk records it there, once per file per run, and
+    the overview reads it back. An absent row means no run has counted this
+    file since the counting was added — which is reported as *unknown*, never
+    as zero, because zero would read as a finished backfill.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Entries the file held when this run read it.
+    total: int = Field(ge=0)
+    #: How many of those the position did not yet cover, at that moment.
+    outstanding: int = Field(ge=0)
+
+
 def load_sites(path: Path | None = None) -> tuple[HHSite, ...]:
     """The configured hh sites. Read on demand, not at import.
 
@@ -1443,6 +1479,13 @@ class HHSource(BaseSource):
             order = sorted((_key(entry) for entry in entries), reverse=True)
             self._order[(site.host, name)] = order
             due[name] = marks[name].outstanding(entries)
+            # The one moment anybody knows how big this file is. Recorded here,
+            # before a single page is fetched, so a run that hh stops at its
+            # first request still leaves the overview able to say how much of
+            # the corpus is outstanding.
+            await self._save_census(
+                site, name, FileCensus(total=len(entries), outstanding=len(due[name]))
+            )
         outstanding = sum(len(entries) for entries in due.values())
 
         state = _SiteRun(site=site)
@@ -2228,7 +2271,105 @@ class HHSource(BaseSource):
 
     def _state_key(self, site: HHSite, name: str) -> str:
         """Where one sitemap file's position is stored. Per file, never global."""
-        return f"sitemap:{site.host}:{name}"
+        return f"{POSITION_PREFIX}{site.host}:{name}"
+
+    def _census_key(self, site: HHSite, name: str) -> str:
+        """Where one sitemap file's measured size is stored. Per file as well."""
+        return f"{CENSUS_PREFIX}{site.host}:{name}"
+
+    async def _save_census(self, site: HHSite, name: str, census: FileCensus) -> None:
+        """Record how big the file was and how much of it was still due.
+
+        The one write in this connector that is allowed to fail quietly, and the
+        asymmetry with :meth:`_save_watermark` is deliberate. A position is
+        correctness: losing one means a future run re-buys pages or, worse,
+        skips them, so a store that refuses it must stop the run and say so. A
+        census is a number on a screen. Stopping a crawl that can reach hh
+        because a counter could not be saved would trade the thing the run is
+        for against the thing that describes it.
+
+        Not silent — it is logged with the key and the reason, which is the
+        distinction CLAUDE.md draws against ``except Exception: pass``.
+        """
+        try:
+            await self.state_set(self._census_key(site, name), census.model_dump(mode="json"))
+        except Exception as exc:
+            logger.warning(
+                "sources.hh.census_not_recorded",
+                host=site.host,
+                file=name,
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+
+    def describe_position(self, stored: Sequence[SavedState]) -> list[CrawlPosition]:
+        """Where this crawl has got to, per host and per sitemap file.
+
+        Reads back exactly what :meth:`_save_watermark` and
+        :meth:`_save_census` wrote, and nothing else in the project knows how
+        to. Rows whose key belongs to neither scheme are ignored rather than
+        guessed at: a key written by an older version of this connector is not
+        a position, and inventing a reading for it would put a number on the
+        screen that nothing produced.
+
+        A stored value that no longer parses is skipped with a warning, the
+        same way the crawl treats one — the row is somebody's old shape, and a
+        dashboard is the wrong place to fail over it.
+        """
+        cities = self._city_names()
+        positions: dict[tuple[str, str], FileWatermark] = {}
+        censuses: dict[tuple[str, str], FileCensus] = {}
+        dates: dict[tuple[str, str], datetime] = {}
+
+        for row in stored:
+            parsed = _split_file_key(row.key)
+            if parsed is None:
+                continue
+            prefix, place = parsed
+            try:
+                if prefix == POSITION_PREFIX:
+                    positions[place] = FileWatermark.model_validate(row.value)
+                else:
+                    censuses[place] = FileCensus.model_validate(row.value)
+            except ValidationError as exc:
+                logger.warning(
+                    "sources.hh.state_unreadable",
+                    key=row.key,
+                    errors=exc.errors(include_input=False, include_url=False)[:2],
+                )
+                continue
+            # The freshest of the two rows: the census is written when a file is
+            # read, the position when work on it is confirmed, and a person
+            # asking "when did this last move" means either.
+            seen = dates.get(place)
+            dates[place] = row.updated_at if seen is None else max(seen, row.updated_at)
+
+        described = [
+            _describe_file(
+                place,
+                city=cities.get(place[0]),
+                mark=positions.get(place),
+                census=censuses.get(place),
+                updated_at=dates.get(place),
+            )
+            for place in sorted(positions.keys() | censuses.keys())
+        ]
+        return described
+
+    def _city_names(self) -> dict[str, str]:
+        """Host to city, for the screen. Empty when the site list will not load.
+
+        Swallowed deliberately and narrowly: this is a label. ``GET /sources``
+        already reports a broken ``hh_sites.yaml`` as the source being
+        unavailable, with the parse error in it, so failing here as well would
+        replace a whole overview screen with the same message it is already
+        showing one panel down.
+        """
+        try:
+            return {site.host: site.city for site in self.sites}
+        except SourceError as exc:
+            logger.warning("sources.hh.sites_unreadable", detail=exc.detail)
+            return {}
 
     async def _watermark(self, site: HHSite, name: str) -> FileWatermark:
         """How far the last run got through this file.
@@ -2292,6 +2433,55 @@ class HHSource(BaseSource):
             await self._save_watermark(site, name, mark)
         except Exception:
             logger.exception("sources.hh.position_not_recorded", host=site.host, file=name)
+
+
+def _split_file_key(key: str) -> tuple[str, tuple[str, str]] | None:
+    """``sitemap:almaty.hh.kz:vacancy0`` -> the prefix and (host, file).
+
+    Neither a host nor a sitemap file name contains a colon, so the three parts
+    separate cleanly. Anything else — a key from an older scheme, a key from
+    another connector that shares this row's slug — returns None and is left
+    alone.
+    """
+    for prefix in (POSITION_PREFIX, CENSUS_PREFIX):
+        if not key.startswith(prefix):
+            continue
+        rest = key[len(prefix) :]
+        host, separator, name = rest.partition(":")
+        if separator and host and name:
+            return prefix, (host, name)
+    return None
+
+
+def _describe_file(
+    place: tuple[str, str],
+    *,
+    city: str | None,
+    mark: FileWatermark | None,
+    census: FileCensus | None,
+    updated_at: datetime | None,
+) -> CrawlPosition:
+    """One sitemap file's line on the overview screen.
+
+    The counts come from the census and only from it. Deriving "covered" as
+    ``total - outstanding`` would be the same number said twice; deriving it
+    from the stretches is not possible at all, because a stretch is an interval
+    over ``(lastmod, id)`` and counts nothing. So what is not measured stays
+    ``None`` and the screen says so.
+    """
+    host, name = place
+    covered = mark.covered if mark is not None else ()
+    return CrawlPosition(
+        scope=host,
+        label=name,
+        title=city,
+        total=census.total if census is not None else None,
+        outstanding=census.outstanding if census is not None else None,
+        stretches=len(covered),
+        newest=covered[0].high_lastmod if covered else None,
+        oldest=covered[-1].low_lastmod if covered else None,
+        updated_at=updated_at,
+    )
 
 
 def _is_int(value: Any) -> bool:
