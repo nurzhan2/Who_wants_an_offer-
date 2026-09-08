@@ -1805,6 +1805,14 @@ async def test_every_derived_field_is_wired_to_the_page_it_came_from(
         "closed_for_applicants": False,
         "accredited_it_employer": False,
         "employer_on_additional_check": False,
+        # Both None on this page, and that is the page's answer rather than a
+        # gap in the wiring: the payload hh really served for 136773120 carries
+        # neither ``employerManager`` nor ``responsesCount``. What proves the
+        # wiring for these two is
+        # ``test_an_employer_activity_and_response_count_are_read_when_the_page_has_them``,
+        # which serves the same page with both keys added.
+        "employer_last_activity": None,
+        "responses_count": None,
         "anonymous": False,
         "advertising": False,
         "pay_for_performance": False,
@@ -1812,6 +1820,65 @@ async def test_every_derived_field_is_wired_to_the_page_it_came_from(
         "sitemap_lastmod": "2026-09-06T10:00:00Z",
     }
     assert block["description_html"].startswith("<p><strong>Мы Inspire</strong>")
+
+
+async def test_an_employer_activity_and_response_count_are_read_when_the_page_has_them(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The two fields the captured page does not carry, on a page that does.
+
+    ``employerManager.latestActivity`` and ``responsesCount`` are things the
+    employer publishes about their own posting — when they last looked at hh,
+    and how many people have already applied — and both are worth seeing beside
+    a vacancy before paying a model to write a letter for it. Neither is in the
+    payload hh served for 136773120, so the block-level wiring test can only
+    assert ``None`` for them; this serves the same page with both keys added and
+    asserts they arrive.
+
+    Only ``latestActivity`` is taken out of ``employerManager``. The block also
+    carries the recruiter's name, and this crawler is anonymous, read-only and
+    has no business keeping it.
+    """
+    payload = state(FULL)
+    payload["vacancyView"]["employerManager"] = {
+        "latestActivity": "2026-09-05T14:20:00+03:00",
+        # Deliberately present, and deliberately not stored.
+        "firstName": "Айгуль",
+        "lastName": "Сериковна",
+    }
+    payload["vacancyView"]["responsesCount"] = 37
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(in_walk_order([FULL])))
+    )
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
+
+    block = derived((await collect(hh))[0])
+
+    assert block["employer_last_activity"] == "2026-09-05T14:20:00+03:00"
+    assert block["responses_count"] == 37
+    assert "Айгуль" not in json.dumps(block, ensure_ascii=False)
+
+
+async def test_an_unparseable_employer_activity_is_no_activity_rather_than_a_crash(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """hh's page is somebody else's shape, and a date is only a date until it is not.
+
+    A posting is still a posting when one optional field has something
+    unexpected in it, so an unreadable timestamp becomes "not stated" rather
+    than a failed walk. The alternative loses a whole page over a field nothing
+    depends on.
+    """
+    payload = state(FULL)
+    payload["vacancyView"]["employerManager"] = {"latestActivity": "недавно"}
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(in_walk_order([FULL])))
+    )
+    http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(payload)))
+
+    block = derived((await collect(hh))[0])
+
+    assert block["employer_last_activity"] is None
 
 
 async def test_the_sitemap_timestamp_is_what_the_cache_is_keyed_on(

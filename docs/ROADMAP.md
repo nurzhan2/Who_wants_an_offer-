@@ -16,6 +16,7 @@
 | 8 | Источники, батчи 2–5 | `prompts/05-scale.md` | +15 источников, включая ATS и Telegram |
 | 9 | Планировщик и уведомления | `prompts/05-scale.md` | APScheduler, Telegram-алерты, трекер откликов |
 | 10 | Аналитика и сопроводительные | `prompts/05-scale.md` | skill-gap, зарплатная аналитика, генератор писем |
+| 10a | CV и письмо под вакансию | `prompts/10-cv-per-vacancy.md` | `profile_experience`, `generated_document`, две кнопки, ATS-отчёт на своём выходе |
 | 11 | Деплой и наблюдаемость | `prompts/05-scale.md` | Docker, Caddy/SSL, бэкапы, метрики, продовый запуск |
 
 ## Порядок работы

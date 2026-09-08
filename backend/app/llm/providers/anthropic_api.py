@@ -7,8 +7,8 @@ that is available whenever a key is configured.
 What this adds over the bare SDK:
 
 * **Two models, chosen by task.** The tasks in ``HEAVY_TASKS`` — resume
-  extraction, cover letters, tooling — run rarely and their quality decides
-  everything downstream, so they get the strong model. Everything else is the
+  extraction, cover letters, CV tailoring, tooling — run rarely and their
+  quality decides everything downstream, so they get the strong model. Everything else is the
   hot path, thousands of calls per pipeline run, and gets the cheap one.
 * **Effort is chosen per call too**, never globally. One global setting would
   either overspend on the hot path or underthink on the cold one; phase 8 turns
@@ -71,7 +71,12 @@ RETRYABLE = (
 #: quality decides everything downstream; the hot ones run thousands of times a
 #: pipeline run and must stay cheap.
 HEAVY_TASKS: frozenset[LLMTask] = frozenset(
-    {LLMTask.RESUME_EXTRACTION, LLMTask.COVER_LETTER, LLMTask.TOOLING}
+    {
+        LLMTask.RESUME_EXTRACTION,
+        LLMTask.COVER_LETTER,
+        LLMTask.CV_TAILORING,
+        LLMTask.TOOLING,
+    }
 )
 
 

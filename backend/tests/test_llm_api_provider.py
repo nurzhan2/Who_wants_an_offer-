@@ -60,6 +60,7 @@ PRICING: dict[str, ModelPricing] = {
 TASK_EFFORT: dict[str, Effort] = {
     LLMTask.RESUME_EXTRACTION.value: "max",
     LLMTask.COVER_LETTER.value: "high",
+    LLMTask.CV_TAILORING.value: "high",
     LLMTask.TOOLING.value: "high",
     LLMTask.VACANCY_PARSE.value: "medium",
     LLMTask.TELEGRAM_PARSE.value: "low",
@@ -491,10 +492,20 @@ async def test_the_task_decides_which_model_id_is_sent(
 
 
 def test_only_the_rare_high_quality_tasks_are_heavy() -> None:
-    """Resume extraction, cover letters and tooling run a handful of times each;
-    re-rank and post parsing run thousands. Letting a hot task into this set is
-    how a pipeline run silently costs several times what it budgeted for."""
-    assert set(HEAVY_TASKS) == {LLMTask.RESUME_EXTRACTION, LLMTask.COVER_LETTER, LLMTask.TOOLING}
+    """Resume extraction, cover letters, CV tailoring and tooling run a handful
+    of times each; re-rank and post parsing run thousands. Letting a hot task
+    into this set is how a pipeline run silently costs several times what it
+    budgeted for.
+
+    CV tailoring is here for the same reason cover letters are, only more so: it
+    runs once when a person presses a button, and what it produces goes to an
+    employer under that person's name."""
+    assert set(HEAVY_TASKS) == {
+        LLMTask.RESUME_EXTRACTION,
+        LLMTask.COVER_LETTER,
+        LLMTask.CV_TAILORING,
+        LLMTask.TOOLING,
+    }
 
 
 @pytest.mark.parametrize(
