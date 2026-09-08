@@ -209,11 +209,14 @@ def serve(
         )
 
 
-async def collect(source: HHSource, keywords: Sequence[str] = KEYWORDS) -> list[RawPosting]:
+async def collect(
+    source: HHSource, keywords: Sequence[str] = KEYWORDS, headline: str | None = None
+) -> list[RawPosting]:
     """One walk, drained and confirmed the way ``pipeline/runner.py`` drains it."""
     collected: list[RawPosting] = []
     durable = 0
-    async for posting in source.search_batch([SearchQuery(keywords=tuple(keywords))]):
+    query = SearchQuery(keywords=tuple(keywords), headline=headline)
+    async for posting in source.search_batch([query]):
         collected.append(posting)
         if len(collected) - durable >= UPSERT_BATCH:
             durable = len(collected)
@@ -597,3 +600,97 @@ async def test_a_keyword_that_matches_half_the_site_is_capped(
     capped = next(entry for entry in logs if entry["event"] == "sources.hh.catalog_slugs_capped")
     assert capped["matched"] == 5
     assert len(store.saved[f"catalog:{HOST}"]["slugs"]) == 2
+
+
+# -- intent -------------------------------------------------------------
+
+
+#: A resume that lists Go beside Python, headed by what it is looking for.
+POLYGLOT = ("python", "go", "docker")
+HEADLINE = "Python Developer — Backend / AI-интеграции"
+
+
+async def test_the_headline_decides_which_pages_the_run_opens(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The check the owner asked for: ``opened`` starts with the python page.
+
+    Both languages are on this resume and both catalogue pages belong to the
+    same hh role, so nothing in the keyword list can separate them. On the live
+    run of 2026-09-08 nothing did: it opened Go, C, JavaScript, Linux and C#
+    pages and no Python one.
+    """
+    serve(
+        http,
+        vacancies=["100"],
+        catalog={"go-razrabotchik": [], "python-razrabotchik": ["100"], "linux-administrator": []},
+    )
+
+    with capture_logs() as logs:
+        await collect(hh, keywords=POLYGLOT, headline=HEADLINE)
+
+    read = next(entry for entry in logs if entry["event"] == "sources.hh.catalog_read")
+    assert read["opened"][0] == "python-razrabotchik"
+
+
+async def test_without_a_headline_the_same_profile_opens_the_wrong_page(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """The control, so that deleting the weight fails here rather than in a run.
+
+    A crawl that lost the headline would look exactly like this one, and the
+    only visible difference would be a corpus of Go vacancies noticed a week
+    later by a scoring pass.
+    """
+    serve(
+        http,
+        vacancies=["100"],
+        catalog={"go-razrabotchik": [], "python-razrabotchik": ["100"]},
+    )
+
+    with capture_logs() as logs:
+        await collect(hh, keywords=POLYGLOT)
+
+    read = next(entry for entry in logs if entry["event"] == "sources.hh.catalog_read")
+    assert read["opened"][0] == "go-razrabotchik"
+
+
+async def test_a_retitled_resume_re_resolves_the_plan(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """The headline reorders the whole plan while leaving the families alone.
+
+    Comparing only the families would leave a candidate who retitled themselves
+    crawling the previous title's pages until the refresh interval ran out.
+    """
+    serve(
+        http,
+        vacancies=["100"],
+        catalog={"go-razrabotchik": [], "python-razrabotchik": ["100"]},
+    )
+    await collect(hh, keywords=POLYGLOT, headline=HEADLINE)
+
+    await collect(hh, keywords=POLYGLOT, headline="Go Developer")
+
+    plan = store.saved[f"catalog:{HOST}"]
+    assert plan["headline"] == "Go Developer"
+    assert plan["slugs"][0] == "go-razrabotchik"
+
+
+async def test_the_log_says_which_families_the_headline_named(
+    hh: HHSource, http: respx.MockRouter
+) -> None:
+    """Breadth is kept and the reason for the order is visible.
+
+    ``qa`` and ``frontend`` get in on a listed skill and are crawled; only the
+    families the headline named outrank them, and a person reading the log has
+    to be able to tell which is which without reading this module.
+    """
+    serve(http, vacancies=["100"], catalog={"python-razrabotchik": ["100"]})
+
+    with capture_logs() as logs:
+        await collect(hh, keywords=("python", "pytest", "react"), headline=HEADLINE)
+
+    families = next(entry for entry in logs if entry["event"] == "sources.hh.role_families")
+    assert set(families["families"]) >= {"backend", "qa", "frontend"}
+    assert families["focus"] == ["backend"]

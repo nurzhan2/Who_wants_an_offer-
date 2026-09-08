@@ -78,6 +78,7 @@ from app.sources.hh_roles import (
     DirectoryRole,
     carries,
     families_for,
+    intent_words,
     load_families,
     read_directory,
     roles_for,
@@ -273,16 +274,30 @@ class CrawlPlan(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     keywords: tuple[str, ...] = ()
+    #: What the candidate says they are, and the words the ranking took from it.
+    #: The heaviest weight there is, so a report that did not show it would be
+    #: hiding the reason the order came out the way it did.
+    headline: str | None = None
+    intent: tuple[str, ...] = ()
     families: tuple[str, ...] = ()
+    #: The families the headline named, as opposed to the ones a listed skill
+    #: dragged in. Both are crawled; only these outrank the rest.
+    focus: tuple[str, ...] = ()
     roles: tuple[PlannedRole, ...] = ()
     #: Slugs no selected role named, picked by the profile's own words. The
     #: fallback that keeps this working for a profile no family describes.
     by_keyword: tuple[str, ...] = ()
+    #: Every chosen slug in the order the crawl would open it. The check the
+    #: whole section exists for: the head of this list is what a run buys.
+    order: tuple[str, ...] = ()
     total: int = 0
 
 
 def plan_for(
-    keywords: Sequence[str], directory: Sequence[DirectoryRole], slugs: Sequence[str]
+    keywords: Sequence[str],
+    directory: Sequence[DirectoryRole],
+    slugs: Sequence[str],
+    headline: str | None = None,
 ) -> CrawlPlan:
     """Run the production profile-to-slugs chain and report every step of it."""
     families = families_for(keywords, load_families())
@@ -298,17 +313,23 @@ def plan_for(
             # slugs are printed in the order the crawl would open them and that
             # order is the thing worth checking: role 96 matches over a hundred
             # slugs, and which four are at the top decides the run.
-            slugs=slugs_for([role], (), slugs, families=families),
+            slugs=slugs_for([role], (), slugs, families=families, headline=headline),
         )
         for role in roles
     )
-    chosen = slugs_for(roles, keywords, slugs, families=families)
+    chosen = slugs_for(roles, keywords, slugs, families=families, headline=headline)
     named = {slug for role in planned for slug in role.slugs}
     return CrawlPlan(
         keywords=tuple(keywords),
+        headline=headline,
+        intent=tuple(sorted(intent_words(headline))),
         families=tuple(family.key for family in families),
+        focus=tuple(
+            family.key for family in families if headline and carries(headline, family.when)
+        ),
         roles=planned,
         by_keyword=tuple(slug for slug in chosen if slug not in named),
+        order=chosen,
         total=len(chosen),
     )
 
@@ -452,6 +473,7 @@ async def probe(
     max_files: int | None = None,
     read_roles_directory: bool = True,
     keywords: Sequence[str] = (),
+    headline: str | None = None,
 ) -> ProbeReport:
     """Take the three measurements, and record what could not be taken.
 
@@ -479,7 +501,7 @@ async def probe(
         else:
             if not directory:
                 notes.append("план построен только по ключевым словам: справочник не прочитан")
-            plan = plan_for(keywords, directory, index.slugs)
+            plan = plan_for(keywords, directory, index.slugs, headline)
     return ProbeReport(
         host=site.host,
         terms=tuple(terms),

@@ -818,3 +818,39 @@ def test_a_headline_that_is_really_a_summary_paragraph_is_not_a_search_term() ->
 
     assert plan.queries == ()
     assert plan.groups == ()
+
+
+def test_every_query_carries_the_profiles_own_title() -> None:
+    """The one field of a plan that is the same on every query of it.
+
+    The groups say what this profile knows and differ from each other; the
+    headline says what it is looking for and does not. A source with something
+    to rank needs the difference, and measured on hh the cost of not having it
+    was a run that opened catalogue pages for Go, C, JavaScript, Linux and C#
+    off a resume headed "Python Developer" — every one of those languages
+    genuinely on it, and none of them the one wanted.
+    """
+    profile = candidate(
+        headline="Python Developer — Backend / AI-интеграции",
+        skills=[skill("python"), skill("go"), skill("docker")],
+        locations=["Алматы"],
+    )
+
+    plan = plan_queries(profile)
+
+    assert plan.queries
+    assert {query.headline for query in plan.queries} == {
+        "Python Developer — Backend / AI-интеграции"
+    }
+
+
+def test_a_blank_headline_is_sent_as_none_rather_than_as_an_empty_string() -> None:
+    """An empty headline is not a headline, and a source must not weigh one."""
+    profile = candidate(
+        headline="   ", skills=[skill("python"), skill("docker")], locations=["Алматы"]
+    )
+
+    plan = plan_queries(profile)
+
+    assert plan.queries
+    assert all(query.headline is None for query in plan.queries)
