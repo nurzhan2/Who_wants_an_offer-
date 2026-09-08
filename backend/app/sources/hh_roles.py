@@ -116,48 +116,29 @@ TRANSLIT: dict[str, str] = {
 #: that ``testirovshchik`` and ``testirovschik`` are the same word. Applied to
 #: both sides of every comparison, so it does not matter which scheme hh used.
 FOLD: tuple[tuple[str, str], ...] = (
+    # ``j`` first, and the order is load-bearing rather than tidy. hh writes the
+    # same word both ways — ``mladshij-programmist`` and ``mladshiy-…`` are one
+    # profession — and folding ``iy`` before ``j`` turns the first into
+    # ``mladshiy`` and the second into ``mladshy``, which then never match.
+    ("j", "y"),
+    # ``щ`` collapses all the way to ``sh``. Three spellings of one sound reach
+    # us — ``shch`` from a strict transliteration, ``sch`` from ours, and plain
+    # ``sh`` from hh, which writes «начинающий» as ``nachinayushiy`` — and a fold
+    # that stopped at ``sch`` would leave that slug unrecognised as a level word.
     ("shch", "sch"),
+    ("sch", "sh"),
     ("kh", "h"),
     ("ts", "c"),
     ("iy", "y"),
     ("yy", "y"),
-    ("j", "y"),
     ("q", "k"),
     ("x", "ks"),
 )
 
-#: Words that name a rank rather than a trade. A role's own distinctive word may
-#: stand alone when it is matched against a slug; these may not, or «DevOps-
-#: инженер» would claim every ``inzhener-`` slug on the site, most of which are
-#: construction.
-GENERIC_ROLE_WORDS: frozenset[str] = frozenset(
-    {
-        "inzhener",
-        "menedzher",
-        "specialist",
-        "konsultant",
-        "operator",
-        "assistent",
-        "rukovoditel",
-        "administrator",
-        "direktor",
-        "tehnik",
-        "master",
-        "sotrudnik",
-        "rabotnik",
-        "nachalnik",
-        "starshiy",
-        "mladshiy",
-        "veduschiy",
-        "glavnyy",
-        "po",
-        "i",
-        "v",
-        "s",
-        "dlya",
-        "ili",
-    }
-)
+#: One slug's place in the queue, lowest first: profile words carried (negated),
+#: words belonging to no vocabulary this profile has, whether hh's own directory
+#: named it, how many words it has, and the slug itself for a stable tie-break.
+type SlugRank = tuple[int, int, int, int, str]
 
 #: Shortest word that may stand for a role on its own. Below it a token is a
 #: preposition or an abbreviation whose collisions cost more than it finds.
@@ -184,6 +165,70 @@ def fold(text: str) -> str:
     for before, after in FOLD:
         folded = folded.replace(before, after)
     return folded
+
+
+#: How far into a trade somebody is, in the words hh's own slugs use. Not a
+#: preference and not tied to one candidate: a level word names the SAME job as
+#: the slug without it. That is what puts ``mladshij-programmist`` above
+#: ``programmist_1c`` in :func:`_rank` — ``junior`` is a word the profile did not
+#: say, and so is ``1c``, but only one of them means a different trade.
+EXPERIENCE_WORDS: frozenset[str] = frozenset(
+    fold(word)
+    for word in (
+        "junior",
+        "middle",
+        "senior",
+        "lead",
+        "intern",
+        "trainee",
+        "младший",
+        "старший",
+        "ведущий",
+        "главный",
+        "стажёр",
+        "стажировка",
+        "практикант",
+        "начинающий",
+        "без",
+        "опыта",
+    )
+)
+
+#: Words that name a rank rather than a trade. A role's own distinctive word may
+#: stand alone when it is matched against a slug; these may not, or «DevOps-
+#: инженер» would claim every ``inzhener-`` slug on the site, most of which are
+#: construction.
+GENERIC_ROLE_WORDS: frozenset[str] = EXPERIENCE_WORDS | frozenset(
+    fold(word)
+    for word in (
+        "инженер",
+        "менеджер",
+        "специалист",
+        "консультант",
+        "оператор",
+        "ассистент",
+        "руководитель",
+        "администратор",
+        "директор",
+        "техник",
+        "мастер",
+        "сотрудник",
+        "работник",
+        "начальник",
+        "по",
+        "и",
+        "в",
+        "с",
+        "для",
+        "или",
+    )
+)
+
+#: Everything above is written in the words hh uses and stored in the one form
+#: everything is compared in. Folding the tables rather than the literals is the
+#: point: a word left unfolded here — ``veduschiy`` where the fold produces
+#: ``veduschy`` — is a word that silently never matches anything, and
+#: ``test_every_word_table_is_stored_folded`` is what stops one appearing.
 
 
 def carries(text: str, terms: Sequence[str]) -> tuple[str, ...]:
@@ -362,23 +407,87 @@ def _alternatives(name: str) -> tuple[tuple[str, ...], ...]:
     return tuple(groups)
 
 
-def slugs_for(
-    roles: Sequence[DirectoryRole], keywords: Sequence[str], slugs: Iterable[str]
-) -> tuple[str, ...]:
-    """The catalogue pages worth opening, roles first and keywords after.
+def _known_words(
+    roles: Sequence[DirectoryRole], keywords: Sequence[str], families: Sequence[RoleFamily]
+) -> frozenset[str]:
+    """Every word that describes the work this profile is looking for.
 
-    Ordered rather than merely collected, because the crawl reads a bounded
-    number of them per run and rotates through the rest: what hh's own directory
-    calls this work is a better first guess than what the candidate happened to
-    call their skills.
+    Four vocabularies, and the union is what makes the ranking below need no
+    list of things to avoid. hh's role names say what the trade is called, the
+    profile's keywords say what it uses, the matched families say what that kind
+    of work is made of, and :data:`EXPERIENCE_WORDS` say how far into it somebody
+    is. A word in none of them is a DIFFERENT job — that is the whole rule.
+    """
+    words: set[str] = set(EXPERIENCE_WORDS) | set(GENERIC_ROLE_WORDS)
+    for role in roles:
+        words.update(tokens(role.name))
+    for term in keywords:
+        words.update(tokens(term))
+    for family in families:
+        for term in family.when:
+            words.update(tokens(term))
+    return frozenset(words)
+
+
+def _rank(slug: str, *, keywords: Sequence[str], known: frozenset[str], by_role: bool) -> SlugRank:
+    """Where this slug goes in the queue. Lower sorts first.
+
+    Measured 2026-09-08, and this exists because of what the measurement showed:
+    role 96 «Программист, разработчик» matches over a hundred slugs on
+    ``almaty.hh.kz``, and dozens of them are ``programmist_1c``,
+    ``programmist-1s-buhgalteriya``, ``programmist_1szup``, ``programmist-1c-82``
+    and their ABAP, Navision, Bitrix and CNC cousins. A run opens eight of them.
+    Alphabetically, all eight are 1C — and the crawl returns exactly the
+    irrelevant corpus it was rewritten to stop returning, by a different route.
+
+    The four keys, most significant first:
+
+    1. **How many of the profile's own words the slug carries.** ``python`` in
+       ``python-razrabotchik`` is the strongest signal there is, and nothing
+       outranks it.
+    2. **How many of its words belong to no vocabulary this profile has.**
+       ``1c`` is not on a list of bad words anywhere — there is no such list,
+       and any list would be endless and out of date. It is simply a word the
+       profile never said, and ``junior`` is one it did not say either but which
+       :data:`EXPERIENCE_WORDS` recognises as a level rather than another trade.
+       That is what puts ``mladshij-programmist`` above ``programmist_1c``.
+    3. **Named by hh's directory before named by the candidate's words.** The
+       site's own vocabulary is the better guess about the site.
+    4. **Shorter, then alphabetical.** A slug with fewer words is the more
+       general page and holds the larger pool; alphabetical last, so the order
+       is stable across runs and a stored plan means the same thing tomorrow.
+    """
+    words = tokens(slug)
+    return (
+        -len(carries(slug, keywords)),
+        sum(1 for word in words if word not in known),
+        0 if by_role else 1,
+        len(words),
+        slug,
+    )
+
+
+def slugs_for(
+    roles: Sequence[DirectoryRole],
+    keywords: Sequence[str],
+    slugs: Iterable[str],
+    *,
+    families: Sequence[RoleFamily] = (),
+) -> tuple[str, ...]:
+    """The catalogue pages worth opening, nearest to the profile first.
+
+    Ranked rather than merely collected, because the crawl opens a bounded
+    number of them per run: which eight of a hundred it takes decides what the
+    whole run collects. See :func:`_rank` for the order and for the measurement
+    that made it necessary.
     """
     groups = tuple(group for role in roles for group in _alternatives(role.name))
-    by_role: list[str] = []
-    by_keyword: list[str] = []
+    known = _known_words(roles, keywords, families)
+    ranked: list[tuple[SlugRank, str]] = []
     for slug in slugs:
         folded = fold(slug)
-        if any(all(word in folded for word in group) for group in groups):
-            by_role.append(slug)
-        elif keywords and carries(slug, keywords):
-            by_keyword.append(slug)
-    return tuple(sorted(by_role) + sorted(by_keyword))
+        by_role = any(all(word in folded for word in group) for group in groups)
+        if not by_role and not (keywords and carries(slug, keywords)):
+            continue
+        ranked.append((_rank(slug, keywords=keywords, known=known, by_role=by_role), slug))
+    return tuple(slug for _, slug in sorted(ranked))
