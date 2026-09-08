@@ -639,6 +639,15 @@ class HHVacancyView(BaseModel):
     #: Employer billing on one side, derived publication flags on the other.
     #: Only the second half survives into ``raw``.
     vacancy_properties: dict[str, Any] | None = Field(default=None, alias="vacancyProperties")
+    #: The contact person's *activity*, and nothing else about them. hh puts a
+    #: name and sometimes a photograph in the same block; only
+    #: ``latestActivity`` is read, because "when did this employer last look at
+    #: their inbox" is a fact about the posting, and the rest is a person's
+    #: identity that this anonymous read-only crawler has no business keeping.
+    employer_manager: dict[str, Any] | None = Field(default=None, alias="employerManager")
+    #: How many people have already applied, where the page states it. Not on
+    #: every posting, and absent is not zero.
+    responses_count: int | None = Field(default=None, alias="responsesCount")
 
     @field_validator("published_at", "expires_at", mode="before")
     @classmethod
@@ -706,6 +715,15 @@ class HHDerived(BaseModel):
     closed_for_applicants: bool = False
     accredited_it_employer: bool = False
     employer_on_additional_check: bool = False
+    #: When the employer was last active on hh, as the page states it. What the
+    #: dashboard renders as «был онлайн»: a posting whose employer has not
+    #: opened hh in three weeks is one an application disappears into, and that
+    #: is worth knowing *before* writing a letter for it. Published by the
+    #: employer themselves; nothing is looked up anywhere else.
+    employer_last_activity: AwareDatetime | None = None
+    #: Applications already sent, where hh publishes the figure. None means the
+    #: page did not state it, which is not the same as nobody having applied.
+    responses_count: int | None = None
     #: From ``calculatedStates``, never from the billing block beside it.
     anonymous: bool = False
     advertising: bool = False
@@ -1905,6 +1923,8 @@ class HHSource(BaseSource):
             closed_for_applicants=view.closed_for_applicants,
             accredited_it_employer=company.accredited_it if company else False,
             employer_on_additional_check=company.on_additional_check if company else False,
+            employer_last_activity=_latest_activity(view.employer_manager),
+            responses_count=view.responses_count,
             anonymous=bool(states.get("anonymous")),
             advertising=bool(states.get("advertising")),
             pay_for_performance=bool(states.get("payForPerformance")),
@@ -2415,6 +2435,35 @@ def _dictionary_text(dictionary: dict[str, Any], field: str, value: str) -> str 
             text = item.get("text")
             return str(text) if text else None
     return None
+
+
+def _latest_activity(manager: dict[str, Any] | None) -> datetime | None:
+    """When the employer was last active, out of the block that also names them.
+
+    One key is read and the rest of ``employerManager`` is dropped where it
+    stands. The block carries the recruiter's name and sometimes their
+    photograph, and this crawler is anonymous, read-only and has no business
+    keeping either — the brief for the feature that uses this says in as many
+    words that no employee of a company is to be looked up anywhere, and the
+    smallest form of that rule is not storing the ones hh hands over unasked.
+
+    What is kept is a timestamp the employer published about themselves, which
+    answers a question worth asking before writing a letter: is anyone reading
+    this inbox. Parsed defensively — the value is whatever hh's page had in it
+    on the day it was crawled, and a string that is not a date is no date.
+    """
+    if not isinstance(manager, dict):
+        return None
+    raw = manager.get("latestActivity")
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _calculated_states(properties: dict[str, Any] | None) -> dict[str, Any]:

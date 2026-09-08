@@ -1,15 +1,21 @@
 import type { Config } from 'tailwindcss'
 
 /**
- * The monopo saigon design system, as far as this app uses it.
+ * The monopo saigon design system, as tokens.
  *
- * Four rules, and they are all subtractive: the palette is monochrome, input
- * fields have square corners, buttons are full pills, and nothing casts a
- * shadow. Depth comes from a hairline rule and from space, never from a blur.
+ * Chosen by the owner and described in `prompts/hh/hh-final.md`; this file is
+ * that description turned into the only vocabulary the components may use.
+ * Three of its rules are the ones a dashboard breaks first, so they are worth
+ * restating where they are enforced:
  *
- * They live here as tokens rather than as literals in components so that the
- * one place to argue about a value is this file. `1078px` is the content
- * measure the whole product is laid out on.
+ * - **there is no chromatic colour in the interface.** Not for statuses, not for
+ *   scores, not for "good" and "bad". Difference is carried by position, by
+ *   label and by font weight. The one permitted gradient is a background behind
+ *   the overview heading and never a control's fill, so it is not a token here.
+ * - **radii are 0px or 75px and nothing between.** Cards, inputs and tables are
+ *   square; buttons and tags are full pills.
+ * - **there are no shadows anywhere.** Separation is a 1px hairline and an
+ *   inverted surface.
  */
 export default {
   content: ['./index.html', './src/**/*.{ts,tsx}'],
@@ -26,18 +32,58 @@ export default {
         line: '#d8d8d4',
         // The one non-grey, and it is only ever a failure state.
         alarm: '#8a1f11',
+        obsidian: '#000000',
+        inkstone: '#181818',
+        'felt-gray': '#6d6d6d',
+        'slate-pill': '#636363',
+        'ash-mist': '#9a9a9a',
+        pewter: '#808080',
       },
-      maxWidth: {
-        shell: '1078px',
+      fontFamily: {
+        // Roobert is the system's face; Inter is the substitution it names, and
+        // the stack ends in the platform sans so a machine with neither still
+        // renders the intended proportions rather than a serif.
+        sans: ['Roobert', 'Inter', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+      },
+      fontSize: {
+        caption: ['12px', { lineHeight: '1.19' }],
+        'body-sm': ['16px', { lineHeight: '1.15' }],
+        body: ['18px', { lineHeight: '1.21' }],
+        subheading: ['39px', { lineHeight: '1.19' }],
+        'heading-sm': ['54px', { lineHeight: '1.39' }],
+        // 78px is the ceiling this dashboard uses: the system goes higher, and
+        // the conflict resolution in the brief caps it here because this is a
+        // dense data screen rather than an agency showcase.
+        heading: ['78px', { lineHeight: '1.10' }],
+        label: ['0.6875rem', { lineHeight: '1rem', letterSpacing: '0.12em' }],
       },
       borderRadius: {
-        // Square. An input is a slot on a page, not a lozenge.
+        // The system has no value between these two. `field` and `none` are the
+        // same 0px under two names: the forms were written against one and the
+        // documents screen against the other, and renaming either would touch
+        // more components than keeping both aliases does.
+        none: '0px',
         field: '0px',
         // A pill, at any height this app uses.
         pill: '75px',
       },
-      fontSize: {
-        label: ['0.6875rem', { lineHeight: '1rem', letterSpacing: '0.12em' }],
+      spacing: {
+        // Base unit 4px; these three are the layout's named gaps.
+        element: '14px',
+        card: '34px',
+        section: '46px',
+      },
+      maxWidth: {
+        // One measure, two names, for the same reason as the radii above.
+        canvas: '1078px',
+        shell: '1078px',
+      },
+      transitionTimingFunction: {
+        monopo: 'cubic-bezier(0.19, 1, 0.22, 1)',
+      },
+      transitionDuration: {
+        slow: '800ms',
+        slower: '1250ms',
       },
     },
   },

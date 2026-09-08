@@ -121,6 +121,41 @@ fusing them — each subcommand loads only the side it needs, and a test checks
 that by looking at `sys.modules` after a real invocation. Details and the first-run
 setup are in [agent/README.md](agent/README.md).
 
+## A CV and a letter for one vacancy
+
+Every scored vacancy gets two buttons in the dashboard — «CV под эту вакансию»
+and «Сопроводительное» — and both produce a `.docx`, an ATS report beside it,
+and a new version that replaces nothing.
+
+**Generating a CV means arranging one, not writing one.** The model reorders the
+candidate's skills and jobs so that what the vacancy asks for comes first, picks
+which jobs and which of each job's technologies to show, and spells a skill the
+way the vacancy spells it when it is the same skill — "PostgreSQL" rather than
+"постгрес", because an employer's parser searches for exact strings. It does not
+write prose about what somebody did at a job: the profile does not record that,
+so anything written there would be invented.
+
+That is why the model returns an *arrangement* — references, orders and names
+from a closed list — rather than a document. Company names, job titles, dates,
+skill levels and years are read from the database when the file is built, and
+there is no field in the model's answer that could carry a different one. So
+"the generator does not change dates, companies or titles" is a fact about the
+schema rather than a rule somebody checks. What is left to check is checked, in
+code, by reading the finished document: a CV for a vacancy requiring Kubernetes,
+generated from a profile with no Kubernetes, does not contain the word — however
+the model answers, and there is a test that says so.
+
+Every generated document is then audited by this project's own ATS checks,
+against the `.docx` that was actually produced rather than the text we meant to
+write, and handed over with the report. The report separates «есть, но не
+названо в этой версии» — fixable by regenerating — from «нет у кандидата», which
+is not fixable and is reported with nothing suggested. A document that fails a
+hard rule is not handed over at all; the screen shows what is wrong instead.
+
+The dashboard generates and downloads. It never sends: an application goes out
+through `wwao apply`, from a browser, under your own account, with you at the
+keyboard.
+
 ## Parsing a resume
 
 ```bash

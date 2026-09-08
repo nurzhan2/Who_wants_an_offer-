@@ -35,7 +35,7 @@ from app.matching import embeddings
 from app.resume import ats_audit, enricher
 from app.resume.extractor import ExtractedDocument
 from app.schemas.llm import ProfileExtraction
-from app.schemas.profile import CandidateProfileCreate, SkillCreate
+from app.schemas.profile import CandidateProfileCreate, ExperienceCreate, SkillCreate
 
 logger = get_logger(__name__)
 
@@ -131,6 +131,7 @@ def to_profile_create(
         ),
         salary_currency=extraction.salary_currency,
         languages=[language.model_dump() for language in extraction.languages],
+        education=[degree.model_dump() for degree in extraction.education],
         raw_text=document.raw_text,
         skills=[
             SkillCreate(
@@ -143,7 +144,46 @@ def to_profile_create(
             )
             for skill in enriched.skills
         ],
+        experience=to_experience(extraction),
     )
+
+
+def to_experience(extraction: ProfileExtraction) -> list[ExperienceCreate]:
+    """The extraction's work periods, as rows, in the order the resume gave them.
+
+    ``position`` is the index in that order and it is the handle a generated CV
+    refers to a job by, so it has to be assigned here rather than derived later:
+    a stored arrangement names ``ref 2``, and ``ref 2`` has to keep meaning the
+    same job for as long as that version is readable.
+
+    A period with neither an employer nor a title is dropped. There is nothing
+    to print on the line, and a blank entry in a CV reads to an employer as
+    something hidden rather than as something missing.
+
+    Dates are passed through exactly as the extraction normalised them —
+    "YYYY-MM", or None where the resume gave none — because this is the last
+    place they could be quietly changed and the whole point of storing them is
+    that a generated document cannot.
+    """
+    rows: list[ExperienceCreate] = []
+    for period in extraction.work_periods:
+        company = period.company.strip()
+        title = period.title.strip()
+        if not company and not title:
+            continue
+        rows.append(
+            ExperienceCreate(
+                position=len(rows),
+                company=company[:300],
+                title=title[:300],
+                start=period.start,
+                end=period.end,
+                is_current=period.is_current,
+                stack=[name.strip() for name in period.stack if name.strip()],
+                domains=[name.strip() for name in period.domains if name.strip()],
+            )
+        )
+    return rows
 
 
 async def _record_ats_report(
@@ -207,6 +247,7 @@ async def build_profile(
 
         await profiles.update_from_extraction(profile_id, payload)
         await profiles.replace_skills(profile_id, payload.skills)
+        await profiles.replace_experience(profile_id, payload.experience)
         await _record_ats_report(profiles, profile_id, document, extraction)
 
         vector = await embeddings.encode_profile(
@@ -261,6 +302,7 @@ async def build_profile(
         page_count=document.page_count,
         size_bytes=document.size_bytes,
         skills=len(enriched.skills),
+        jobs=len(payload.experience),
         total_years=float(enriched.total_years),
         stated_years_delta=(
             None if enriched.stated_years_delta is None else float(enriched.stated_years_delta)

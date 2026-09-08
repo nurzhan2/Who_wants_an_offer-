@@ -38,6 +38,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
 from uuid import UUID
@@ -50,11 +51,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core import logging as logging_module
 from app.core.config import settings
-from app.core.exceptions import ParsingError
+from app.core.exceptions import LLMError, ParsingError
 from app.core.logging import configure_logging, get_logger
+from app.db.base import uuid7
 from app.db.enums import ParseStatus
+from app.db.models import VacancySkill
+from app.db.repositories import MatchRepository, VacancyRepository
 from app.db.repositories.contact import ContactRepository
 from app.db.repositories.profile import ProfileRepository
+from app.documents.service import write_cv
+from app.letters import store as letter_store
 from app.llm import usage as usage_ledger
 from app.llm.base import Document, LLMResult, LLMTask, LLMUsage
 from app.llm.providers.anthropic_api import AnthropicAPIProvider
@@ -67,8 +73,9 @@ from app.schemas.llm import (
     ProfileExtraction,
     WorkPeriod,
 )
+from app.schemas.profile import CandidateProfileCreate, ExperienceCreate, SkillCreate
 from app.services import resume as resume_service
-from factories import make_profile
+from factories import make_match, make_profile, make_vacancy
 
 FIXTURES = Path(__file__).parent / "fixtures" / "resumes"
 
@@ -904,3 +911,113 @@ async def test_a_contact_value_rejected_by_prefill_is_reported_without_quoting_i
     assert contact.phone == LINKED_IDENTITY.phone  # and the rest was still filled in
     assert_absent(logs.text, LINKED_IDENTITY)
     assert_no_prose(logs.records())
+
+
+# ── generating a document reads the contacts back out of the resume ───
+
+
+async def test_generating_a_cv_logs_counts_and_never_the_contacts_it_renders(
+    logs: LogSink,
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+    vacancies: VacancyRepository,
+    matches: MatchRepository,
+) -> None:
+    """The newest path that handles a phone number, held to the same rule.
+
+    ``app/documents/contacts.py`` reads the owner's phone, email and links back
+    out of ``candidate_profile.raw_text`` and renders them into a generated CV,
+    so this feature touches the same personal data the upload path does — and it
+    touches it at a different moment, in a different module, with its own log
+    lines. The rule does not change: everything logged here is a count, an id, a
+    score or a duration, and the contact block reaches the file and nothing else.
+
+    The document text itself is the other half of the trap. It contains the
+    email and the phone by design — that is what makes it a CV — so a log line
+    carrying "the document we just produced" would leak both. What the service
+    logs instead is how long it is.
+    """
+    identity = Identity("Нуржан Сатыбалдиев", "nurzhan@example.com", "+7 701 234 56 78", "Алматы")
+    profile_id, vacancy_id = await _seed_for_documents(
+        profiles, vacancies, matches, db_session, identity
+    )
+    profile = await letter_store.load_profile_facts(db_session, profile_id)
+    assert profile is not None
+
+    outcome = await write_cv(db_session, vacancy_id, profile, router=_OfflineRouter())
+
+    # The contacts really did reach the document, or this test asserts nothing.
+    assert outcome.document is not None
+    assert identity.email in outcome.document.text
+    assert identity.phone in outcome.document.text
+
+    assert "documents.cv.written" in logs.events()
+    written = next(record for record in logs.records() if record["event"] == "documents.cv.written")
+    assert written["profile_id"] == str(profile_id)
+    assert isinstance(written["characters"], int)
+    assert_absent(logs.text, identity)
+    assert_no_prose(logs.records())
+
+
+class _OfflineRouter(LLMRouter):
+    """A router with no providers, so generation takes the rule-based branch.
+
+    The point of this test is the logging around a real document, not a model
+    answer; the rule-based branch renders the same contact block from the same
+    columns.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(providers={})
+
+    async def complete_json(  # type: ignore[override] # a scripted stand-in
+        self, *args: Any, **kwargs: Any
+    ) -> Any:
+        raise LLMError("no provider in this test")
+
+
+async def _seed_for_documents(
+    profiles: ProfileRepository,
+    vacancies: VacancyRepository,
+    matches: MatchRepository,
+    session: AsyncSession,
+    identity: Identity,
+) -> tuple[UUID, UUID]:
+    """A profile whose resume text carries the identity, and a vacancy for it."""
+    created = await profiles.create(
+        CandidateProfileCreate(
+            name=identity.name,
+            headline="Backend Developer",
+            locations=[identity.city],
+            raw_text=f"{identity.name}\n{identity.city} · {identity.phone} · {identity.email}\n",
+            skills=[
+                SkillCreate(canonical_name=name, raw_names=[name.title()])
+                for name in ("python", "postgresql", "fastapi", "docker", "redis", "git")
+            ],
+            experience=[
+                ExperienceCreate(
+                    position=0,
+                    company="Chocofamily",
+                    title="Backend Developer",
+                    start="2023-04",
+                    is_current=True,
+                    stack=["Python", "FastAPI", "PostgreSQL"],
+                )
+            ],
+        )
+    )
+    upserted = await vacancies.upsert_by_external_id(
+        make_vacancy("pii-documents-1", title="Backend-разработчик", company="Kaspi"),
+        source_slug="hh",
+        external_id="hh-pii-1",
+        url="https://hh.kz/vacancy/1",
+    )
+    session.add_all(
+        [
+            VacancySkill(id=uuid7(), vacancy_id=upserted.vacancy_id, canonical_name=name)
+            for name in ("Python", "PostgreSQL")
+        ]
+    )
+    await matches.bulk_upsert([make_match(created.id, upserted.vacancy_id, Decimal("88"))])
+    await session.flush()
+    return created.id, upserted.vacancy_id
