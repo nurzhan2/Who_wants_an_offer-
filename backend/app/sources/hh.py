@@ -37,10 +37,24 @@ that page rather than at the top of the file. What it does not do is solve the
 captcha, slow down and try again inside the same run, or come back wearing a
 browser's User-Agent.
 
-Corrected 2026-09-07: this paragraph used to say that a challenged run leaves
-the position where it was, which was true and useless, because where it was
-was nowhere. See ``WATERMARK_LAG`` for what the run recorded instead, which
-was nothing at all, and for how many rows that cost.
+Corrected 2026-09-07, and again 2026-09-08. It first said a challenged run
+leaves the position where it was, which was true and useless, because where it
+was was nowhere. It then said the position was recorded up to a fixed lag, which
+recorded nothing either: the lag was a guess at how much the pipeline was
+holding unwritten, and no run ever ran long enough to clear it. The pipeline now
+says what it has written — ``BaseSource.record_progress`` — and the position
+follows that. See ``MAX_HELD``.
+
+**The walk takes the newest outstanding entry first**, across every file of the
+site, and that is a change of 2026-09-08 too. It used to buy a slice of the
+newest and then walk the rest oldest-first, because the position was a frontier
+through time and could only move one way. It is a set of finished stretches now
+(``FileWatermark``), so the walk can simply take the freshest thing it has not
+covered. Which matters because a run is short: hh tolerates about one page every
+four to five seconds — measured, see ``rate_limit`` — and both live runs were
+stopped inside a hundred pages. The whole corpus is not the goal; some 13 557
+postings for one city, most long filled. Older entries are what the remaining
+budget reaches.
 
 Only that redirect is recognised, and the gap is written down rather than
 papered over: a challenge delivered as a status code — a 403 whose body holds
@@ -135,8 +149,8 @@ for a posting with no salary — the check has to be for the key.
 import html as html_lib
 import json
 import re
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Iterable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -248,6 +262,13 @@ MAX_PAGES_PER_RUN = 1200
 #: saying what it has actually written.
 MAX_HELD = 5_000
 
+#: Finished stretches kept per sitemap file. One run adds at most one stretch —
+#: the walk is contiguous within a run — so this is a bound on interruptions, not
+#: on entries. On overflow the oldest is dropped, which makes those entries due
+#: again; the alternative, merging two stretches that are not neighbours, would
+#: claim entries nobody fetched.
+MAX_SPANS = 64
+
 #: The sitemaps are never cached. ``cache_ttl`` is thirty days because a
 #: vacancy page carries its own ``lastmod`` as a cache salt, so an edited
 #: posting misses and an untouched one hits. The sitemaps have no such salt —
@@ -258,22 +279,6 @@ MAX_HELD = 5_000
 #: all when the sitemaps are cached.
 SITEMAP_CACHE_TTL = timedelta(0)
 
-#: Freshest entries fetched before the resumable ascending walk begins.
-#:
-#: A city's sitemap spans about a month. A purely ascending crawl therefore
-#: spends its first several runs on postings three weeks old — a good share of
-#: them already past ``validThroughTime`` — while the vacancy published this
-#: morning waits a fortnight. For a job search that is exactly the wrong end of
-#: the file, so a bounded slice of the newest entries is bought first. It cannot
-#: be more than a small part of the budget, because it advances no position and
-#: is therefore re-bought on the next run.
-HEAD_SLICE = 50
-
-#: Entries sharing one ``lastmod`` second are remembered by id so that resuming
-#: neither repeats them nor skips them. Bounded so the stored row cannot grow
-#: without limit; past it the tie is resolved by repeating, which costs requests
-#: and never costs a posting.
-MAX_TIED_IDS = 1000
 
 #: hh's ``mode`` says what the money is *per*, and only two of its five values
 #: have an honest equivalent in ``SalaryPeriod``. A shift is not a day and a
@@ -610,37 +615,119 @@ class SitemapEntry(BaseModel):
     lastmod: AwareDatetime
 
 
-class FileWatermark(BaseModel):
-    """How far a previous run got through one sitemap file.
+#: A key in the order the walk uses. Newest first, ties broken by id so that a
+#: boundary can fall between two entries sharing a second without either being
+#: repeated or skipped — which is what the old ``ids_at_lastmod`` list was for.
+type EntryKey = tuple[datetime, str]
 
-    The ids are the entries sharing the exact second of :attr:`lastmod`. Without
-    them resuming has to choose between repeating that second's work every run
-    or skipping whatever tied with it, and skipping loses postings — the same
-    asymmetry ``app/normalize/fingerprint.py`` argues for elsewhere: repeating
-    costs requests, losing costs data.
+
+def _key(entry: SitemapEntry) -> EntryKey:
+    """One entry's place in the walk's total order."""
+    return (entry.lastmod, entry.external_id)
+
+
+class Span(BaseModel):
+    """One stretch of a sitemap file this crawl has finished, closed at both ends."""
+
+    model_config = ConfigDict(frozen=True)
+
+    low_lastmod: AwareDatetime
+    low_id: str
+    high_lastmod: AwareDatetime
+    high_id: str
+
+    @property
+    def low(self) -> EntryKey:
+        """The oldest entry in the stretch."""
+        return (self.low_lastmod, self.low_id)
+
+    @property
+    def high(self) -> EntryKey:
+        """The newest entry in the stretch."""
+        return (self.high_lastmod, self.high_id)
+
+    def holds(self, key: EntryKey) -> bool:
+        """Whether this stretch covers that entry."""
+        return self.low <= key <= self.high
+
+    @classmethod
+    def between(cls, low: EntryKey, high: EntryKey) -> "Span":
+        """A stretch from one key to another, inclusive."""
+        return cls(low_lastmod=low[0], low_id=low[1], high_lastmod=high[0], high_id=high[1])
+
+
+class FileWatermark(BaseModel):
+    """Which parts of one sitemap file this crawl has finished.
+
+    **Not "how far it got".** It was a single timestamp meaning "everything
+    older than this is done", which is the right shape for a walk that goes
+    oldest-first, and that is the walk this connector used to do.
+
+    It now goes newest-first, because the freshest postings are the ones worth
+    applying to and a run is short: at hh's tolerated rate a page takes four to
+    five seconds, and both live runs were stopped by a check for robots well
+    inside a hundred pages. A run that spends its budget on the oldest end of a
+    corpus of some 13 557 postings has spent it on the postings least likely to
+    still be open.
+
+    A frontier cannot describe that. Walk newest-first and the covered set grows
+    downward from the top, and next run hh has published more above it — so the
+    covered set is an interval, not a prefix, and after an interrupted run it can
+    be two. Any single number describing that either claims the gap is done,
+    which loses those postings for good, or claims the covered part is not, which
+    buys every page again every run. Both were tried; the second is what left
+    ``source_state`` empty.
+
+    So it is a list of stretches over the same total order the walk sorts by.
+    Stretches are recomputed from the file's own entry list each time anything is
+    recorded, which is what lets neighbours merge: two are neighbours exactly
+    when no entry of that file falls between them, and only the list can say.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    lastmod: AwareDatetime | None = None
-    ids_at_lastmod: tuple[str, ...] = ()
+    covered: tuple[Span, ...] = ()
 
     def is_done(self, entry: SitemapEntry) -> bool:
-        """Whether a previous run already covered this entry."""
-        if self.lastmod is None:
-            return False
-        if entry.lastmod < self.lastmod:
-            return True
-        return entry.lastmod == self.lastmod and entry.external_id in self.ids_at_lastmod
+        """Whether some previous run already covered this entry."""
+        key = _key(entry)
+        return any(span.holds(key) for span in self.covered)
 
-    def advanced(self, entry: SitemapEntry) -> "FileWatermark":
-        """This mark, moved to include ``entry``. Never moves backwards."""
-        if self.lastmod is not None and entry.lastmod < self.lastmod:
-            return self
-        if self.lastmod == entry.lastmod:
-            tied = (*self.ids_at_lastmod, entry.external_id)[-MAX_TIED_IDS:]
-            return FileWatermark(lastmod=self.lastmod, ids_at_lastmod=tied)
-        return FileWatermark(lastmod=entry.lastmod, ids_at_lastmod=(entry.external_id,))
+    def covering(self, order: Sequence[EntryKey], done: Iterable[EntryKey]) -> "FileWatermark":
+        """This mark, extended to cover ``done``.
+
+        ``order`` is the file's whole entry list as this run read it, newest
+        first. Recomputed rather than patched: the input is a few thousand keys,
+        this runs once per confirmed batch, and a merge that is wrong in the
+        patching direction is a silently lost posting.
+
+        Stretches whose entries this run did not see at all are kept untouched —
+        a file that shrank must not silently uncover what an earlier run paid
+        for — and on overflow the OLDEST is dropped rather than merged into its
+        neighbour. Dropping means those entries are due again; merging would mean
+        claiming entries nobody fetched. Repeating costs requests, losing costs
+        data.
+        """
+        rank = {key: index for index, key in enumerate(order)}
+        marked = {index for index, key in enumerate(order) if self.is_covered(key)}
+        marked.update(rank[key] for key in done if key in rank)
+
+        spans: list[Span] = []
+        previous: int | None = None
+        for index in sorted(marked):
+            if previous is not None and index == previous + 1:
+                spans[-1] = Span.between(order[index], spans[-1].high)
+            else:
+                spans.append(Span.between(order[index], order[index]))
+            previous = index
+
+        unseen = [span for span in self.covered if not any(span.holds(key) for key in order)]
+        merged = sorted((*unseen, *spans), key=lambda span: span.high, reverse=True)
+        return FileWatermark(covered=tuple(merged[:MAX_SPANS]))
+
+    def is_covered(self, key: EntryKey) -> bool:
+        """Whether that key falls inside any finished stretch."""
+        return any(span.holds(key) for span in self.covered)
 
 
 def load_sites(path: Path | None = None) -> tuple[HHSite, ...]:
@@ -705,9 +792,6 @@ class _SiteRun:
     """
 
     site: HHSite
-    #: Ids bought by the head pass, so the ascending pass walks past them
-    #: without paying again.
-    fetched_head: set[str] = field(default_factory=set)
     fetched: int = 0
     stored: int = 0
     #: Pages that were bought and produced nothing storable: taken down since
@@ -804,6 +888,10 @@ class HHSource(BaseSource):
         #: after the pipeline's write — and a local of an async generator has
         #: nowhere to be reached from.
         self._held: list[_Held] = []
+        #: Each walked file's entry list, newest first, kept for the run. It is
+        #: what tells two finished stretches they are neighbours; see
+        #: ``FileWatermark.covering``.
+        self._order: dict[tuple[str, str], list[EntryKey]] = {}
 
     @property
     def sites(self) -> tuple[HHSite, ...]:
@@ -931,82 +1019,72 @@ class HHSource(BaseSource):
             # advances over it, and nothing writes in between. Reading it twice
             # would be two sources of truth for one number.
             marks[name] = await self._watermark(site, name)
+            # The file's whole entry list, newest first, kept for the run. It is
+            # what lets two finished stretches be recognised as neighbours when
+            # the position is recorded — only this list can say whether anything
+            # falls between them — and it is the order the walk itself uses.
+            order = sorted((_key(entry) for entry in entries), reverse=True)
+            self._order[(site.host, name)] = order
             due[name] = sorted(
                 (entry for entry in entries if not marks[name].is_done(entry)),
-                key=lambda entry: (entry.lastmod, entry.external_id),
+                key=_key,
+                reverse=True,
             )
         outstanding = sum(len(entries) for entries in due.values())
 
         state = _SiteRun(site=site)
-        head = sorted(
-            (entry for entries in due.values() for entry in entries),
-            key=lambda entry: entry.lastmod,
+        # ONE pass, strictly newest first, across every file of the site.
+        #
+        # It used to be two: a fifty-page slice of the newest entries, then the
+        # rest oldest-first. That shape came from a position that was a frontier
+        # through time, which could only move in one direction, so freshness had
+        # to be bolted on in front of it. The position is a set of stretches now
+        # and the walk can simply take the newest thing outstanding.
+        #
+        # Which matters because a run is short. At the rate hh tolerates a page
+        # costs four to five seconds, and both live runs were stopped by a check
+        # for robots inside a hundred pages. The whole corpus is not the goal —
+        # some 13 557 postings for one city, most of them long filled — so what a
+        # run must not do is spend its budget at the old end. Older entries are
+        # reached with what is left after the fresh ones, which is exactly what a
+        # descending walk over "everything not yet covered" does without needing
+        # a second phase to say so.
+        walk = sorted(
+            ((name, entry) for name, entries in due.items() for entry in entries),
+            key=lambda pair: _key(pair[1]),
             reverse=True,
-        )[:HEAD_SLICE]
-        for entry in head:
-            if stop():
-                break
-            posting = await self._fetch_counted(entry, state)
-            spend()
-            state.fetched_head.add(entry.external_id)
-            if posting is not None:
-                yield posting
-
-        for name, entries in due.items():
-            if stop():
-                logger.info(
-                    "sources.hh.file_not_reached",
-                    host=site.host,
-                    file=name,
-                    outstanding=len(entries),
-                )
-                continue
-            # Every entry the walk finishes goes on ``self._held`` and stays
-            # there until the pipeline says its posting is written. Nothing here
-            # decides when that is; ``record_progress`` does, from the count the
-            # pipeline hands back. That is the whole of the change: the walk used
-            # to guess, by staying a fixed number of postings behind, and the
-            # guess was larger than every run this source ever completed.
-            try:
-                for index, entry in enumerate(entries):
-                    if stop():
-                        logger.info(
-                            "sources.hh.budget_reached",
-                            host=site.host,
-                            file=name,
-                            # What a run could not reach has to be visible, or a
-                            # truncated crawl reads as a completed one.
-                            remaining_in_file=len(entries) - index,
-                            outstanding_on_site=outstanding,
-                            held=len(self._held),
-                        )
-                        self._log_site(site, state, budget, outstanding)
-                        return
-                    if entry.external_id in state.fetched_head:
-                        # Already bought in the head pass. Walk past it so the
-                        # mark can advance; do not pay for it twice.
-                        pass
-                    else:
-                        posting = await self._fetch_counted(entry, state)
-                        spend()
-                        if posting is not None:
-                            yield posting
-                    # ``after``, not ``before``: an entry that stored nothing is
-                    # accounted for as soon as everything ahead of it is written,
-                    # and one that stored a posting only when that posting is.
-                    # A stretch of pages that yield nothing — taken down,
-                    # archived, answering for another vacancy — is common in a
-                    # corpus this size, and counting them by entry rather than
-                    # by posting is what would push the mark past unwritten work.
-                    self._hold(site, name, entry, state.stored)
-            except Exception:
-                # Re-raised untouched; nothing here classifies it. The held
-                # entries are not dropped: the pipeline rescues the batch it was
-                # holding and confirms it while this exception unwinds, and the
-                # confirmation is what records them. On the run that produced
-                # this rule that was fifty pages which had cost fifty requests
-                # and were about to be walked again from the top.
-                raise
+        )
+        try:
+            for index, (name, entry) in enumerate(walk):
+                if stop():
+                    logger.info(
+                        "sources.hh.budget_reached",
+                        host=site.host,
+                        # What a run could not reach has to be visible, or a
+                        # truncated crawl reads as a completed one.
+                        remaining=len(walk) - index,
+                        outstanding_on_site=outstanding,
+                        held=len(self._held),
+                    )
+                    break
+                posting = await self._fetch_counted(entry, state)
+                spend()
+                if posting is not None:
+                    yield posting
+                # ``after``, not ``before``: an entry that stored nothing is
+                # accounted for as soon as everything ahead of it is written, and
+                # one that stored a posting only when that posting is. A stretch
+                # of pages that yield nothing — taken down, archived, answering
+                # for another vacancy — is common in a corpus this size, and
+                # counting them by entry rather than by posting is what would
+                # push the position past unwritten work.
+                self._hold(site, name, entry, state.stored)
+        except Exception:
+            # Re-raised untouched; nothing here classifies it. The held entries
+            # are not dropped: the pipeline rescues the batch it was holding and
+            # confirms it while this unwinds, and that confirmation is what
+            # records them.
+            raise
 
         self._log_site(site, state, budget, outstanding)
 
@@ -1019,7 +1097,6 @@ class HHSource(BaseSource):
             host=site.host,
             outstanding=outstanding,
             fetched=state.fetched,
-            head=len(state.fetched_head),
             stored=state.stored,
             not_stored=state.not_stored,
             unreadable=state.unreadable,
@@ -1412,15 +1489,15 @@ class HHSource(BaseSource):
             return
         self._held = [held for held in self._held if held.after > durable]
 
-        marks: dict[tuple[str, str], tuple[HHSite, str, FileWatermark]] = {}
+        by_file: dict[tuple[str, str], tuple[HHSite, str, list[EntryKey]]] = {}
         for held in confirmed:
             key = (held.site.host, held.name)
-            if key not in marks:
-                marks[key] = (held.site, held.name, await self._watermark(held.site, held.name))
-            site, name, mark = marks[key]
-            marks[key] = (site, name, mark.advanced(held.entry))
-        for site, name, mark in marks.values():
-            await self._save_watermark(site, name, mark)
+            site, name, keys = by_file.setdefault(key, (held.site, held.name, []))
+            keys.append(_key(held.entry))
+        for key, (site, name, keys) in by_file.items():
+            order = self._order.get(key, [])
+            mark = await self._watermark(site, name)
+            await self._save_watermark(site, name, mark.covering(order, keys))
 
     def _state_key(self, site: HHSite, name: str) -> str:
         """Where one sitemap file's position is stored. Per file, never global."""
@@ -1458,7 +1535,7 @@ class HHSource(BaseSource):
         when the lag has not been cleared, and the only way to see that from
         outside was an empty ``source_state`` table nobody was looking at.
         """
-        if mark.lastmod is None:
+        if not mark.covered:
             logger.debug("sources.hh.position_not_advanced", host=site.host, file=name)
             return
         await self.state_set(self._state_key(site, name), mark.model_dump(mode="json"))
@@ -1466,8 +1543,9 @@ class HHSource(BaseSource):
             "sources.hh.position_saved",
             host=site.host,
             file=name,
-            through=mark.lastmod.isoformat(),
-            tied_ids=len(mark.ids_at_lastmod),
+            stretches=len(mark.covered),
+            newest=mark.covered[0].high_lastmod.isoformat(),
+            oldest=mark.covered[-1].low_lastmod.isoformat(),
         )
 
     async def _record_while_unwinding(self, site: HHSite, name: str, mark: FileWatermark) -> None:

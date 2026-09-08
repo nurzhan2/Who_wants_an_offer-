@@ -61,16 +61,16 @@ from app.pipeline.runner import UPSERT_BATCH
 from app.sources.base import RawPosting, SearchQuery
 from app.sources.hh import (
     GONE_STATUSES,
-    HEAD_SLICE,
     MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
-    MAX_TIED_IDS,
+    MAX_SPANS,
     FileWatermark,
     HHMarkupError,
     HHSite,
     HHSource,
     SitemapEntry,
     _entry,
+    _key,
     _remote_from,
     _salary,
     load_sites,
@@ -167,6 +167,18 @@ def dated(ids: Sequence[str], *, start: datetime = WHEN) -> list[tuple[str, date
     return [(vacancy_id, start + timedelta(minutes=index)) for index, vacancy_id in enumerate(ids)]
 
 
+def in_walk_order(ids: Sequence[str]) -> list[tuple[str, datetime]]:
+    """``dated``, arranged so the walk reaches ``ids`` in the order written.
+
+    The walk takes the newest outstanding entry first and ``dated`` numbers them
+    oldest-first, so a test meaning "these two, then the refusal" hands the
+    sitemap the reverse of what it says. Written once here rather than reversed
+    at each call site, because a reversal in a fixture is exactly the kind of
+    detail that reads as noise and then quietly inverts a test.
+    """
+    return dated(list(reversed(ids)))
+
+
 class StateStore:
     """The pipeline's crawl-position store, without a database.
 
@@ -255,7 +267,7 @@ def _covered_ids(saved: dict[str, Any], ids: Sequence[str]) -> set[str]:
     mark = FileWatermark.model_validate(saved)
     return {
         vacancy_id
-        for vacancy_id, when in dated(list(ids))
+        for vacancy_id, when in in_walk_order(ids)
         if mark.is_done(
             SitemapEntry(external_id=vacancy_id, url=vacancy_url(vacancy_id), lastmod=when)
         )
@@ -275,7 +287,6 @@ def derived(posting: RawPosting) -> dict[str, Any]:
 #: below patches the module attribute. A test that wants the real value has to
 #: put it back, and this is where it is kept so that putting it back cannot
 #: quietly become "put 50 back" after somebody edits the connector.
-SHIPPED_HEAD_SLICE = HEAD_SLICE
 
 
 @pytest.fixture(autouse=True)
@@ -290,7 +301,6 @@ def no_head_slice(monkeypatch: pytest.MonkeyPatch) -> None:
     nothing ever exercised as it ships. See
     ``test_the_shipped_head_slice_walks_a_small_file_once_and_records_it``.
     """
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 0)
 
 
 @pytest.fixture
@@ -341,8 +351,12 @@ def hh(client: SourceClient, http: respx.MockRouter, store: StateStore) -> HHSou
 
 
 def serve(http: respx.MockRouter, ids: Sequence[str]) -> dict[str, respx.Route]:
-    """Serve a sitemap listing those ids, and each of their pages."""
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    """Serve a sitemap listing those ids, and each of their pages.
+
+    ``ids`` is in WALK order: the first is the one the walk takes first, because
+    it is the newest. See :func:`in_walk_order`.
+    """
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     return {
         vacancy_id: http.get(vacancy_url(vacancy_id)).mock(
             return_value=httpx.Response(200, text=page(state(vacancy_id)))
@@ -373,7 +387,7 @@ def serve_many(http: respx.MockRouter, ids: Sequence[str]) -> dict[str, respx.Ro
     demands more than a hundred postings in one run, which is the whole reason
     no test had ever done it.
     """
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     payload = state(EMPTY_DESCRIPTION)
     routes: dict[str, respx.Route] = {}
     for vacancy_id in ids:
@@ -498,7 +512,7 @@ async def test_one_unreadable_page_is_tolerated_and_a_pattern_of_them_is_not(
     handling is to say so instead of returning nothing.
     """
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     http.get(vacancy_url(FULL)).mock(
         return_value=httpx.Response(200, text="<html>hh redesigned this page</html>")
     )
@@ -686,19 +700,28 @@ def test_a_watermark_never_moves_backwards_and_remembers_a_tie() -> None:
         external_id="0", url=vacancy_url("0"), lastmod=WHEN - timedelta(minutes=1)
     )
 
-    mark = FileWatermark().advanced(first)
+    order = [_key(entry) for entry in (later, tied, first, earlier)]
+
+    mark = FileWatermark().covering(order, [_key(first)])
     assert mark.is_done(first)
     assert not mark.is_done(tied), "a tie must not be mistaken for done"
+    assert not mark.is_done(earlier), "nor an entry the walk has not reached"
 
-    mark = mark.advanced(tied)
-    assert mark.is_done(tied)
-    assert mark.ids_at_lastmod == ("1", "2")
+    mark = mark.covering(order, [_key(tied)])
+    assert mark.is_done(tied) and mark.is_done(first)
+    assert len(mark.covered) == 1, "two neighbours are one stretch, not two"
 
-    mark = mark.advanced(later)
-    assert mark.ids_at_lastmod == ("3",), "a new second replaces the tie list"
-    assert mark.is_done(first) and mark.is_done(tied)
+    # A gap, because the walk skipped ``earlier`` to take the newest thing due.
+    mark = mark.covering(order, [_key(later)])
+    assert len(mark.covered) == 1, "and ``later`` is a neighbour of ``tied`` too"
+    assert not mark.is_done(earlier)
 
-    assert mark.advanced(earlier) == mark, "the mark must never move backwards"
+    # Now one that really is disjoint: cover the oldest with the newest already
+    # covered and something uncovered between them.
+    sparse = FileWatermark().covering(order, [_key(later), _key(earlier)])
+    assert len(sparse.covered) == 2, "a hole in the middle is two stretches"
+    assert sparse.is_done(later) and sparse.is_done(earlier)
+    assert not sparse.is_done(tied) and not sparse.is_done(first)
 
 
 # -- what a posting carries --------------------------------------------
@@ -1120,33 +1143,18 @@ def _index_body() -> str:
 # -- ordering, the position's lag, and sharing a budget ----------------
 
 
-async def test_the_freshest_postings_arrive_in_the_first_run(
+async def test_no_entry_is_bought_twice_in_one_run(
     hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Why the walk is not purely ascending.
+    """One pass over each entry, which is now true by construction.
 
-    A city's sitemap spans about a month. Ascending order is what makes the
-    position resumable, and on its own it would spend the first several runs on
-    three-week-old postings — a good share of them already expired — while the
-    vacancy published this morning waited a fortnight. For a job search that is
-    the wrong end of the file, so a bounded slice of the newest entries is
-    bought first.
+    It was not always: the walk used to buy a slice of the newest entries and
+    then walk the whole file again in ascending order, and the second pass had
+    to recognise and skip what the first had paid for. A single descending pass
+    has nothing to skip. Kept because "each page is fetched once" is worth
+    holding whatever the walk looks like, and because the bookkeeping that used
+    to make it true is exactly the kind that gets deleted as unused.
     """
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
-    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
-    serve(http, ids)  # dated ascending, so SALARY_TO_ONLY is the newest
-
-    postings = await collect(hh)
-
-    assert [posting.external_id for posting in postings][:2] == [SALARY_TO_ONLY, NO_COMPENSATION]
-    assert sorted(posting.external_id for posting in postings) == sorted(ids)
-
-
-async def test_a_head_pass_entry_is_not_bought_twice_in_one_run(
-    hh: HHSource, http: respx.MockRouter, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The ascending pass walks past what the head pass already paid for."""
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
     routes = serve(http, ids)
 
@@ -1154,34 +1162,6 @@ async def test_a_head_pass_entry_is_not_bought_twice_in_one_run(
 
     assert len(postings) == len(ids)
     assert [route.call_count for route in routes.values()] == [1, 1, 1, 1]
-
-
-async def test_the_head_pass_does_not_declare_the_tail_done(
-    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The invariant the whole ordering rests on.
-
-    A mark can only ever say "everything up to here is done". Advancing it to an
-    entry the head pass fetched would declare every older entry done as well,
-    and the tail of the file would never be crawled at all — the exact silent
-    loss the ascending pass exists to prevent. So the head pass records nothing.
-    """
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
-    # Budget: index + two sitemaps + the two head pages, and nothing after.
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 5)
-    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
-    routes = serve(http, ids)
-
-    first = await collect(hh)
-
-    assert [posting.external_id for posting in first] == [SALARY_TO_ONLY, NO_COMPENSATION]
-    assert store.saved == {}, "the head pass must record no position at all"
-
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 20)
-    second = await collect(hh)
-
-    assert {posting.external_id for posting in second} == set(ids)
-    assert routes[FULL].call_count == 1, "the oldest entry was reached exactly once"
 
 
 async def test_nothing_is_recorded_until_the_pipeline_confirms(
@@ -1244,7 +1224,7 @@ async def test_a_run_cut_by_a_challenge_records_what_the_pipeline_rescued(
     position recorded anyway.
     """
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     for vacancy_id in (FULL, NULL_COLLECTIONS):
         http.get(vacancy_url(vacancy_id)).mock(
             return_value=httpx.Response(200, text=page(state(vacancy_id)))
@@ -1317,29 +1297,56 @@ async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the
     assert store.saved == {}
 
 
-async def test_the_shipped_head_slice_walks_a_small_file_once_and_records_it(
+async def test_the_walk_takes_the_newest_thing_outstanding_first(
     hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The second constant this file had never run as it ships.
+    """Strictly by descending ``lastmod``, across the whole site.
 
-    ``HEAD_SLICE`` is monkeypatched to 0 by an autouse fixture, so every test
-    here walks with the newest-first pass switched off, and the two that do turn
-    it on set it to 2. Fifty is what runs in production, and on a file with
-    fewer than fifty outstanding entries it changes the shape of the whole walk:
-    every entry is bought by the head pass, the ascending pass then buys nothing
-    and only walks past them, and the position has to come out of that walk
-    anyway. Nothing was checking that it did.
+    The whole corpus is not the goal — some 13 557 postings for one city, most
+    long filled — and at the rate hh tolerates a page costs four to five
+    seconds, so a run reaches a small part of it. What it must not do is spend
+    that on the oldest end. Older entries are what the remaining budget reaches.
+
+    Asserted on the order postings come out in, not on the order of requests,
+    because that is the order everything downstream sees.
     """
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", SHIPPED_HEAD_SLICE)
-    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
-    routes = serve(http, ids)
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    serve(http, ids)
 
     postings = await collect(hh)
 
-    # Newest first, which is what the head pass is for.
-    assert [posting.external_id for posting in postings] == list(reversed(ids))
-    assert [route.call_count for route in routes.values()] == [1, 1, 1]
-    assert store.saved[f"sitemap:{HOST}:vacancy0"]["ids_at_lastmod"] == [NO_COMPENSATION]
+    got = [posting.external_id for posting in postings]
+    assert got == ids, f"walked {got}, wanted newest first"
+
+
+async def test_a_short_run_spends_its_budget_on_the_newest_and_records_them(
+    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The two requirements together, on the run shape that actually happens.
+
+    A budget that reaches two of four pages must buy the two newest, and the
+    position must say so — so the next run starts at the third rather than at
+    the top. Under the previous design it bought the two OLDEST and recorded
+    nothing at all.
+    """
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
+    routes = serve(http, ids)
+    # Three of the budget go on the index and the two sitemap files.
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 5)
+
+    first = await collect(hh)
+
+    assert [posting.external_id for posting in first] == [FULL, NULL_COLLECTIONS]
+    covered = _covered_ids(store.saved[f"sitemap:{HOST}:vacancy0"], ids)
+    assert covered == {FULL, NULL_COLLECTIONS}
+
+    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 1200)
+    second = await collect(hh)
+
+    assert [posting.external_id for posting in second] == [NO_COMPENSATION, SALARY_TO_ONLY], (
+        "the second run must continue below the first, not start again at the top"
+    )
+    assert routes[FULL].call_count == 1
 
 
 async def test_every_configured_city_is_reached_before_any_city_gets_seconds(
@@ -1365,7 +1372,6 @@ async def test_every_configured_city_is_reached_before_any_city_gets_seconds(
         encoding="utf-8",
     )
     monkeypatch.setattr("app.sources.hh.SITES_FILE", sites)
-    monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 0)
     # Eight requests, four per city: index, two sitemaps, one page.
     monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
 
@@ -1535,7 +1541,9 @@ async def test_entries_that_yield_nothing_do_not_drag_the_position_forward(
     # a drained file legitimately records its tail once the walk is over, and
     # what is under test here is the mark moving mid-walk.
     dead = [NO_COMPENSATION, SALARY_TO_ONLY, SALARY_FROM_ONLY, SALARY_NO_FREQUENCY]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(live + dead))))
+    http.get(VACANCY0_URL).mock(
+        return_value=httpx.Response(200, text=sitemap(in_walk_order(live + dead)))
+    )
     for vacancy_id in live:
         http.get(vacancy_url(vacancy_id)).mock(
             return_value=httpx.Response(200, text=page(state(vacancy_id)))
@@ -1592,7 +1600,9 @@ async def test_a_drained_file_records_its_tail_only_once_the_walk_is_over(
     with pytest.raises(HHMarkupError):
         await collect(hh)
 
-    recorded = store.saved.get(f"sitemap:{HOST}:vacancy0", {}).get("ids_at_lastmod", [])
+    recorded = _covered_ids(
+        store.saved.get(f"sitemap:{HOST}:vacancy0", {}), [FULL, NULL_COLLECTIONS]
+    )
     assert NULL_COLLECTIONS not in recorded, "the last posting of the file was declared done"
 
 
@@ -1603,7 +1613,10 @@ async def test_a_walk_that_finishes_records_the_tail_it_was_holding(
     routes = serve(http, [FULL, NULL_COLLECTIONS])
 
     assert len(await collect(hh)) == 2
-    assert store.saved[f"sitemap:{HOST}:vacancy0"]["ids_at_lastmod"] == [NULL_COLLECTIONS]
+    assert _covered_ids(store.saved[f"sitemap:{HOST}:vacancy0"], [FULL, NULL_COLLECTIONS]) == {
+        FULL,
+        NULL_COLLECTIONS,
+    }
 
     assert await collect(hh) == []
     assert routes[FULL].call_count == 1
@@ -1715,7 +1728,7 @@ async def test_a_shape_change_reports_the_field_and_not_the_page(
     # Three, because one odd page is tolerated: the raise is what happens when
     # it is a pattern, and the raise is what reaches the API.
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     for vacancy_id in ids:
         broken = state(vacancy_id)
         del broken["vacancyView"]["name"]
@@ -1905,27 +1918,27 @@ async def test_the_country_comes_from_the_page_not_from_the_site(
     assert derived((await collect(hh))[0])["country"] == "UZ"
 
 
-def test_the_tie_list_cannot_grow_without_bound() -> None:
-    """The cap on ids remembered at one timestamp, which nothing was holding.
+def test_the_finished_stretches_cannot_grow_without_bound() -> None:
+    """The cap on stretches remembered per file, which nothing was holding.
 
-    The list exists so that resuming neither repeats nor skips entries sharing a
-    second. It is stored as JSONB on every save, so an unbounded one is a row
-    that grows all run; past the cap the tie resolves by repeating, which costs
-    requests and never costs a posting.
+    A stretch is added when a run leaves a gap, so the count bounds
+    interruptions rather than entries — but it is stored as JSONB on every save,
+    and an unbounded list is a row that grows all run. Past the cap the OLDEST
+    is dropped, which makes those entries due again: repeating costs requests,
+    and merging two stretches that are not neighbours would claim entries nobody
+    fetched.
     """
-    mark = FileWatermark()
-    for index in range(MAX_TIED_IDS + 10):
-        mark = mark.advanced(
-            SitemapEntry(external_id=str(index), url=vacancy_url(str(index)), lastmod=WHEN)
-        )
+    # Every other entry, so no two covered entries are ever neighbours and each
+    # one has to become its own stretch.
+    order = [
+        (WHEN + timedelta(minutes=index), str(index)) for index in range(MAX_SPANS * 2 + 20, 0, -1)
+    ]
+    every_other = [key for index, key in enumerate(order) if index % 2 == 0]
 
-    assert len(mark.ids_at_lastmod) == MAX_TIED_IDS
-    # The cap keeps the NEWEST ids: those are the ones a resume would otherwise
-    # re-fetch first.
-    assert mark.ids_at_lastmod[-1] == str(MAX_TIED_IDS + 9)
-    assert mark.is_done(
-        SitemapEntry(external_id=str(MAX_TIED_IDS + 9), url=vacancy_url("x"), lastmod=WHEN)
-    )
+    mark = FileWatermark().covering(order, every_other)
+
+    assert len(mark.covered) == MAX_SPANS
+    assert mark.covered[0].high == every_other[0], "the newest stretch is the one kept"
 
 
 def test_a_sitemap_id_too_long_for_the_column_is_dropped() -> None:
@@ -1978,7 +1991,7 @@ async def test_a_captcha_redirect_stops_the_walk_and_keeps_what_it_bought(
     decision about this crawler and the next page would get the same one.
     """
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     for vacancy_id in (FULL, NULL_COLLECTIONS):
         http.get(vacancy_url(vacancy_id)).mock(
             return_value=httpx.Response(200, text=page(state(vacancy_id)))
@@ -2008,7 +2021,7 @@ async def test_a_challenge_is_not_counted_as_an_unreadable_page(
     redesign that did not happen is both wrong and impolite.
     """
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     http.get(vacancy_url(FULL)).mock(
         return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
     )
@@ -2047,7 +2060,7 @@ async def test_a_challenge_never_declares_the_page_it_was_refused_done(
     test can no longer pass by recording nothing at all.
     """
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     for vacancy_id in (FULL, NULL_COLLECTIONS):
         http.get(vacancy_url(vacancy_id)).mock(
             return_value=httpx.Response(200, text=page(state(vacancy_id)))
@@ -2104,7 +2117,7 @@ async def test_a_challenge_names_the_host_and_the_page_in_the_log(
     Its two counters say how much of the walk had already been paid for.
     """
     ids = [FULL, NULL_COLLECTIONS]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     http.get(vacancy_url(FULL)).mock(return_value=httpx.Response(200, text=page(state(FULL))))
     http.get(vacancy_url(NULL_COLLECTIONS)).mock(
         return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
@@ -2159,7 +2172,7 @@ async def test_a_challenge_carrying_a_gone_status_is_still_a_stopped_crawl(
     """
     assert 404 in GONE_STATUSES, "otherwise this proves nothing about the ordering"
     ids = [FULL, NULL_COLLECTIONS]
-    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
+    http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(in_walk_order(ids))))
     asked: list[str] = []
     served = hh.http.get_text
 
