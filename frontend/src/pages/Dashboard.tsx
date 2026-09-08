@@ -1,17 +1,33 @@
-import { HealthBadge } from '@/components/HealthBadge'
+import { Shell } from '@/components/Shell'
+import { useOverview } from '@/hooks/queries'
+import { useLocation } from '@/hooks/useLocation'
+import { Applications } from '@/pages/Applications'
+import { Documents } from '@/pages/Documents'
+import { MyData } from '@/pages/MyData'
+import { Overview } from '@/pages/Overview'
+import { Vacancies } from '@/pages/Vacancies'
+import { Workshop } from '@/pages/Workshop'
 
+/**
+ * Which screen is on, and the one thing every screen shares.
+ *
+ * The overview query lives here because the header needs the active profile and
+ * so does the first screen; asking twice would let the header say one thing
+ * while the page below it says another. Every other screen fetches its own
+ * data — they are read separately and nothing compares them.
+ */
 export function Dashboard() {
+  const { route, id } = useLocation()
+  const overview = useOverview()
+
   return (
-    <main className="mx-auto max-w-3xl px-6 py-16">
-      <h1 className="text-3xl font-semibold tracking-tight text-slate-900">
-        Who wants an offer?
-      </h1>
-      <p className="mt-3 text-slate-600">
-        Каркас готов. Дашборд с вакансиями появится в фазе 7.
-      </p>
-      <div className="mt-8 rounded-lg border border-slate-200 bg-white p-4">
-        <HealthBadge />
-      </div>
-    </main>
+    <Shell route={route} profile={overview.data?.profile ?? null}>
+      {route === 'overview' ? <Overview query={overview} /> : null}
+      {route === 'vacancies' ? <Vacancies selected={id} /> : null}
+      {route === 'applications' ? <Applications /> : null}
+      {route === 'documents' ? <Documents /> : null}
+      {route === 'workshop' ? <Workshop /> : null}
+      {route === 'profile' ? <MyData /> : null}
+    </Shell>
   )
 }
