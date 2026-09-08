@@ -135,7 +135,6 @@ for a posting with no salary — the check has to be for the key.
 import html as html_lib
 import json
 import re
-from collections import deque
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -233,55 +232,21 @@ MAX_MARKUP_FAILURES = 3
 #: runs. What a run could not reach is logged, never silently dropped.
 MAX_PAGES_PER_RUN = 1200
 
-#: How far the recorded position lags behind what has been yielded, in postings.
+#: How many walked entries may wait for the pipeline's confirmation before the
+#: walk stops adding to the list. Not a correctness bound — the pipeline
+#: confirms every ``UPSERT_BATCH`` postings and the list drains each time — but
+#: a stretch of pages that store nothing would otherwise be held in memory
+#: without limit.
 #:
-#: A posting is handed to the pipeline long before the pipeline writes it: the
-#: runner accumulates a batch and commits it in one go. A mark that named the
-#: posting just yielded would therefore, after a crash, declare written what was
-#: only ever in memory — and those postings are then never fetched again,
-#: because the mark says they are done.
-#:
-#: The safe value is derivable, so here is the derivation rather than a number
-#: to take on trust. Write ``B`` for the runner's batch size (``UPSERT_BATCH``,
-#: 100). The runner appends every posting it is handed and commits the moment
-#: the batch reaches ``B``, so once ``S`` postings have been handed over it has
-#: committed the first ``floor(S / B) * B`` of them and holds at most ``B - 1``.
-#: The walk advances the mark over an entry when ``stored - before > LAG``,
-#: which is to say when at least ``LAG`` further postings have been handed over
-#: after that entry's own. Call that posting's position in the run ``g``, so
-#: ``S - g >= LAG``. It is committed when ``floor(S / B) * B >= g``, and since
-#: ``floor(S / B) * B > S - B`` it is enough that ``S - B >= g - 1``, which
-#: follows from ``S - g >= LAG`` whenever ``LAG >= B - 1``. So ``B - 1`` is the
-#: smallest lag that cannot name an unwritten posting, and anything above it is
-#: margin. ``stored`` counts one site while the runner's batch counts the whole
-#: run, which only ever helps: sites are walked one after another, so postings
-#: handed over after an entry within its site are a subset of those handed over
-#: after it in the run, and the test the walk applies is therefore the stricter
-#: of the two.
-#:
-#: Corrected 2026-09-07, and the correction is the point. The value was 200 —
-#: two batches — on the reasoning that a connector must not know how the
-#: pipeline batches, only that this exceeds it. What that margin cost was then
-#: measured. A run advances the mark ``max(0, stored - LAG)`` times, so at 200 a
-#: run storing 10, 100, 172 or exactly 200 postings advanced it zero times, left
-#: ``lastmod`` unset, and recorded nothing at any exit. The live run of
-#: 2026-09-06 stored 172 before hh's captcha stopped it. That is why
-#: ``source_state`` was empty rather than stale, why every run re-read the file
-#: from the top, and why the corpus stood at 466 rows against some 13 557 for
-#: the city. The margin was not free; it was the whole cost.
-#:
-#: What guards this against ``UPSERT_BATCH`` growing is not slack — slack fails
-#: by silently recording nothing, which is exactly what happened —
-#: but ``test_the_lag_is_derived_from_the_pipelines_unwritten_window``, which reads
-#: both numbers and fails the build when they cross. The number stays stated
-#: here rather than imported from ``pipeline/``, so that a connector still does
-#: not depend on how the pipeline batches; only its test does.
-WATERMARK_LAG = 100
-
-#: Entries the position may advance over between two writes of it. Every entry
-#: would be a database round trip per page; never would mean a run killed near
-#: its budget re-walked everything next time.
-WATERMARK_SAVE_EVERY = 50
+#: This replaced ``WATERMARK_LAG``, which held the recorded position a fixed
+#: number of postings behind the walk on the reasoning that the pipeline's
+#: unwritten batch is at most that big. The reasoning was right and the number
+#: was unknowable from here: a run shorter than the lag recorded NOTHING, and
+#: measured against two live crawls no run ever was longer. hh answered with a
+#: check for robots at the 172nd posting and then, at a higher rate, at the
+#: 50th. ``BaseSource.record_progress`` replaced the guess with the pipeline
+#: saying what it has actually written.
+MAX_HELD = 5_000
 
 #: The sitemaps are never cached. ``cache_ttl`` is thirty days because a
 #: vacancy page carries its own ``lastmod`` as a cache salt, so an edited
@@ -755,19 +720,23 @@ class _SiteRun:
 
 
 @dataclass(slots=True)
-class _Tail:
-    """The end of a drained sitemap file, held back until the walk is over.
+class _Held:
+    """One walked entry, waiting for the pipeline to confirm its posting is written.
 
-    The lag keeps the recorded position behind what has been handed to the
-    pipeline. When a file runs out there is nothing left to keep the lag
-    honest, so its remainder waits here until every posting of the run has been
-    yielded — at which point the runner writes its last batch immediately.
+    ``after`` is how many postings the walk had yielded once this entry was
+    finished with. It is safe to record when the pipeline says it has written
+    that many: for an entry that stored nothing, as soon as everything ahead of
+    it is written; for one that stored a posting, when that posting is in the
+    database.
+
+    This replaced a fixed lag, which was the same number guessed by the party
+    that cannot know it. See ``MAX_HELD`` and ``BaseSource.record_progress``.
     """
 
     site: HHSite
     name: str
-    mark: FileWatermark
-    entries: list[SitemapEntry]
+    entry: SitemapEntry
+    after: int
 
 
 @register_source
@@ -786,7 +755,29 @@ class HHSource(BaseSource):
     #: One request a second, two in hand. hh publishes no Crawl-delay for the
     #: wildcard group — the only one in the file belongs to bingbot — so this is
     #: our own restraint rather than their instruction, and we are a guest here.
-    rate_limit: ClassVar[RateLimit] = RateLimit(requests_per_second=1.0, burst=2)
+    #: One request every four to five seconds, and the numbers are measured
+    #: rather than chosen for comfort. Two live runs against almaty.hh.kz:
+    #:
+    #:     0.73 rps -> hh answered with a captcha at the 172nd posting
+    #:     1.02 rps -> hh answered with a captcha at the 50th posting
+    #:
+    #: Both runs were inside robots.txt and neither used an account, so the
+    #: limit hh is enforcing here is a rate, not a permission. A crawl that is
+    #: stopped after fifty pages collects nothing and costs the account its
+    #: standing, so the slower rate is not a concession — it is the only rate at
+    #: which the corpus grows at all.
+    #:
+    #: ``burst=1`` because a burst of two is two requests in the same instant,
+    #: which is the shape being avoided. The jitter puts the real interval
+    #: between four and five seconds, i.e. 0.20-0.25 requests a second.
+    #:
+    #: The cost is stated plainly: at this rate ``MAX_PAGES_PER_RUN`` pages take
+    #: about ninety minutes. That is why the walk goes newest-first — see
+    #: ``search_batch`` — because a run that is interrupted should have spent
+    #: its time on the postings worth applying to.
+    rate_limit: ClassVar[RateLimit] = RateLimit(
+        requests_per_second=0.25, burst=1, jitter_seconds=1.0
+    )
     #: The walk fetches the page itself; there is nothing left to fill in.
     needs_detail_fetch: ClassVar[bool] = False
     #: Not metered by hh. Counting our own requests in a second place would only
@@ -807,6 +798,12 @@ class HHSource(BaseSource):
     def __init__(self, *, http: "SourceHTTP | None" = None) -> None:
         super().__init__(http=http)
         self._sites: tuple[HHSite, ...] | None = None
+        #: Entries the walk has finished with, waiting for the pipeline to say
+        #: their postings are written. Held on the instance rather than in the
+        #: walk because the confirmation arrives from outside the generator —
+        #: after the pipeline's write — and a local of an async generator has
+        #: nowhere to be reached from.
+        self._held: list[_Held] = []
 
     @property
     def sites(self) -> tuple[HHSite, ...]:
@@ -869,29 +866,14 @@ class HHSource(BaseSource):
         # records no position by design. The unspent budget is not lost; the
         # next run spends it, starting where this one stopped.
         share = max(1, MAX_PAGES_PER_RUN // len(sites))
-        tails: list[_Tail] = []
         for site in sites:
-            async for posting in self._crawl_site(site, budget, allowance=share, tails=tails):
+            async for posting in self._crawl_site(site, budget, allowance=share):
                 yield posting
-        # Everything has been handed over, so the end of each drained file — the
-        # part the lag was holding back — can be recorded. This is the last
-        # thing the walk does, because the runner writes its final batch as soon
-        # as this generator finishes: the window in which a recorded entry is
-        # still unwritten is that hand-off and nothing more. A run that dies
-        # earlier records none of these and re-fetches them next time.
-        #
-        # This is the one place the walk records an entry whose posting the
-        # pipeline may still be holding, and it is worth being explicit that the
-        # exception is bought rather than free. A drained file's remainder has
-        # nowhere else to go: hold it back and every future run buys those pages
-        # again, forever. A file cut short by the budget or by a challenge has
-        # somewhere else to go — the next run, which starts there — so those two
-        # exits record the lagged mark and nothing more.
-        for tail in tails:
-            mark = tail.mark
-            for entry in tail.entries:
-                mark = mark.advanced(entry)
-            await self._save_watermark(tail.site, tail.name, mark)
+        # No tail flush any more. The walk records nothing on its own: every
+        # entry it finishes waits on ``self._held`` until the pipeline confirms
+        # the posting is written, and the pipeline confirms after its last write
+        # too — so a drained file's remainder is recorded by that confirmation
+        # rather than by a hand-off window this generator had to open for it.
 
     async def search(self, query: SearchQuery) -> AsyncIterator[RawPosting]:
         """One query's worth of the same walk.
@@ -904,7 +886,7 @@ class HHSource(BaseSource):
             yield posting
 
     async def _crawl_site(
-        self, site: HHSite, budget: CrawlBudget, *, allowance: int, tails: list["_Tail"]
+        self, site: HHSite, budget: CrawlBudget, *, allowance: int
     ) -> AsyncIterator[RawPosting]:
         """Walk one host: the index, then every sitemap's outstanding entries.
 
@@ -979,19 +961,12 @@ class HHSource(BaseSource):
                     outstanding=len(entries),
                 )
                 continue
-            mark = marks[name]
-            # The position lags the yields, by ``WATERMARK_LAG`` postings; the
-            # derivation of that number, and what happened when it was twice as
-            # large as it needed to be, are written out where it is declared.
-            #
-            # Each entry is remembered with the number of postings yielded
-            # before it. The lag has to be measured in POSTINGS, not in entries:
-            # a stretch of entries that yield nothing — taken down, archived,
-            # answering for another vacancy — would otherwise push the mark
-            # forward while the postings before them were still unwritten, and a
-            # corpus this size has such stretches.
-            pending: deque[tuple[SitemapEntry, int]] = deque()
-            unsaved = 0
+            # Every entry the walk finishes goes on ``self._held`` and stays
+            # there until the pipeline says its posting is written. Nothing here
+            # decides when that is; ``record_progress`` does, from the count the
+            # pipeline hands back. That is the whole of the change: the walk used
+            # to guess, by staying a fixed number of postings behind, and the
+            # guess was larger than every run this source ever completed.
             try:
                 for index, entry in enumerate(entries):
                     if stop():
@@ -1003,57 +978,35 @@ class HHSource(BaseSource):
                             # truncated crawl reads as a completed one.
                             remaining_in_file=len(entries) - index,
                             outstanding_on_site=outstanding,
+                            held=len(self._held),
                         )
-                        # Everything the lag still holds back is left for the
-                        # next run rather than recorded here, and that is the
-                        # difference between this exit and a drained file. A
-                        # drained file's remainder is held back forever if it is
-                        # not recorded, so ``search_batch`` accepts a hand-off
-                        # window to record it; a truncated file's remainder is
-                        # simply the next run's first entries, bought once more
-                        # and then walked past. A bounded re-buy is not worth a
-                        # window in which the mark names a posting the pipeline
-                        # has not written.
-                        await self._save_watermark(site, name, mark)
                         self._log_site(site, state, budget, outstanding)
                         return
-                    before = state.stored
                     if entry.external_id in state.fetched_head:
                         # Already bought in the head pass. Walk past it so the
                         # mark can advance; do not pay for it twice.
-                        pending.append((entry, before))
+                        pass
                     else:
                         posting = await self._fetch_counted(entry, state)
                         spend()
-                        pending.append((entry, before))
                         if posting is not None:
                             yield posting
-                    while pending and state.stored - pending[0][1] > WATERMARK_LAG:
-                        mark = mark.advanced(pending.popleft()[0])
-                        unsaved += 1
-                    if unsaved >= WATERMARK_SAVE_EVERY:
-                        await self._save_watermark(site, name, mark)
-                        unsaved = 0
+                    # ``after``, not ``before``: an entry that stored nothing is
+                    # accounted for as soon as everything ahead of it is written,
+                    # and one that stored a posting only when that posting is.
+                    # A stretch of pages that yield nothing — taken down,
+                    # archived, answering for another vacancy — is common in a
+                    # corpus this size, and counting them by entry rather than
+                    # by posting is what would push the mark past unwritten work.
+                    self._hold(site, name, entry, state.stored)
             except Exception:
-                # The run ends here: hh answered with a check for robots, or it
-                # moved the markup, or the transport gave up on a page. The mark
-                # is safe to write at this instant for exactly the reason it is
-                # safe at any other — it names only entries whose postings are a
-                # full batch behind what has been handed over, and how the run
-                # ends changes nothing about that. Recording it costs one row
-                # and saves the up-to-``WATERMARK_SAVE_EVERY``-minus-one
-                # advances made since the last periodic write, on a source whose
-                # every run so far has ended in precisely this clause. The
-                # exception is re-raised untouched; nothing here classifies it.
-                await self._record_while_unwinding(site, name, mark)
+                # Re-raised untouched; nothing here classifies it. The held
+                # entries are not dropped: the pipeline rescues the batch it was
+                # holding and confirms it while this exception unwinds, and the
+                # confirmation is what records them. On the run that produced
+                # this rule that was fifty pages which had cost fifty requests
+                # and were about to be walked again from the top.
                 raise
-            # The file is drained. Its remainder is not recorded here: the
-            # postings from it are still in the pipeline's unwritten batch, and
-            # a mark naming them would declare written what is only in memory.
-            # It waits until the whole walk is done — see ``search_batch``.
-            await self._save_watermark(site, name, mark)
-            if pending:
-                tails.append(_Tail(site, name, mark, [entry for entry, _ in pending]))
 
         self._log_site(site, state, budget, outstanding)
 
@@ -1426,6 +1379,48 @@ class HHSource(BaseSource):
         )
 
     # ── position ──────────────────────────────────────────────────────
+
+    def _hold(self, site: HHSite, name: str, entry: SitemapEntry, after: int) -> None:
+        """Remember one finished entry until the pipeline confirms its posting.
+
+        Bounded by :data:`MAX_HELD`. Dropping the oldest held entry costs a
+        re-fetch on some later run and never a posting: an entry that is not
+        recorded is simply still due. The list normally drains long before this,
+        because the pipeline confirms every ``UPSERT_BATCH`` postings.
+        """
+        self._held.append(_Held(site=site, name=name, entry=entry, after=after))
+        if len(self._held) > MAX_HELD:
+            dropped = len(self._held) - MAX_HELD
+            del self._held[:dropped]
+            logger.warning(
+                "sources.hh.held_overflow",
+                dropped=dropped,
+                detail="entries waiting on confirmation exceeded MAX_HELD; they stay due",
+            )
+
+    async def record_progress(self, durable: int) -> None:
+        """Record every held entry whose posting the pipeline has now written.
+
+        The one place this connector writes a position. Called by the pipeline
+        after each batch — including the batch it rescues while a crawl stopped
+        by a check for robots unwinds, which is the case the whole mechanism
+        exists for. See ``BaseSource.record_progress`` for why the caller has to
+        be the one to say.
+        """
+        confirmed = [held for held in self._held if held.after <= durable]
+        if not confirmed:
+            return
+        self._held = [held for held in self._held if held.after > durable]
+
+        marks: dict[tuple[str, str], tuple[HHSite, str, FileWatermark]] = {}
+        for held in confirmed:
+            key = (held.site.host, held.name)
+            if key not in marks:
+                marks[key] = (held.site, held.name, await self._watermark(held.site, held.name))
+            site, name, mark = marks[key]
+            marks[key] = (site, name, mark.advanced(held.entry))
+        for site, name, mark in marks.values():
+            await self._save_watermark(site, name, mark)
 
     def _state_key(self, site: HHSite, name: str) -> str:
         """Where one sitemap file's position is stored. Per file, never global."""

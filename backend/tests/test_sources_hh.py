@@ -65,8 +65,6 @@ from app.sources.hh import (
     MAX_EXTERNAL_ID,
     MAX_MARKUP_FAILURES,
     MAX_TIED_IDS,
-    WATERMARK_LAG,
-    WATERMARK_SAVE_EVERY,
     FileWatermark,
     HHMarkupError,
     HHSite,
@@ -196,8 +194,72 @@ async def _instant(_seconds: float) -> None:
 
 
 async def collect(source: HHSource, query: SearchQuery | None = None) -> list[RawPosting]:
-    """Everything one walk yields, drained the way the pipeline drains it."""
-    return [posting async for posting in source.search_batch([query or SearchQuery()])]
+    """Everything one walk yields, drained the way the pipeline drains it.
+
+    **Including the confirmations.** The connector no longer records a position
+    on its own: it holds each finished entry until the pipeline says the posting
+    is written, and says so by calling ``record_progress``. A helper that only
+    iterated would leave every position empty and every test about resuming
+    would pass by asserting nothing — which is the failure this whole change is
+    about, reproduced in the harness.
+
+    So this batches at ``UPSERT_BATCH`` and confirms after each batch and at the
+    end, exactly as ``app/pipeline/runner.py::_crawl`` does. An interrupted walk
+    is modelled by :func:`collect_until`, which also confirms what it rescued.
+    """
+    collected: list[RawPosting] = []
+    durable = 0
+    async for posting in source.search_batch([query or SearchQuery()]):
+        collected.append(posting)
+        if len(collected) - durable >= UPSERT_BATCH:
+            durable = len(collected)
+            await source.record_progress(durable)
+    await source.record_progress(len(collected))
+    return collected
+
+
+async def collect_until_raised(
+    source: HHSource, query: SearchQuery | None = None
+) -> tuple[list[RawPosting], BaseException | None]:
+    """A walk that ends in an exception, drained the way the pipeline drains one.
+
+    ``_crawl`` writes the batch it was holding and confirms it BEFORE re-raising,
+    which is the case the position mechanism exists for: on the two live runs
+    against hh the crawl ended in a check for robots, and everything it had
+    fetched was in that unwritten batch.
+    """
+    collected: list[RawPosting] = []
+    durable = 0
+    raised: BaseException | None = None
+    try:
+        async for posting in source.search_batch([query or SearchQuery()]):
+            collected.append(posting)
+            if len(collected) - durable >= UPSERT_BATCH:
+                durable = len(collected)
+                await source.record_progress(durable)
+    except Exception as exc:
+        raised = exc
+    await source.record_progress(len(collected))
+    return collected, raised
+
+
+def _covered_ids(saved: dict[str, Any], ids: Sequence[str]) -> set[str]:
+    """Which of ``ids`` a stored position actually covers.
+
+    Reads it back through ``FileWatermark`` rather than poking at the JSON, so a
+    test asserts what the connector will believe on the next run instead of what
+    the row happens to look like today. ``ids`` must be the list the test served,
+    in the same order, because ``dated`` derives each entry's timestamp from its
+    position in it.
+    """
+    mark = FileWatermark.model_validate(saved)
+    return {
+        vacancy_id
+        for vacancy_id, when in dated(list(ids))
+        if mark.is_done(
+            SitemapEntry(external_id=vacancy_id, url=vacancy_url(vacancy_id), lastmod=when)
+        )
+    }
 
 
 def derived(posting: RawPosting) -> dict[str, Any]:
@@ -578,7 +640,6 @@ async def test_a_truncated_run_leaves_the_rest_for_the_next_one(
     # The lag is what keeps the mark behind the pipeline's unwritten batch; at
     # this budget it would swallow the whole run, so it is stood down here and
     # pinned on its own below.
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
     routes = serve(http, ids)
 
@@ -1106,7 +1167,6 @@ async def test_the_head_pass_does_not_declare_the_tail_done(
     loss the ascending pass exists to prevent. So the head pass records nothing.
     """
     monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 2)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
     # Budget: index + two sitemaps + the two head pages, and nothing after.
     monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 5)
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
@@ -1124,183 +1184,65 @@ async def test_the_head_pass_does_not_declare_the_tail_done(
     assert routes[FULL].call_count == 1, "the oldest entry was reached exactly once"
 
 
-def test_the_lag_is_derived_from_the_pipelines_unwritten_window() -> None:
-    """The one number this connector shares with the pipeline, checked both ways.
-
-    *The floor.* The runner appends every posting it is handed and commits the
-    moment the batch reaches ``UPSERT_BATCH``, so after ``S`` postings it has
-    written ``floor(S / B) * B`` of them and holds at most ``B - 1``. The walk
-    advances the mark over an entry once at least ``WATERMARK_LAG`` further
-    postings have gone by, and ``floor(S / B) * B > S - B`` then puts that
-    entry's own posting inside the written part as long as the lag is at least
-    ``B - 1``. Below that the mark can name a posting the runner is still
-    holding, and a crash makes it unreachable forever.
-
-    *The ceiling, which is the half nothing was checking.* A run advances the
-    mark ``max(0, stored - WATERMARK_LAG)`` times, so every posting of margin
-    above the floor is a posting a short run must reach before it can record
-    anything at all. The value was 200 on the reasoning that margin is free. It
-    is not: the live run of 2026-09-06 stored 172 postings before hh's captcha
-    stopped it, advanced the mark zero times, wrote no row, and left the next
-    run to start from the top of the file again — which is what every run had
-    been doing, which is why ``source_state`` was empty rather than stale.
-
-    Both bounds, so that moving ``UPSERT_BATCH`` fails the build and forces the
-    derivation to be done again rather than left to a margin that silently stops
-    recording.
-    """
-    assert WATERMARK_LAG >= UPSERT_BATCH - 1
-    assert WATERMARK_LAG <= UPSERT_BATCH
-
-
-async def test_the_position_trails_what_has_been_handed_over(
-    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
+async def test_nothing_is_recorded_until_the_pipeline_confirms(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
 ) -> None:
-    """Why the mark trails what has been handed over.
+    """The safe direction, and the reason the connector no longer decides.
 
-    A posting is yielded long before it is written: the runner accumulates a
-    batch and commits it in one statement. A mark naming the posting just
-    yielded would, after a crash, declare written what was only ever in memory —
-    and because the mark says done, those postings are never fetched again.
+    A posting is yielded long before it is written: the pipeline accumulates a
+    batch and commits it in one statement. A position naming the posting just
+    yielded would, after a crash there, declare written what was only ever in
+    memory — and because it says done, those pages are never fetched again.
 
-    The mechanism, at a lag small enough to watch. That the shipped lag is big
-    enough to be safe, and small enough to be reachable, is
-    ``test_the_lag_is_derived_from_the_pipelines_unwritten_window``; that a run
-    at the shipped lag records anything at all is the two tests below it.
+    So the walk records nothing by itself. Draining it without confirming
+    anything must leave the store untouched.
     """
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 3)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
-    ids = [
-        FULL,
-        NULL_COLLECTIONS,
-        NO_COMPENSATION,
-        SALARY_TO_ONLY,
-        SALARY_FROM_ONLY,
-        SALARY_NO_FREQUENCY,
-    ]
-    # Stop the walk before the file is drained: a finished file records its
-    # tail, and it is the mid-walk behaviour that matters here. Three requests
-    # go on the index and the two sitemaps, five on pages.
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
-    serve(http, ids)
+    serve(http, [FULL, NULL_COLLECTIONS, NO_COMPENSATION])
 
-    await collect(hh)
+    yielded = [posting async for posting in hh.search_batch([SearchQuery()])]
+
+    assert yielded, "the walk did produce postings"
+    assert store.saved == {}, "and recorded no position for any of them"
+
+
+async def test_the_position_names_exactly_what_the_pipeline_says_it_wrote(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """Confirm two postings and the position covers two entries, not three.
+
+    The count comes from the pipeline and means "written". Recording more than
+    it says is the crash-loses-pages case above; recording less is the one that
+    kept ``source_state`` empty for this source's entire life.
+    """
+    serve(http, [FULL, NULL_COLLECTIONS, NO_COMPENSATION])
+
+    yielded = [posting async for posting in hh.search_batch([SearchQuery()])]
+    assert len(yielded) == 3
+    await hh.record_progress(2)
 
     saved = store.saved[f"sitemap:{HOST}:vacancy0"]
-    # Five entries dealt with, a lag of three: the mark names the second of
-    # them and says nothing about the three most recent.
-    assert saved["ids_at_lastmod"] == [NULL_COLLECTIONS]
+    covered = _covered_ids(saved, [FULL, NULL_COLLECTIONS, NO_COMPENSATION])
+    assert len(covered) == 2, f"two confirmed, {len(covered)} recorded"
+    assert NO_COMPENSATION not in covered, "the unconfirmed third must stay due"
 
 
-async def test_a_run_cut_by_a_challenge_records_a_position_at_the_shipped_lag(
+async def test_a_run_cut_by_a_challenge_records_what_the_pipeline_rescued(
     hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The live run of 2026-09-06, at the constants that live run used.
+    """The live runs of 2026-09-06 and 2026-09-07, and the whole point of the change.
 
-    **Nothing here patches ``WATERMARK_LAG`` or ``WATERMARK_SAVE_EVERY``, and
-    that is the test.** Every other watermark test in this file stands them down
-    to 0, 1, 2 or 3, so the mechanism was proved with its safety margin removed
-    — the one configuration that never ships — and at the shipped 200 a run had
-    to store 201 postings before the mark moved at all. This run stores 172, the
-    number hh really served before the captcha, and at 200 it recorded nothing
-    anywhere: no periodic write, no write at the exit, an empty ``source_state``
-    and a next run that starts again from the top of the file.
+    Both ended the same way: hh answered a page with a redirect to its check for
+    robots, at the 172nd posting and then, at a higher request rate, at the
+    50th. Both had fetched everything before that and had it in the pipeline's
+    unwritten batch. Under the fixed lag the walk recorded nothing in either
+    case — the lag was 200, then 100, and neither run ever got that far — so
+    ``source_state`` stayed empty and every run restarted at the top of a corpus
+    of some 13 557 postings. The database showed 466 rows and no position.
 
-    What is safe to record here is derivable and is asserted as a value rather
-    than as "something". 172 postings, one per entry, and a lag of 100: entry
-    ``i`` is released once ``stored - i > 100``, so the walk releases entries 0
-    to 71 and holds the rest. The mark names entry 71 and nothing after it.
-
-    It also pins the write on the way out. 72 releases means one periodic write
-    at 50 and 22 releases left over, so a run that only wrote periodically would
-    stop at entry 49 and buy 22 pages again next time — on a source where this
-    is how every run so far has ended.
-
-    The head pass stays off. At the shipped slice the newest 50 entries include
-    the challenged one, the captcha would arrive during a pass that records no
-    position by design, and the test would be about the head slice instead.
+    ``_crawl`` writes that batch and confirms it before re-raising. This asserts
+    the confirmation lands: fewer postings than one batch, a challenge, and a
+    position recorded anyway.
     """
-    ids = minted_ids(173)
-    routes = serve_many(http, ids)
-    refused = ids[172]
-    http.get(vacancy_url(refused)).mock(
-        return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
-    )
-
-    got = await drain_until_challenged(hh)
-
-    assert len(got) == 172, "the run under test is the one hh really stopped"
-    saved = store.saved[f"sitemap:{HOST}:vacancy0"]
-    assert saved["ids_at_lastmod"] == [ids[71]]
-    assert saved["lastmod"].startswith(dated(ids)[71][1].isoformat()[:19])
-    assert refused not in saved["ids_at_lastmod"], "the refused page was declared dealt with"
-
-    # And the consequence, which is the thing that was actually broken: the next
-    # run starts at entry 72 rather than at entry 0. One page of budget is
-    # enough to show which one it asks for.
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 4)
-    await collect(hh)
-
-    assert routes[ids[72]].call_count == 2, "the run did not resume where the mark said"
-    assert routes[ids[0]].call_count == 1, "the corpus was re-read from the top"
-
-
-async def test_a_run_cut_by_its_page_budget_records_a_position_at_the_shipped_lag(
-    hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The other exit, and the one that governs every run of a full crawl.
-
-    A city's sitemap holds some 13 557 entries and a run may buy 1200 pages, so
-    for the dozen runs a backfill takes, the budget is how every run ends. The
-    lag is not patched here either; ``MAX_PAGES_PER_RUN`` is, because it is a
-    magnitude rather than a threshold — no arithmetic in the walk compares
-    against it — and 1200 mocked pages would prove nothing 147 do not.
-
-    147 pages bought (three of the budget go on the index and the two sitemap
-    files), 147 postings, a lag of 100: entries 0 to 46 are released. 47 is
-    fewer than ``WATERMARK_SAVE_EVERY``, so no periodic write ever fires and
-    what is asserted below is the exit itself writing. At the old lag of 200 it
-    wrote nothing, and the next run re-bought all 147 pages.
-    """
-    assert WATERMARK_SAVE_EVERY > 47, "otherwise a periodic write, not the exit, is under test"
-    monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 150)
-    ids = minted_ids(200)
-    serve_many(http, ids)
-
-    postings = await collect(hh)
-
-    assert len(postings) == 147
-    saved = store.saved[f"sitemap:{HOST}:vacancy0"]
-    assert saved["ids_at_lastmod"] == [ids[46]]
-
-
-async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the_run_stopped(
-    hh: HHSource,
-    http: respx.MockRouter,
-    store: StateStore,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Recording the position on the way out must not become the failure reported.
-
-    The walk now saves its mark as a challenge unwinds. If that write fails —
-    the database is the thing that is down — letting it out replaces
-    ``HHChallengedError`` with a store error, and the two are read completely
-    differently by whoever gets the run report: one is rescheduled, the other
-    sends somebody to debug a connector that is fine. The pipeline makes the
-    same trade one layer up for its own rescue write.
-    """
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
-    # High enough that no periodic write fires: what must survive a failing
-    # store is the write on the way out, and only that one.
-    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 999)
-
-    attempts: list[str] = []
-
-    async def refuse(key: str, value: dict[str, Any]) -> None:
-        attempts.append(key)
-        raise RuntimeError("source_state is unavailable")
-
-    hh.with_state(store.load, refuse)
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
     http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
     for vacancy_id in (FULL, NULL_COLLECTIONS):
@@ -1311,12 +1253,66 @@ async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the
         return_value=httpx.Response(302, headers={"location": CAPTCHA_URL})
     )
 
-    with pytest.raises(HHChallengedError):
-        await collect(hh)
+    collected, raised = await collect_until_raised(hh)
 
-    # Not vacuous: without the write on the way out there is nothing to fail,
-    # and a test asserting only that the challenge surfaced would pass on a
-    # walk that never tried to record anything.
+    assert isinstance(raised, HHChallengedError), "the run still ends in the challenge"
+    assert len(collected) == 2, "fewer than one batch, which is why the lag never fired"
+    assert store.saved, "a run stopped by a challenge must still leave a position"
+    covered = _covered_ids(store.saved[f"sitemap:{HOST}:vacancy0"], ids)
+    assert NO_COMPENSATION not in covered, "the refused page is not recorded as done"
+
+
+async def test_the_second_run_starts_after_what_the_first_one_recorded(
+    hh: HHSource, http: respx.MockRouter, store: StateStore
+) -> None:
+    """Accumulation, which is the property none of the previous design's runs had.
+
+    Two runs over the same file: the second must not buy the pages the first one
+    recorded. Asserted on the requests actually made, not on the position's
+    contents, because "the row looks right" and "the next run is cheaper" have
+    come apart in this module before.
+    """
+    ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION]
+    routes = serve(http, ids)
+    await collect(hh)
+    bought_first = {vacancy_id: routes[vacancy_id].call_count for vacancy_id in ids}
+    assert all(count == 1 for count in bought_first.values()), bought_first
+
+    await collect(hh)
+
+    bought_again = {vacancy_id: routes[vacancy_id].call_count for vacancy_id in ids}
+    assert bought_again == bought_first, "the second run re-bought pages it had recorded"
+
+
+async def test_a_position_that_cannot_be_written_does_not_replace_the_reason_the_run_stopped(
+    hh: HHSource,
+    http: respx.MockRouter,
+    store: StateStore,
+) -> None:
+    """A failing store must not turn a challenge into a database error.
+
+    The two are read completely differently by whoever gets the run report: one
+    is rescheduled, the other sends somebody to debug a connector that is fine.
+    The confirmation now happens in ``pipeline/runner.py``, inside the same
+    ``try`` that guards its rescue write, so this asserts the connector raises
+    honestly and leaves the classification to the layer that owns it.
+    """
+    attempts: list[str] = []
+
+    async def refuse(key: str, value: dict[str, Any]) -> None:
+        attempts.append(key)
+        raise RuntimeError("source_state is unavailable")
+
+    hh.with_state(store.load, refuse)
+    serve(http, [FULL, NULL_COLLECTIONS])
+
+    yielded = [posting async for posting in hh.search_batch([SearchQuery()])]
+    with pytest.raises(RuntimeError, match="unavailable"):
+        await hh.record_progress(len(yielded))
+
+    # Not vacuous: without a write on confirmation there would be nothing to
+    # fail, and a test asserting only that the walk finished would pass on a
+    # connector that never tried to record anything.
     assert attempts == [f"sitemap:{HOST}:vacancy0"]
     assert store.saved == {}
 
@@ -1370,7 +1366,6 @@ async def test_every_configured_city_is_reached_before_any_city_gets_seconds(
     )
     monkeypatch.setattr("app.sources.hh.SITES_FILE", sites)
     monkeypatch.setattr("app.sources.hh.HEAD_SLICE", 0)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 0)
     # Eight requests, four per city: index, two sitemaps, one page.
     monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
 
@@ -1525,17 +1520,15 @@ async def test_a_sitemap_index_pointing_off_host_is_not_followed(
 async def test_entries_that_yield_nothing_do_not_drag_the_position_forward(
     hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The lag is measured in postings, and a dead stretch is why.
+    """Coverage is measured in postings, and a dead stretch is why.
 
-    Counting it in sitemap entries looks equivalent and is not: a run of
-    entries that yield nothing — taken down, archived, answering for a
-    different vacancy — pushes the mark forward while the postings before them
-    are still in the pipeline's unwritten batch. A corpus of fourteen thousand
-    pages has such stretches, and the damage is silent, because the mark then
-    says those postings were dealt with.
+    Counting it in sitemap entries looks equivalent and is not: a run of entries
+    that yield nothing — taken down, archived, answering for a different vacancy
+    — would push the mark past postings the pipeline has not written. A corpus of
+    fourteen thousand pages has such stretches, and the damage is silent,
+    because the mark then says those postings were dealt with and no future run
+    fetches them again.
     """
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 2)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
     monkeypatch.setattr("app.sources.hh.MAX_PAGES_PER_RUN", 8)
     live = [FULL, NULL_COLLECTIONS]
     # One more dead entry than the run can reach, so the file does not drain:
@@ -1552,13 +1545,20 @@ async def test_entries_that_yield_nothing_do_not_drag_the_position_forward(
             return_value=httpx.Response(404, text=page({"vacancyView": {}, "errorCode": 404}))
         )
 
-    postings = await collect(hh)
-
+    postings = [posting async for posting in hh.search_batch([SearchQuery()])]
     assert [posting.external_id for posting in postings] == live
-    # Two postings yielded and three dead entries after them: with the lag
-    # counted in entries the mark would have walked past both postings. Counted
-    # in postings, it has not moved at all.
-    assert store.saved == {}
+    # One posting written, one still in the pipeline's batch, and three dead
+    # entries behind them. Counting coverage in ENTRIES would walk the mark past
+    # all five and declare the second posting dealt with — silently, and for
+    # good, because a recorded entry is never fetched again. Counted in
+    # postings, the dead stretch is covered only as far as the confirmation
+    # reaches, and the unconfirmed posting stops it.
+    await hh.record_progress(1)
+
+    covered = _covered_ids(store.saved[f"sitemap:{HOST}:vacancy0"], live + dead)
+    assert FULL in covered, "the confirmed posting is recorded"
+    assert NULL_COLLECTIONS not in covered, "the unconfirmed one is not"
+    assert not covered & set(dead), "nor is anything behind it, dead or alive"
 
 
 async def test_a_drained_file_records_its_tail_only_once_the_walk_is_over(
@@ -1575,8 +1575,6 @@ async def test_a_drained_file_records_its_tail_only_once_the_walk_is_over(
     Here the run dies in the second file, and the first file's tail is
     deliberately not recorded.
     """
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
     http.get(VACANCY0_URL).mock(
         return_value=httpx.Response(200, text=sitemap(dated([FULL, NULL_COLLECTIONS])))
     )
@@ -1602,7 +1600,6 @@ async def test_a_walk_that_finishes_records_the_tail_it_was_holding(
     hh: HHSource, http: respx.MockRouter, store: StateStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """And the other half: holding it back forever would re-buy it every run."""
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
     routes = serve(http, [FULL, NULL_COLLECTIONS])
 
     assert len(await collect(hh)) == 2
@@ -1688,6 +1685,9 @@ async def test_the_sitemaps_are_never_served_from_the_disk_cache(
         source.bind(cached.bind(source)).with_state(store.load, store.save)
 
         first = [posting async for posting in source.search_batch([SearchQuery()])]
+        # As the pipeline does, so the position is recorded and the second run
+        # below is testing the cache rather than an empty position.
+        await source.record_progress(len(first))
         assert [posting.external_id for posting in first] == [FULL]
 
         # hh publishes another vacancy; the live sitemap now lists both.
@@ -1958,6 +1958,11 @@ async def drain_until_challenged(source: HHSource) -> list[RawPosting]:
     with pytest.raises(HHChallengedError):
         async for posting in source.search_batch([SearchQuery()]):
             got.append(posting)
+    # The pipeline rescues the batch it was holding and confirms it before
+    # re-raising, so a helper that skipped this would test a walk no runner
+    # performs — and would leave every position empty, which is the exact
+    # failure the confirmation was added to end.
+    await source.record_progress(len(got))
     return got
 
 
@@ -2041,8 +2046,6 @@ async def test_a_challenge_never_declares_the_page_it_was_refused_done(
     which entries the mark may NOT name. The positive one below is new, so the
     test can no longer pass by recording nothing at all.
     """
-    monkeypatch.setattr("app.sources.hh.WATERMARK_LAG", 1)
-    monkeypatch.setattr("app.sources.hh.WATERMARK_SAVE_EVERY", 1)
     ids = [FULL, NULL_COLLECTIONS, NO_COMPENSATION, SALARY_TO_ONLY]
     http.get(VACANCY0_URL).mock(return_value=httpx.Response(200, text=sitemap(dated(ids))))
     for vacancy_id in (FULL, NULL_COLLECTIONS):
@@ -2056,11 +2059,13 @@ async def test_a_challenge_never_declares_the_page_it_was_refused_done(
 
     await drain_until_challenged(hh)
 
-    recorded = store.saved.get(f"sitemap:{HOST}:vacancy0", {}).get("ids_at_lastmod", [])
+    recorded = _covered_ids(store.saved.get(f"sitemap:{HOST}:vacancy0", {}), ids)
     assert NO_COMPENSATION not in recorded, "the refused page was declared dealt with"
     assert SALARY_TO_ONLY not in recorded, "an entry never reached was declared dealt with"
-    # And it did move: to the last entry the lag had released, and no further.
-    assert recorded == [FULL]
+    # And it did move, to exactly the two postings the pipeline confirmed. Under
+    # the fixed lag it moved to one of them on a good day and to none of them on
+    # the days that actually happened.
+    assert recorded == {FULL, NULL_COLLECTIONS}
 
 
 async def test_the_transport_and_not_this_connector_decides_what_a_captcha_is(

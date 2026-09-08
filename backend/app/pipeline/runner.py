@@ -448,6 +448,10 @@ async def _crawl(
     """
     bound = _bind(source, outcome, sessions)
     batch: list[RawPosting] = []
+    #: Postings this function has handed to the database and seen committed.
+    #: The connector cannot know this and must not guess it; see
+    #: ``BaseSource.record_progress``.
+    durable = 0
 
     # No semaphore inside a source: its concurrency is already bounded by its
     # own token bucket, which is the limit the vendor actually published. A
@@ -460,11 +464,20 @@ async def _crawl(
             batch.append(posting)
             if len(batch) >= UPSERT_BATCH:
                 await _write(batch, outcome, sessions)
+                durable += len(batch)
+                await bound.record_progress(durable)
                 batch = []
     except Exception:
         if batch:
             try:
                 await _write(batch, outcome, sessions)
+                durable += len(batch)
+                # After the write and before the re-raise, which is the whole
+                # point: these are the postings a crawl stopped by a check for
+                # robots has just rescued, and telling the connector about them
+                # is what lets the next run start after them instead of at the
+                # top of the corpus again.
+                await bound.record_progress(durable)
             except Exception:
                 # Logged, not raised: a write that fails while unwinding must
                 # not replace the failure that stopped the crawl. That one says
@@ -474,6 +487,8 @@ async def _crawl(
         raise
     if batch:
         await _write(batch, outcome, sessions)
+        durable += len(batch)
+    await bound.record_progress(durable)
 
 
 def _bind(source: BaseSource, outcome: SourceOutcome, sessions: Sessions) -> BaseSource:

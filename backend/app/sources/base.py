@@ -90,12 +90,22 @@ class Unavailable(BaseModel):
 
 
 class RateLimit(BaseModel):
-    """Steady rate and burst allowance for one source, enforced in ``http.py``."""
+    """Steady rate, burst allowance and jitter for one source, enforced in ``http.py``."""
 
     model_config = ConfigDict(frozen=True)
 
     requests_per_second: float = Field(default=1.0, gt=0, le=50)
     burst: int = Field(default=1, ge=1, le=100)
+    #: Extra delay before each request, drawn uniformly from ``[0, this]``.
+    #:
+    #: A token bucket alone produces a metronome: at one request per four
+    #: seconds, every interval is four seconds to the millisecond, which is a
+    #: shape no person browsing produces and a trivial one to recognise. The
+    #: jitter is not a disguise — this crawler is anonymous and declares itself
+    #: — it is politeness with a variance, and it costs one line.
+    #:
+    #: Zero by default, so a source that has not thought about it is unchanged.
+    jitter_seconds: float = Field(default=0.0, ge=0, le=60)
 
 
 class SearchQuery(BaseModel):
@@ -279,6 +289,30 @@ class BaseSource(ABC):
         if self._state_save is None:
             return
         await self._state_save(key, value)
+
+    async def record_progress(self, durable: int) -> None:
+        """``durable`` postings from this stream are now written. Persist what that covers.
+
+        Called by the pipeline after every successful batch write, including the
+        one it rescues while an exception unwinds. A source that keeps no
+        position ignores it, which is why this is a no-op rather than abstract.
+
+        **This exists because only the caller knows.** A connector that walks a
+        corpus has to record where it got to, and it cannot record an entry
+        whose posting is still in the pipeline's unwritten batch — a crash there
+        would mark as done a page nobody stored. Without this the connector can
+        only guess, by staying a fixed number of postings behind and hoping the
+        guess is smaller than the run. Measured, that hope failed: at a lag of
+        200 a run had to store 201 postings before it recorded anything, hh's
+        check for robots arrived at the 50th, and the position stayed empty
+        across every run the source ever made. An exact answer from the party
+        that has it replaces a margin that was wrong in the only direction that
+        mattered.
+        """
+        # Deliberately a no-op rather than abstract: most sources are bounded
+        # feeds that keep no position, and making every one of them write an
+        # empty override would be noise around the one that needs it.
+        return
 
     # ── availability ──────────────────────────────────────────────────
 

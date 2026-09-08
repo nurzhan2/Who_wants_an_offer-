@@ -30,6 +30,7 @@ path segment -- and the cache test greps the actual file on disk for the secret.
 """
 
 import asyncio
+import random
 import time
 from collections.abc import AsyncIterator, Iterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -45,6 +46,7 @@ import respx
 from app.core.config import settings
 from app.core.exceptions import RateLimitError, SourceError
 from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
+from app.sources.hh import HHSource
 from app.sources.http import (
     MAX_ATTEMPTS,
     MAX_RETRY_AFTER_SECONDS,
@@ -1328,3 +1330,83 @@ async def test_a_path_that_merely_starts_with_account_is_not_called_a_captcha(
         await bind(clients(), CrawlSource()).get_text(HH_VACANCY_URL)
 
     assert not isinstance(excinfo.value, HHChallengedError)
+
+
+# -- jitter ------------------------------------------------------------
+
+
+def jittered(clock: FakeClock, *, rate: float, jitter: float, seed: int = 0) -> TokenBucket:
+    """A bucket with a pinned random source, so the delays are assertable."""
+    return TokenBucket(
+        RateLimit(requests_per_second=rate, burst=1, jitter_seconds=jitter),
+        clock=clock.now,
+        sleep=clock.sleep,
+        rng=random.Random(seed),
+    )
+
+
+async def test_the_jitter_only_ever_adds_to_the_wait(clock: FakeClock) -> None:
+    """It is politeness with a variance, not a way of going faster.
+
+    The bucket sets the floor. If the jitter could subtract, a source configured
+    for one request every four seconds would sometimes make two in five, and the
+    measured reason for that rate — hh answered 1.02 rps with a captcha at the
+    50th posting — would stop being enforced by the number in the config.
+    """
+    bucket = jittered(clock, rate=0.25, jitter=1.0)
+    grants: list[float] = []
+
+    for _ in range(6):
+        await bucket.acquire()
+        grants.append(clock.now())
+
+    gaps = [after - before for before, after in pairwise(grants)]
+    assert all(gap >= 4.0 for gap in gaps), f"faster than the configured floor: {gaps}"
+    assert all(gap <= 5.0 + 1e-9 for gap in gaps), f"slower than floor plus jitter: {gaps}"
+
+
+async def test_the_gaps_are_not_all_the_same(clock: FakeClock) -> None:
+    """A metronome is the shape this exists to avoid.
+
+    Without the jitter every interval is identical to the millisecond, which no
+    person browsing produces. Asserted as "more than one distinct gap" rather
+    than against a distribution: the claim is that the delay varies, and a test
+    that pinned the sequence would be pinning `random.Random`'s implementation.
+    """
+    bucket = jittered(clock, rate=0.25, jitter=1.0)
+    grants: list[float] = []
+
+    for _ in range(8):
+        await bucket.acquire()
+        grants.append(clock.now())
+
+    gaps = {round(after - before, 6) for before, after in pairwise(grants)}
+    assert len(gaps) > 1, "every interval identical — the jitter is not reaching the wait"
+
+
+async def test_a_source_that_asks_for_no_jitter_is_unchanged(clock: FakeClock) -> None:
+    """Zero is the default, so adding this changed nothing for the other sources."""
+    bucket = jittered(clock, rate=0.25, jitter=0.0)
+    grants: list[float] = []
+
+    for _ in range(4):
+        await bucket.acquire()
+        grants.append(clock.now())
+
+    gaps = {round(after - before, 6) for before, after in pairwise(grants)}
+    assert gaps == {4.0}
+
+
+def test_the_hh_connector_asks_for_the_rate_its_docstring_measured() -> None:
+    """The constant is the whole fix, so it is pinned rather than left to a comment.
+
+    0.73 rps met a captcha at the 172nd posting and 1.02 rps at the 50th, both
+    measured against almaty.hh.kz. The interval here is four to five seconds.
+    """
+    limit = HHSource.rate_limit
+
+    assert limit.requests_per_second == 0.25
+    assert limit.burst == 1, "a burst of two is two requests in the same instant"
+    assert limit.jitter_seconds == 1.0
+    slowest = 1.0 / limit.requests_per_second + limit.jitter_seconds
+    assert 1.0 / limit.requests_per_second >= 4.0 and slowest <= 5.0

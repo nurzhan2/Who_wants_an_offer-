@@ -38,6 +38,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import random
 import time
 import urllib.robotparser
 from collections.abc import Awaitable, Callable, Mapping
@@ -427,11 +428,17 @@ class TokenBucket:
         *,
         clock: Clock = time.monotonic,
         sleep: Sleeper = asyncio.sleep,
+        rng: random.Random | None = None,
     ) -> None:
         self._rate = limit.requests_per_second
         self._burst = float(limit.burst)
+        self._jitter = limit.jitter_seconds
         self._clock = clock
         self._sleep = sleep
+        # Injected like the clock and the sleeper, and for the same reason: a
+        # test that cannot pin the randomness can only assert that the delay is
+        # somewhere in a range, which is not an assertion about this code.
+        self._rng = rng or random.Random()
         self._tokens = float(limit.burst)
         self._updated = clock()
         self._lock = asyncio.Lock()
@@ -465,6 +472,18 @@ class TokenBucket:
                 await self._sleep((1.0 - self._tokens) / self._rate)
                 self._refill()
             self._tokens -= 1.0
+            # After the token, not instead of it: the bucket sets the floor on
+            # the rate and this only ever adds to the wait. Drawing it inside the
+            # lock keeps the spacing of concurrent callers, which is the property
+            # the lock is held across the sleep for in the first place.
+            if self._jitter:
+                await self._sleep(self._rng.uniform(0.0, self._jitter))
+                # The jitter earns no tokens. Without this line the bucket
+                # refills across the extra wait, so a long pause is repaid by a
+                # short next interval and the gaps end up spread around the
+                # configured rate instead of above it — measured: gaps of 3.2s
+                # under a 4s floor. The point is a floor with variance on top.
+                self._updated = self._clock()
 
 
 class CachedResponse(BaseModel):

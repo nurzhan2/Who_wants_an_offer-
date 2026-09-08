@@ -137,6 +137,13 @@ class Yielding(BaseSource):
         super().__init__()
         self._postings = postings
         self._challenged = challenged
+        #: Every count the pipeline confirmed, in order. A connector that walks
+        #: a corpus records its position from these and from nothing else.
+        self.confirmed: list[int] = []
+
+    async def record_progress(self, durable: int) -> None:
+        """What ``app/sources/hh.py`` uses to record where the crawl got to."""
+        self.confirmed.append(durable)
 
     async def search(self, query: SearchQuery) -> AsyncIterator[RawPosting]:
         """Hand over the canned postings, then hit the captcha if asked to."""
@@ -314,6 +321,74 @@ async def test_everything_already_fetched_is_written_before_the_run_stops(
     assert outcome.found == 3
     assert outcome.new == 3
     assert [len(batch) for batch in Vacancies.batches] == [3]
+
+
+async def test_the_rescued_batch_is_confirmed_before_the_run_stops(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+) -> None:
+    """Writing the rescued batch is half of it; telling the connector is the other half.
+
+    A corpus connector cannot record its crawl position on its own — it must not
+    name an entry whose posting is still in this function's unwritten list — so
+    it waits to be told what has been written. If the confirmation is skipped on
+    the way out, a run stopped by hh's check for robots records nothing, and the
+    next run starts at the top of the corpus again.
+
+    That is not hypothetical: it is what both live runs did. hh answered at the
+    172nd posting and then at the 50th, ``source_state`` stayed empty for the
+    source's entire life, and the corpus sat at 466 rows out of some 13 557.
+    """
+    postings = [posting("challenged", str(index)) for index in range(3)]
+    assert len(postings) < UPSERT_BATCH, "so only the rescue can confirm anything"
+    source = Challenged(postings, challenged=True)
+
+    await _run_source(source, PLAN, sessions)
+
+    assert source.confirmed, "the crawl position was never told what had been written"
+    assert source.confirmed[-1] == 3, f"confirmed {source.confirmed}, wrote 3"
+
+
+async def test_the_confirmation_never_runs_ahead_of_the_write(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+) -> None:
+    """Confirming more than was written is the one direction that loses postings.
+
+    A position naming an unwritten posting is never revisited by any future run,
+    so the page is lost rather than merely re-bought. Asserted against the
+    batches the repository actually received.
+    """
+    postings = [posting("challenged", str(index)) for index in range(UPSERT_BATCH + 5)]
+    source = Challenged(postings, challenged=True)
+
+    await _run_source(source, PLAN, sessions)
+
+    written = 0
+    for size, confirmed in zip(
+        [len(batch) for batch in Vacancies.batches], source.confirmed, strict=True
+    ):
+        written += size
+        assert confirmed <= written, f"confirmed {confirmed} with only {written} written"
+    assert source.confirmed[-1] == len(postings)
+
+
+async def test_a_run_that_finishes_confirms_its_last_batch_too(
+    sessions: Callable[[], AbstractAsyncContextManager[Session]],
+) -> None:
+    """The ordinary ending needs the same confirmation as the interrupted one.
+
+    A crawl that drains its budget leaves a partial batch, writes it, and must
+    say so — otherwise the tail of every successful run is re-bought forever,
+    which is the same defect as the interrupted case wearing a friendlier face.
+    """
+    postings = [posting("healthy", str(index)) for index in range(UPSERT_BATCH + 4)]
+    source = Healthy(postings, challenged=False)
+
+    outcome = await _run_source(source, PLAN, sessions)
+
+    assert outcome.errors == []
+    assert source.confirmed[-1] == len(postings), (
+        f"finished having written {len(postings)}, confirmed {source.confirmed}"
+    )
 
 
 async def test_a_challenge_in_one_source_does_not_stop_another(
