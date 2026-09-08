@@ -50,6 +50,67 @@ CONTRACT_VERSION: Final[int] = 1
 
 @final
 @dataclass(frozen=True, slots=True)
+class ATSCard:
+    """What the backend's ATS audit says about this item's letter.
+
+    A summary of ``app.schemas.ats.ATSReport``, reduced at the backend to what a
+    console card can print. Nothing here is computed in this package: the audit
+    reads a document the way an employer's parser will, and this shows the
+    answer to the person about to send it.
+
+    The two counts that matter are kept apart on purpose. ``unstated`` names
+    requirements the candidate *has* and this letter does not mention — a thing
+    a regenerated letter fixes. ``absent`` is only a number, because those are
+    requirements nobody holds, and naming them on a card seconds before an
+    application would read as a list of things to claim.
+    """
+
+    overall: str
+    score: float | None = None
+    critical: tuple[str, ...] = ()
+    requirements_total: int = 0
+    requirements_present: int = 0
+    unstated: tuple[str, ...] = ()
+    absent: int = 0
+
+    @classmethod
+    def from_json(cls, payload: object) -> "ATSCard | None":
+        """One summary off the wire, or nothing when the backend sent none.
+
+        ``None`` for anything unreadable rather than a default-constructed card:
+        an item whose audit did not run must not print as one that passed.
+        """
+        if not isinstance(payload, dict):
+            return None
+        overall = payload.get("overall")
+        if not isinstance(overall, str) or not overall.strip():
+            return None
+        return cls(
+            overall=overall.strip(),
+            score=_score(payload.get("score")),
+            critical=_texts(payload.get("critical")),
+            requirements_total=_count(payload.get("requirements_total")),
+            requirements_present=_count(payload.get("requirements_present")),
+            unstated=_texts(payload.get("unstated")),
+            absent=_count(payload.get("absent")),
+        )
+
+
+def _texts(value: object) -> tuple[str, ...]:
+    """A list of strings off the wire, with everything else dropped."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _count(value: object) -> int:
+    """A non-negative count off the wire, or zero."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(0, value)
+
+
+@dataclass(frozen=True, slots=True)
 class QueueItem:
     """One vacancy the owner's dashboard put forward for an application."""
 
@@ -81,6 +142,11 @@ class QueueItem:
     #: approving an application.
     score: float | None = None
     score_explanation: str | None = None
+    #: The backend's ATS audit of :attr:`letter`, against this vacancy's
+    #: requirement list. ``None`` when the queue carried none — an older
+    #: backend, or an item with no letter to audit — and the card says so
+    #: rather than printing silence, for the same reason it does with the score.
+    ats: "ATSCard | None" = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "QueueItem":
@@ -118,6 +184,7 @@ class QueueItem:
             external_application=bool(payload.get("external_application", False)),
             score=_score(payload.get("score")),
             score_explanation=explanation if isinstance(explanation, str) else None,
+            ats=ATSCard.from_json(payload.get("ats")),
         )
 
 

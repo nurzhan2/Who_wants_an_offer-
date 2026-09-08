@@ -52,6 +52,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, StringConstraints
 
 from app.db.enums import MatchBucket
+from app.schemas.ats import ATSSummary
 from app.schemas.match import MatchComponentScores, MatchedSkill, MissingSkill
 
 #: Carried in both payloads. Mirrors ``agent.queue.CONTRACT_VERSION``: a queue
@@ -178,6 +179,12 @@ class QueueItem(BaseModel):
     anonymous: bool = False
     #: hh is itself checking this employer.
     employer_on_additional_check: bool = False
+    #: How this item's letter reads to a machine, and how much of the vacancy's
+    #: requirement list it names. The last of the ATS report's three display
+    #: places: after the card there is nothing between this and an employer's
+    #: inbox. ``None`` means the item carries no letter and nothing was audited,
+    #: which a card must not print as a pass.
+    ats: ATSSummary | None = None
 
 
 class QueueResponse(BaseModel):

@@ -376,6 +376,7 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
                 score=item.score,
                 score_explanation=item.score_explanation,
                 hh_visibility=visibility,
+                ats=item.ats,
             )
         )
     return candidates

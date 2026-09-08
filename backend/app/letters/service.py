@@ -38,6 +38,8 @@ from app.letters.examples import ChosenExample, OutcomeEvidence
 from app.letters.generator import GeneratedLetter, LetterUnwritableError, generate
 from app.letters.guard import LetterProblem
 from app.llm.router import LLMRouter, get_router
+from app.schemas.ats import ATSReport, DocumentKind
+from app.services import ats as ats_service
 
 logger = get_logger(__name__)
 
@@ -65,6 +67,10 @@ class LetterOutcome:
     #: counts. Whatever displays it has to be able to say «данных пока мало» and
     #: mean it, which is why this is counts and a flag rather than a rate.
     evidence: OutcomeEvidence = field(default_factory=OutcomeEvidence)
+    #: The ATS audit of the text this run produced, read against the vacancy it
+    #: was written for. None only when nothing was generated. See
+    #: :func:`write_letter` for why the audit happens before the save.
+    ats: ATSReport | None = None
 
     @property
     def problems(self) -> tuple[LetterProblem, ...]:
@@ -145,6 +151,42 @@ async def write_letter(
             skipped="letter_unwritable",
         )
 
+    # The system auditing its own output. Everything above this point checks
+    # the letter against rules about letters; this checks the finished text the
+    # way an employer's parser will read it, and it runs before the save rather
+    # than on the way to a screen, so a document that fails it never becomes a
+    # thing a person can send by clicking once.
+    report = await ats_service.audit_generated_for_vacancy(
+        session,
+        letter.text,
+        kind=DocumentKind.COVER_LETTER,
+        profile_id=profile.profile_id,
+        vacancy_id=vacancy_id,
+    )
+    if not report.is_machine_readable:
+        # Only one finding can land here on plain text: hidden characters. A
+        # letter is written from a job description somebody else wrote, so an
+        # invisible keyword block reaching the text is a thing that arrived
+        # rather than a thing we chose — and it would go out under the owner's
+        # name. Not saved, and loud, for the reason the module docstring gives
+        # about saving something that breaks a hard constraint.
+        logger.error(
+            "letters.failed_ats_audit",
+            vacancy_id=str(vacancy_id),
+            findings=[finding.code.value for finding in report.critical],
+            score=report.score,
+        )
+        return LetterOutcome(
+            vacancy_id=vacancy_id,
+            title=facts.title,
+            company=facts.company,
+            matched=len(context.overlap.matched),
+            missing=len(context.overlap.missing),
+            evidence=evidence,
+            ats=report,
+            skipped="letter_failed_audit",
+        )
+
     await store.save_letter(
         session, vacancy_id=vacancy_id, text=letter.text, profile_id=profile.profile_id
     )
@@ -160,6 +202,8 @@ async def write_letter(
         rejected_for=[problem.value for problem in letter.rejected_for],
         examples_used=letter.examples_used,
         outcomes_known=evidence.answered,
+        ats_score=report.score,
+        requirements_present=len(report.keywords.present) if report.keywords else None,
     )
     return LetterOutcome(
         vacancy_id=vacancy_id,
@@ -170,6 +214,7 @@ async def write_letter(
         missing=len(context.overlap.missing),
         characters=len(letter.text),
         evidence=evidence,
+        ats=report,
         saved=True,
     )
 
