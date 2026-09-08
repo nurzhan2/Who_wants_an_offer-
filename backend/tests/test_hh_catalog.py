@@ -41,7 +41,14 @@ from structlog.testing import capture_logs
 from app.core.config import settings
 from app.pipeline.runner import UPSERT_BATCH
 from app.sources.base import RawPosting, SearchQuery
-from app.sources.hh import CATALOG_PAGES_PER_RUN, ROLES_URL, HHSource
+from app.sources.hh import (
+    CATALOG_HEAD_PAGES,
+    CATALOG_PAGES_PER_RUN,
+    ROLES_URL,
+    CatalogPlan,
+    HHSource,
+    pages_this_run,
+)
 from app.sources.http import SourceClient
 
 pytestmark = pytest.mark.unit
@@ -220,6 +227,15 @@ def walked(postings: Sequence[RawPosting]) -> list[str]:
     return [posting.external_id for posting in postings]
 
 
+def _opened(http: respx.MockRouter) -> tuple[str, ...]:
+    """The catalogue pages a run opened, in order."""
+    return tuple(
+        str(call.request.url).rsplit("/", 1)[-1]
+        for call in http.calls
+        if "/vacancies/" in str(call.request.url)
+    )
+
+
 # -- the reordering ----------------------------------------------------
 
 
@@ -347,7 +363,9 @@ async def test_the_plan_is_stored_and_the_next_run_reuses_it(
 
     assert plan["families"] == ["backend", "devops"]
     assert plan["role_ids"] == [PROGRAMMER_ROLE, 160]
-    assert plan["slugs"] == ["devops-inzhener", "programmist"]
+    # Ranked, not alphabetical: the shorter, more general page first, and both
+    # of them ahead of anything naming a technology this profile never claimed.
+    assert plan["slugs"] == ["programmist", "devops-inzhener"]
     after = sum(1 for call in http.calls if CATALOG0_URL in str(call.request.url))
     assert after == before == 1
 
@@ -368,23 +386,57 @@ async def test_a_new_resume_re_resolves_the_plan_at_once(
     assert store.saved[f"catalog:{HOST}"]["families"] == ["qa"]
 
 
-async def test_the_rotation_moves_on_so_the_next_run_opens_other_pages(
+async def test_the_best_pages_are_reopened_and_the_rest_are_swept(
     hh: HHSource, http: respx.MockRouter, store: StateStore
 ) -> None:
     """One page per profession is all hh gives us, so breadth is the only depth.
 
     Paging exists on the catalogue only as ``?page=0..3``, which hh's
-    ``Disallow: *?*`` closes. The slug list is swept across runs instead, and the
-    cursor is what makes the sweep happen.
+    ``Disallow: *?*`` closes, so the slug list is walked across runs instead. Not
+    as a plain rotation, though: the list is ranked by nearness to the profile,
+    and a rotation over the whole of it would spend run ten on the 1C pages at
+    the bottom. The head is re-read every run — that is how a new python posting
+    is found within hours — and the tail is swept behind it.
     """
-    slugs = {f"programmist-{index}": [] for index in range(CATALOG_PAGES_PER_RUN + 3)}
+    slugs = {f"programmist-{index:02d}": [] for index in range(CATALOG_PAGES_PER_RUN + 4)}
     serve(http, vacancies=["100"], catalog=slugs)
 
     await collect(hh)
+    first = _opened(http)
+    await collect(hh)
+    # Sliced rather than reset: respx keeps every call of the fixture's life, and
+    # the second run's pages are the ones after the first run's.
+    second = _opened(http)[len(first) :]
 
-    assert store.saved[f"catalog:{HOST}"]["offset"] == CATALOG_PAGES_PER_RUN
-    opened = [call for call in http.calls if "/vacancies/programmist-" in str(call.request.url)]
-    assert len(opened) == CATALOG_PAGES_PER_RUN
+    assert len(first) == len(second) == CATALOG_PAGES_PER_RUN
+    head = tuple(store.saved[f"catalog:{HOST}"]["slugs"][:CATALOG_HEAD_PAGES])
+    assert first[:CATALOG_HEAD_PAGES] == second[:CATALOG_HEAD_PAGES] == head
+    assert set(first[CATALOG_HEAD_PAGES:]).isdisjoint(second[CATALOG_HEAD_PAGES:])
+
+
+def test_a_plan_short_enough_to_read_in_one_run_is_read_whole() -> None:
+    """No rotation to do, and no cursor to move."""
+    plan = CatalogPlan(resolved_at=WHEN, slugs=("a", "b"), offset=0)
+
+    assert pages_this_run(plan) == (("a", "b"), 0)
+
+
+def test_the_window_wraps_without_repeating_the_head() -> None:
+    """The tail is a ring and the head is not part of it.
+
+    A cursor that ran over the whole list would put the head's pages into the
+    rotation as well, and the run would open one of them twice.
+    """
+    slugs = tuple(f"s{index}" for index in range(CATALOG_HEAD_PAGES + 3))
+    take = CATALOG_PAGES_PER_RUN - CATALOG_HEAD_PAGES
+    plan = CatalogPlan(resolved_at=WHEN, slugs=slugs, offset=2)
+
+    opened, offset = pages_this_run(plan)
+
+    assert opened[:CATALOG_HEAD_PAGES] == slugs[:CATALOG_HEAD_PAGES]
+    assert len(opened) == len(set(opened))
+    assert set(opened[CATALOG_HEAD_PAGES:]) <= set(slugs[CATALOG_HEAD_PAGES:])
+    assert offset == (2 + min(take, 3)) % 3
 
 
 async def test_a_catalogue_page_that_is_gone_does_not_stop_the_run(

@@ -322,6 +322,19 @@ MAX_PAGES_PER_RUN = 1200
 #: it; that is bandwidth rather than requests, and requests are what hh counts.
 CATALOG_PAGES_PER_RUN = 8
 
+#: How many of a run's catalogue pages come from the top of the ranked list
+#: rather than from the rotation.
+#:
+#: Half, and the split is the answer to a real failure rather than a taste. The
+#: list is ranked by nearness to the profile (``hh_roles._rank``), and a pure
+#: rotation over it spends run 10 on the tail — measured on the live plan, role
+#: 96 alone matches over a hundred slugs and dozens of them are 1C, ABAP,
+#: Navision and CNC pages that have nothing to do with this profile. Re-reading
+#: the top pages every run is also how a NEW python posting is found within
+#: hours instead of within the eighty runs a full sweep takes; the rotation is
+#: what eventually covers the rest.
+CATALOG_HEAD_PAGES = 4
+
 #: Catalogue slugs one plan may hold. 630 of 10 435 slugs were development on
 #: 2026-09-08, so this is headroom for a wider profile rather than a limit that
 #: bites today; what it stops is a keyword like "sql" quietly selecting half
@@ -939,6 +952,30 @@ def catalog_entries(body: str, host: str) -> tuple[tuple[str, ...], int, int]:
     return tuple(dict.fromkeys(slugs)), len(locs), body.count("<lastmod>")
 
 
+def pages_this_run(plan: "CatalogPlan") -> tuple[tuple[str, ...], int]:
+    """Which catalogue pages to open now, and where the rotation continues.
+
+    Half from the head of the ranked list and half from a window that moves
+    across the tail; see :data:`CATALOG_HEAD_PAGES` for why it is not simply a
+    rotation over the whole list. A plan short enough to read in one run is read
+    in one run, and the cursor stays where it is.
+
+    Pure and separate from the fetching because it is the decision worth
+    testing: everything else in the pass is a request and a regex.
+    """
+    slugs = plan.slugs
+    if not slugs:
+        return (), 0
+    if len(slugs) <= CATALOG_PAGES_PER_RUN:
+        return slugs, plan.offset
+    head = slugs[:CATALOG_HEAD_PAGES]
+    tail = slugs[len(head) :]
+    take = CATALOG_PAGES_PER_RUN - len(head)
+    start = plan.offset % len(tail)
+    rotating = [tail[(start + step) % len(tail)] for step in range(min(take, len(tail)))]
+    return (*head, *rotating), (start + len(rotating)) % len(tail)
+
+
 def _collapse(spans: Iterable[Span]) -> tuple[Span, ...]:
     """Overlapping stretches merged into one, newest first, capped.
 
@@ -1063,7 +1100,10 @@ class _CatalogPass:
 
     ids: frozenset[str] = frozenset()
     role_ids: frozenset[int] = frozenset()
-    pages: int = 0
+    #: The catalogue pages this run actually opened, in the order it opened
+    #: them. Carried rather than counted because it is what the run report has
+    #: to show: which eight of a hundred pages were bought.
+    opened: tuple[str, ...] = ()
     slugs: int = 0
 
 
@@ -1389,6 +1429,7 @@ class HHSource(BaseSource):
             logger.info(
                 "sources.hh.role_pass_planned",
                 host=site.host,
+                opened=list(catalog.opened),
                 catalog_ids=len(catalog.ids),
                 # The gap between these two is the cost named in the docstring:
                 # ids the catalogue offered that no sitemap file of this host
@@ -1458,7 +1499,7 @@ class HHSource(BaseSource):
             stored=state.stored,
             not_stored=state.not_stored,
             unreadable=state.unreadable,
-            catalog_pages=catalog.pages,
+            catalog_pages=len(catalog.opened),
             catalog_slugs=catalog.slugs,
             role_pass=state.role_pass,
             role_hits=state.role_hits,
@@ -1871,30 +1912,33 @@ class HHSource(BaseSource):
         if plan is None or not plan.slugs:
             return _CatalogPass()
 
+        wanted, offset = pages_this_run(plan)
         ids: set[str] = set()
-        offset = plan.offset
-        pages = 0
-        while pages < min(CATALOG_PAGES_PER_RUN, len(plan.slugs)) and not stop():
-            slug = plan.slugs[offset % len(plan.slugs)]
-            offset += 1
-            pages += 1
+        opened: list[str] = []
+        for slug in wanted:
+            if stop():
+                break
+            opened.append(slug)
             body = await self._catalog_page(site, slug)
             spend()
             if body is not None:
                 ids.update(VACANCY_ID_ON_PAGE.findall(body))
-        await self._save_plan(site, plan.model_copy(update={"offset": offset % len(plan.slugs)}))
+        await self._save_plan(site, plan.model_copy(update={"offset": offset}))
         logger.info(
             "sources.hh.catalog_read",
             host=site.host,
-            pages=pages,
+            # The slugs themselves, not a count. Which eight of a hundred pages
+            # a run opens decides what the whole run collects, and a number does
+            # not say whether they were python pages or 1C ones.
+            opened=opened,
             ids=len(ids),
             slugs=len(plan.slugs),
-            next_offset=offset % len(plan.slugs),
+            next_offset=offset,
         )
         return _CatalogPass(
             ids=frozenset(ids),
             role_ids=frozenset(plan.role_ids),
-            pages=pages,
+            opened=tuple(opened),
             slugs=len(plan.slugs),
         )
 
@@ -1966,7 +2010,7 @@ class HHSource(BaseSource):
                 detail="no catalogue slugs read; keeping whatever plan was stored",
             )
             return plan
-        chosen = slugs_for(roles, keywords, slugs)
+        chosen = slugs_for(roles, keywords, slugs, families=families)
         if len(chosen) > MAX_CATALOG_SLUGS:
             logger.warning(
                 "sources.hh.catalog_slugs_capped",

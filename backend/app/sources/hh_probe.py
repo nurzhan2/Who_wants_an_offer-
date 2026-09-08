@@ -294,11 +294,15 @@ def plan_for(
             category=role.category,
             # One role at a time, and with no keywords, so that each line of the
             # report says what THAT role found rather than what the union did.
-            slugs=slugs_for([role], (), slugs),
+            # Ranked with the families the profile matched, because a role's
+            # slugs are printed in the order the crawl would open them and that
+            # order is the thing worth checking: role 96 matches over a hundred
+            # slugs, and which four are at the top decides the run.
+            slugs=slugs_for([role], (), slugs, families=families),
         )
         for role in roles
     )
-    chosen = slugs_for(roles, keywords, slugs)
+    chosen = slugs_for(roles, keywords, slugs, families=families)
     named = {slug for role in planned for slug in role.slugs}
     return CrawlPlan(
         keywords=tuple(keywords),

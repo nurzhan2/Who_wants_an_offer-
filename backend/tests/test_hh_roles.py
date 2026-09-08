@@ -24,6 +24,7 @@ import pytest
 
 from app.core.exceptions import SourceError
 from app.sources.hh_roles import (
+    EXPERIENCE_WORDS,
     FOLD,
     GENERIC_ROLE_WORDS,
     TRANSLIT,
@@ -237,19 +238,21 @@ def test_a_generic_word_in_a_role_name_does_not_claim_the_trade_that_owns_it() -
     assert "inzhener-stroitel" not in picked
 
 
-def test_keywords_find_pages_no_role_named_and_come_after_them() -> None:
+def test_keywords_find_pages_no_role_named_and_outrank_the_ones_that_do() -> None:
     """The fallback that makes this work for a profile no family describes.
 
-    Ordered rather than merged: what hh's own directory calls this work is a
-    better first guess than what the candidate called their skills, and the
-    crawl reads the head of this list first.
+    And it is not a second-class one. A page carrying the candidate's own words
+    beats a page that merely belongs to the right trade, because the crawl opens
+    a handful of these and ``junior-python-developer`` is a better use of one
+    than ``programmist`` is. Being named by hh's directory only breaks ties
+    among pages that say nothing about this profile in particular.
     """
     roles = (DirectoryRole(id=96, name="Программист, разработчик"),)
 
     picked = slugs_for(roles, ("python", "developer"), SLUGS)
 
-    assert "junior-python-developer" in picked
-    assert picked.index("programmist") < picked.index("junior-python-developer")
+    assert picked[0] == "junior-python-developer"
+    assert picked.index("python-razrabotchik") < picked.index("programmist")
 
 
 def test_nothing_a_profile_did_not_ask_for_is_picked() -> None:
@@ -291,3 +294,86 @@ def test_a_config_that_does_not_parse_names_the_file(tmp_path: Path) -> None:
         load_families(broken)
 
     assert "hh_roles.yaml" in str(raised.value)
+
+
+# -- the order the pages are opened in ---------------------------------
+
+
+#: What role 96 «Программист, разработчик» really matched on almaty.hh.kz, in
+#: the shapes that matter: the profile's own technology, the same trade at the
+#: level the candidate is at, and the dozens of pages for other people's
+#: technologies that share the word ``programmist``.
+LIVE_SLUGS = (
+    "programmist_1c",
+    "programmist-1s-buhgalteriya",
+    "programmist_1szup",
+    "programmist-1c-82",
+    "programmist-abap",
+    "programmist-navision",
+    "programmist-chpu",
+    "programmist-asu-tp",
+    "programmist",
+    "python-razrabotchik",
+    "backend-razrabotchik-python",
+    "mladshij-programmist",
+    "junior-programmist",
+    "programmist_stazher",
+    "nachinayushiy_programmist",
+)
+
+
+def test_the_profiles_own_technology_outranks_everybody_elses() -> None:
+    """Measured, and the reason this ranking exists at all.
+
+    Role 96 matches over a hundred slugs on the live site and dozens of them are
+    1C, ABAP, Navision and CNC. A run opens eight. Sorted alphabetically all
+    eight are 1C — and the crawl hands back the same irrelevant corpus it was
+    rewritten to stop handing back, by a different route.
+    """
+    roles = (DirectoryRole(id=96, name="Программист, разработчик"),)
+    families = families_for(("python",), load_families())
+
+    picked = slugs_for(roles, ("python",), LIVE_SLUGS, families=families)
+
+    assert picked[:2] == ("python-razrabotchik", "backend-razrabotchik-python")
+    assert not any(slug.startswith("programmist_1") for slug in picked[:8])
+    assert not any(slug.startswith("programmist-1") for slug in picked[:8])
+
+
+def test_a_level_word_is_not_another_trade() -> None:
+    """``junior`` and ``1c`` are both words the profile never said.
+
+    One of them means the same job earlier in a career and the other means
+    somebody else's job, and nothing but :data:`EXPERIENCE_WORDS` can tell them
+    apart. There is no list of bad words anywhere in this module — such a list
+    would be endless and out of date the week it was written.
+    """
+    roles = (DirectoryRole(id=96, name="Программист, разработчик"),)
+    families = families_for(("python",), load_families())
+
+    picked = slugs_for(roles, ("python",), LIVE_SLUGS, families=families)
+
+    for level in ("mladshij-programmist", "junior-programmist", "programmist_stazher"):
+        assert picked.index(level) < picked.index("programmist_1c"), level
+
+
+def test_hh_spells_the_same_level_word_two_ways_and_both_are_recognised() -> None:
+    """``mladshij`` and ``mladshiy`` are one profession, and so are three ways of ``щ``.
+
+    A fold that left them apart would leave ``nachinayushiy_programmist`` looking
+    like a page about a technology nobody here has heard of, and rank it with the
+    ABAP pages.
+    """
+    assert fold("mladshij-programmist") == fold("mladshiy-programmist")
+    assert fold("начинающий") == fold("nachinayushiy") == fold("nachinayuschiy")
+
+
+def test_every_word_table_is_stored_folded() -> None:
+    """A word left unfolded here is a word that silently never matches anything.
+
+    ``veduschiy`` is the example: the fold turns it into ``veduschy``, so an
+    entry written the first way sits in the table looking correct and matching
+    nothing for as long as nobody checks.
+    """
+    for word in EXPERIENCE_WORDS | GENERIC_ROLE_WORDS:
+        assert word == fold(word), f"{word!r} is not stored in its folded form"
