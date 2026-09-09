@@ -14,9 +14,10 @@ matters most and the easiest one to lose.
 """
 
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, final
 
 import pytest
 
@@ -39,7 +40,15 @@ from agent.prefilter import (
     read,
     read_status,
 )
-from agent.queue import CONTRACT_VERSION, FileQueue, QueueFormatError, QueueItem
+from agent.queue import (
+    CONTRACT_VERSION,
+    FileQueue,
+    MergedQueue,
+    QueueFormatError,
+    QueueItem,
+    Result,
+    ResultsFile,
+)
 from agent.state import Actor, Status
 from agent.state_page import (
     Application,
@@ -672,6 +681,109 @@ def test_results_are_written_beside_the_queue_and_never_over_it() -> None:
         assert len(items) == 1
         assert queue.results_path.is_file()
         assert "items" in path.read_text(encoding="utf-8")
+
+
+# ── the queue is the backend's, and the file is an addition to it ─────
+#
+# For a year ``agent/queue.json`` was the only source, so a night of crawling,
+# scoring and letter-writing reached the agent as whatever a person had typed
+# into that file — once, a month earlier. These tests are about the arrangement
+# that ends it: the backend answers what is worth applying to, and the file adds
+# to that answer instead of standing in for it.
+
+
+@final
+class _Recording:
+    """A queue that answers with what it was given and remembers what it heard."""
+
+    def __init__(self, items: Sequence[QueueItem] = ()) -> None:
+        self.items = list(items)
+        self.reported: list[Result] = []
+        self.asked_for: list[int] = []
+
+    def take(self, limit: int) -> Sequence[QueueItem]:
+        """The items, cut to the limit, with the limit recorded."""
+        self.asked_for.append(limit)
+        return self.items[:limit]
+
+    def report(self, results: Sequence[Result]) -> None:
+        """Keep what was handed back."""
+        self.reported.extend(results)
+
+
+def _item(vacancy_id: str, title: str = "A") -> QueueItem:
+    """One queue item, with the two fields everything else depends on."""
+    return QueueItem.from_json(
+        {"vacancy_id": vacancy_id, "url": f"https://hh.kz/vacancy/{vacancy_id}", "title": title}
+    )
+
+
+def test_the_backend_leads_and_the_hand_written_file_follows() -> None:
+    """Order is the point: a scored vacancy must not be pushed down the list.
+
+    Both halves are offered, and the backend's come first. An entry somebody
+    typed into the file carries no score at all, so showing it above a scored
+    row would hide the only reason there is to prefer one vacancy over another.
+    """
+    backend = _Recording([_item("1"), _item("2")])
+    extra = _Recording([_item("3")])
+
+    items = MergedQueue(backend=backend, extra=extra).take(10)
+
+    assert [item.vacancy_id for item in items] == ["1", "2", "3"]
+
+
+def test_a_vacancy_the_backend_already_offered_is_not_offered_twice() -> None:
+    """The file is where a person adds what the queue missed, and they overlap.
+
+    A duplicate is not harmless: the run looks at each item once, so a second
+    copy of a vacancy is a slot spent on nothing — and the copy that would win
+    is the one with no score and no letter behind it.
+    """
+    backend = _Recording([_item("1", "scored")])
+    extra = _Recording([_item("1", "typed by hand"), _item("2")])
+
+    items = MergedQueue(backend=backend, extra=extra).take(10)
+
+    assert [(item.vacancy_id, item.title) for item in items] == [("1", "scored"), ("2", "A")]
+
+
+def test_the_batch_limit_holds_across_both_sources() -> None:
+    """The daily cap is enforced later; this is the limit on what is looked at."""
+    backend = _Recording([_item("1"), _item("2")])
+    extra = _Recording([_item("3")])
+
+    items = MergedQueue(backend=backend, extra=extra).take(2)
+
+    assert [item.vacancy_id for item in items] == ["1", "2"]
+
+
+def test_a_run_with_no_hand_written_file_is_the_ordinary_case() -> None:
+    """Most runs have nothing added by hand, and that is not a missing file."""
+    backend = _Recording([_item("1")])
+
+    assert [item.vacancy_id for item in MergedQueue(backend=backend).take(10)] == ["1"]
+
+
+def test_results_reach_the_local_file_before_the_tracker() -> None:
+    """The one outcome worth engineering against: applications sent, nobody told.
+
+    The file write cannot fail for a reason outside this machine; the POST can.
+    So the record is written first and the hand-over second, and the results of
+    hand-added items go too — an id the backend does not know writes nothing at
+    the far end, and one it does know is an application its tracker should have.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        memory = ResultsFile(Path(directory) / "queue-results.json")
+        backend = _Recording()
+        queue = MergedQueue(backend=backend, extra=_Recording([_item("2")]), memory=memory)
+        results = [Result("1", "sent"), Result("2", "sent")]
+
+        queue.take(10)
+        queue.report(results)
+
+        assert [result.vacancy_id for result in memory.read()] == ["1", "2"]
+        assert [result.vacancy_id for result in backend.reported] == ["1", "2"]
 
 
 def test_the_page_state_is_read_out_of_the_same_marker_the_crawler_uses() -> None:

@@ -18,6 +18,14 @@ stand-ins. The one exception is the cover-letter field, which nobody has
 measured: the ``ready`` fixture supplies it, and the tests that check what
 happens *without* it deliberately do not use that fixture.
 
+**Why every run below says ``--no-backend``.** The queue is the backend's
+answer — vacancies scored above the threshold, with a letter and no application
+— and ``agent/queue.json`` is where a person adds something it did not offer.
+These tests drive the flow off a file they write themselves, so they ask for the
+file alone. A run that silently fell back to the file when the backend was
+unreachable would be the defect this arrangement was written to end: a night of
+crawling reaching the agent as a month-old hand-written row.
+
 The defects with a test each below, so none can come back quietly:
 
 * the gate aborted the navigation that opens the response form, because
@@ -38,7 +46,7 @@ import io
 import json
 import sys
 import time as time_module
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, time
 from pathlib import Path
@@ -63,7 +71,7 @@ from agent.human import CONFIRM_WORD, CancelledError, Candidate, confirm
 from agent.journal import Entry, Journal
 from agent.letter import check as check_letter
 from agent.mandate import SendMandate, digest, mint
-from agent.queue import ATSCard, QueueFormatError, QueueItem, Result
+from agent.queue import ATSCard, QueueFormatError, QueueItem, QueueUnreachableError, Result
 from agent.selectors import LetterFieldUnknownError, Scope, Selector
 from agent.state import (
     Actor,
@@ -678,7 +686,7 @@ def test_the_two_ways_hh_can_say_applied_are_recorded_differently(
         _install(room, monkeypatch, journal, [FakePage(gate, state)])
         monkeypatch.setattr(run, "SubmitGate", lambda: gate)
         _confirms(monkeypatch, None)
-        assert run.main(["--send", "--queue", str(room / "queue.json")]) == 0
+        assert run.main(["--send", "--no-backend", "--queue", str(room / "queue.json")]) == 0
         entry = journal.get(VACANCY)
         assert entry is not None
         return entry
@@ -764,7 +772,7 @@ def test_a_challenge_before_the_run_starts_is_not_reported_as_an_expired_session
     _confirms(monkeypatch, None)
 
     with pytest.raises(run.ChallengedError, match="проверку на робота"):
-        run.main(["--send", "--queue", str(tmp_path / "queue.json")])
+        run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")])
 
     assert page.clicks == []
     assert journal.get(VACANCY) is not None
@@ -1421,7 +1429,7 @@ def _run_one(
     _install(tmp_path, monkeypatch, journal, [page])
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     _confirms(monkeypatch, watch)
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 0
     return page
 
 
@@ -1447,7 +1455,7 @@ def _run_many(
     _install(tmp_path, monkeypatch, journal, [page])
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     _confirms(monkeypatch, None)
-    run.main(["--send", "--queue", str(tmp_path / "queue.json")])
+    run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")])
     return page
 
 
@@ -1953,7 +1961,7 @@ def test_a_duplicated_queue_sends_one_application_and_finishes(
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     _confirms(monkeypatch, None)
 
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 0
 
     # One application: the GET that opens the form and the send it makes.
     assert len(gate.allowed) == 2
@@ -2016,7 +2024,7 @@ def test_a_journal_refusal_no_longer_destroys_the_record_of_the_run(
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     _confirms(monkeypatch, None)
 
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 1
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 1
 
     results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
     assert [r["status"] for r in results["results"]] == [Status.SKIPPED.value]
@@ -2069,7 +2077,7 @@ def test_a_confirmation_the_journal_will_not_record_is_never_acted_on(
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     _confirms(monkeypatch, None)
 
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 1
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 1
 
     assert page.clicks == []
     assert gate.allowed == []
@@ -2122,7 +2130,7 @@ def test_an_escape_is_raised_only_after_the_record_has_been_written(
     _confirms(monkeypatch, None)
 
     with pytest.raises(InterceptionEscapedError, match="мимо перехватчика"):
-        run.main(["--send", "--queue", str(tmp_path / "queue.json")])
+        run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")])
 
     assert (tmp_path / "queue-results.json").is_file()
 
@@ -2147,7 +2155,7 @@ def test_a_run_that_ends_in_a_challenge_still_writes_down_what_it_did(
     _confirms(monkeypatch, None)
 
     with pytest.raises(run.ChallengedError):
-        run.main(["--send", "--queue", str(tmp_path / "queue.json")])
+        run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")])
 
     results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
     # Nothing was attempted, and both confirmations are on record as unused
@@ -2278,6 +2286,98 @@ def test_a_card_that_stays_quiet_after_the_letter_is_still_sent(ready: None) -> 
     assert (warnings.visibility, warnings.likely_rejection) == (None, None)
 
 
+# ── where the run takes its work from ─────────────────────────────────
+
+
+def test_a_backend_that_does_not_answer_stops_the_run_rather_than_reading_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The silent fallback is the defect, not the safety net.
+
+    A run that quietly used ``agent/queue.json`` when the backend was down would
+    report a month-old hand-written row as this morning's queue — which is
+    exactly what happened for a year, and what nobody could see happening. So
+    the run says the backend did not answer, names the flag that works without
+    it, and stops.
+    """
+    journal = _prepared_journal(tmp_path)
+    monkeypatch.setattr(run, "Journal", lambda path: journal)
+
+    class Unreachable:
+        """The endpoint, not answering."""
+
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+
+        def take(self, limit: int) -> Sequence[QueueItem]:
+            """What ``HttpQueue`` raises when nothing is listening."""
+            raise QueueUnreachableError(f"{self.base_url} не отдал очередь: ConnectError.")
+
+        def report(self, results: Sequence[Result]) -> None:
+            """Never reached: the run stops before anything is confirmed."""
+
+    monkeypatch.setattr(run, "HttpQueue", Unreachable)
+
+    assert run.main(["--queue", str(tmp_path / "queue.json")]) == 1
+
+    printed = capsys.readouterr()
+    assert "не отдал очередь" in printed.err
+    assert "--no-backend" not in printed.out
+    # The file was right there and was not read in its place.
+    assert "Сухой прогон" not in printed.out
+
+
+def test_the_queue_is_the_backends_and_the_file_adds_to_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """What the pipeline produced overnight, plus what a person typed in.
+
+    The dry run is enough to see the composition: both vacancies reach the
+    cards, the scored one first, and neither source replaced the other.
+    """
+    journal = _prepared_journal(tmp_path)
+    monkeypatch.setattr(run, "Journal", lambda path: journal)
+    monkeypatch.setattr(
+        Limits,
+        "from_env",
+        classmethod(lambda cls: cls(work_starts=time(0, 0), work_ends=time(23, 59))),
+    )
+
+    class Served:
+        """The endpoint, answering with what the pipeline scored."""
+
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+
+        def take(self, limit: int) -> Sequence[QueueItem]:
+            """One scored vacancy with a letter, as the queue serves them."""
+            return [
+                QueueItem.from_json(
+                    {
+                        "vacancy_id": "777777777",
+                        "url": "https://almaty.hh.kz/vacancy/777777777",
+                        "title": "Backend-разработчик Python",
+                        "company": "Kaspi",
+                        "letter": "Здравствуйте!",
+                        "score": 88.0,
+                        "score_explanation": "совпадает: python, postgresql",
+                    }
+                )
+            ]
+
+        def report(self, results: Sequence[Result]) -> None:
+            """Not reached in a dry run."""
+
+    monkeypatch.setattr(run, "HttpQueue", Served)
+
+    assert run.main(["--queue", str(tmp_path / "queue.json")]) == 0
+
+    printed = capsys.readouterr().out
+    assert "777777777" in printed, "the queue the pipeline produced"
+    assert VACANCY in printed, "and the row a person added by hand"
+    assert printed.index("777777777") < printed.index(VACANCY)
+
+
 # ── that run.main asks a person at all ────────────────────────────────
 #
 # Every other test in this file that drives ``run.main(["--send", …])`` goes
@@ -2309,7 +2409,7 @@ def _run_with_a_person(
     _install(tmp_path, monkeypatch, journal, [page])
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     monkeypatch.setattr(sys, "stdin", io.StringIO(typed))
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 0
     return page
 
 
@@ -2403,7 +2503,7 @@ def test_dropping_the_only_card_leaves_the_vacancy_for_next_time(
     monkeypatch.setattr(run, "SubmitGate", lambda: gate)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"1 2\n{CONFIRM_WORD}\n"))
 
-    assert run.main(["--send", "--queue", str(tmp_path / "queue.json")]) == 0
+    assert run.main(["--send", "--no-backend", "--queue", str(tmp_path / "queue.json")]) == 0
 
     assert not page.sent
     assert page.visited == []

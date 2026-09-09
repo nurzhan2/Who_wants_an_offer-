@@ -10,7 +10,7 @@ all. That was invisible while there was only one answer. Every row in the table
 came from hh's ``keySkills``, a field the employer filled in themselves.
 
 From this revision requirements are also read out of the description text, which
-is where 832 of the corpus's 1958 vacancies keep them because they left the
+is where 893 of the corpus's 1958 vacancies keep them because they left the
 structured field empty. Those rows are a *reading* of somebody's prose, not a
 list somebody typed, and presenting the two as one kind of row would put an
 extraction under an employer's name on the vacancy card, in the match

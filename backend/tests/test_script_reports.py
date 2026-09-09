@@ -17,6 +17,7 @@ what holds them to it.
 """
 
 import importlib.util
+import re
 from pathlib import Path
 from types import ModuleType
 
@@ -134,18 +135,23 @@ def test_the_backfill_report_separates_the_two_kinds_of_requirement(
     A report that only mentioned the descriptions when they helped would make
     "they added nothing" invisible — and that is a result about the corpus
     worth reading, not a failure worth hiding.
+
+    The counters that were measured on the live corpus on 9 September 2026 carry
+    their real values: 1958 vacancies, 893 with an empty field, 450 of those
+    rescued by their own text, 452 still without a skill, and six mentions in
+    the whole corpus that a sentence denied. The rest are plausible fillers.
     """
     backfill.show(
         SyncOutcome(
             considered=1958,
             skills_written=2000,
-            without_skills=300,
-            without_field_skills=832,
+            without_skills=452,
+            without_field_skills=893,
             from_field=1200,
             from_text=800,
-            rescued_by_text=532,
+            rescued_by_text=450,
             optional_from_text=40,
-            negated_in_text=12,
+            negated_in_text=6,
         ),
         1658,
         337,
@@ -153,9 +159,9 @@ def test_the_backfill_report_separates_the_two_kinds_of_requirement(
     )
 
     printed = capsys.readouterr().out
-    assert "832" in printed
-    assert "532" in printed
-    assert "12" in printed
+    assert "893" in printed
+    assert "450" in printed
+    assert re.search(r"с отрицанием\s+6", printed)
     printed.encode("cp1251")
 
 

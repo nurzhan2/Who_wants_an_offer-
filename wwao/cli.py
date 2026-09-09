@@ -35,10 +35,13 @@ script's help.
 
 **``apply`` is the exception, and its flags are a closed set.** It is the only
 subcommand that sends anything, so nothing is forwarded blindly: ``--send``,
-``--queue`` and ``--requeue`` are all it accepts, and an unrecognised flag is an
-error rather than something passed along. If a way to skip the confirmation is
-ever added to the agent, it does not become reachable from here by default —
-somebody has to add it to this file, in front of the test that forbids it.
+``--from``, ``--no-backend``, ``--queue`` and ``--requeue`` are all it accepts,
+and an unrecognised flag is an error rather than something passed along. The two
+naming the queue's source were added deliberately and neither touches consent:
+they say which list the agent is offered, not whether a person answers for it.
+If a way to skip the confirmation is ever added to the agent, it does not become
+reachable from here by default — somebody has to add it to this file, in front
+of the test that forbids it.
 
 **``apply`` refuses to start without a terminal.** The confirmation is a word
 typed in full after reading a card, and a scheduler can neither read the card
@@ -48,6 +51,18 @@ top instead of opening a browser first. There is no flag, and no environment
 variable, that lifts it — this module reads no environment at all — and the
 task is explicit that if such a switch starts to look necessary, the task has
 been misunderstood.
+
+**``queue`` asks the database, and reads the hand-written file after it.** The
+queue is the backend's answer — vacancies scored above ``agent_queue_min_score``
+with a letter written and no application sent — and until 9 September 2026 this
+command read ``agent/queue.json`` instead: a file a person edits. So a night of
+crawling, scoring and five written letters arrived here as one row typed in
+weeks earlier, with no score, and the header named the file rather than saying
+what was missing. ``--from`` now defaults to the backend, the file is merged in
+behind it and marked as hand-added, and a backend that does not answer is a
+warning plus a non-zero exit rather than a silent fall back to the file. Naming
+a path in ``--from`` still reads that path alone: it is the transport that needs
+no server, no database and no token.
 
 **``outcomes`` is the third category, and it needs saying because there were
 only two.** ``crawl``, ``match``, ``letters`` and ``queue`` need neither a
@@ -75,12 +90,14 @@ from typing import Final, TextIO, final
 
 from wwao.console import encoding_of, harden, printable
 from wwao.queue_view import (
+    QueueEntry,
     QueueNotBuiltError,
     QueueUnavailableError,
     QueueView,
     ResultsPayload,
     classify,
     fetch_over_http,
+    merge,
     parse_queue,
     parse_results,
     render,
@@ -99,9 +116,14 @@ AGENT_MODULE: Final[str] = "agent.run"
 #: one program that has already been started.
 OUTCOMES_MODULE: Final[str] = "agent.outcomes"
 
-#: The queue as it exists today: a JSON file the backend writes and the agent
-#: reads. ``--from`` takes an http(s) base URL instead, for the endpoint
-#: described in ``agent/queue.py``, once it exists.
+#: Where the queue comes from: the backend, which is the only thing that knows
+#: which vacancies are scored, have a letter and have not been applied to.
+#: ``--from`` takes a path instead for the day there is no server to ask.
+DEFAULT_BACKEND: Final[str] = "http://localhost:8000"
+
+#: The hand-written addition to that queue. It was the whole queue until
+#: 2026-09-09, which is why the pipeline's output was invisible here: this file
+#: is edited by a person and knows nothing about last night's run.
 DEFAULT_QUEUE: Final[Path] = REPO_ROOT / "agent" / "queue.json"
 
 #: Everything went as asked.
@@ -208,16 +230,26 @@ def build_parser() -> argparse.ArgumentParser:
     queue.add_argument(
         "--from",
         dest="source",
-        default=str(DEFAULT_QUEUE),
+        default=DEFAULT_BACKEND,
         help=(
-            "файл очереди или базовый адрес бэкенда "
-            "(http://localhost:8000). По умолчанию: %(default)s"
+            "базовый адрес бэкенда, откуда берётся очередь, или файл очереди "
+            "вместо него. По умолчанию: %(default)s"
         ),
+    )
+    queue.add_argument(
+        "--manual",
+        default=str(DEFAULT_QUEUE),
+        help="файл ручных добавлений к очереди из базы. По умолчанию: %(default)s",
+    )
+    queue.add_argument(
+        "--no-manual",
+        action="store_true",
+        help="показать только то, что отдал бэкенд",
     )
     queue.add_argument(
         "--results",
         default=None,
-        help="файл результатов прошлого прогона; по умолчанию рядом с очередью",
+        help="файл результатов прошлого прогона; по умолчанию рядом с ручной очередью",
     )
     queue.add_argument("--limit", type=int, default=20, help="сколько вакансий показать")
 
@@ -236,7 +268,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="дойти до подтверждения и отправить (по умолчанию — только показать)",
     )
-    apply_.add_argument("--queue", default=None, help="файл очереди для агента")
+    apply_.add_argument(
+        "--from",
+        dest="backend",
+        default=None,
+        help="базовый адрес бэкенда, откуда агент берёт очередь",
+    )
+    apply_.add_argument(
+        "--no-backend",
+        action="store_true",
+        help="агент работает по одному файлу очереди, без базы",
+    )
+    apply_.add_argument("--queue", default=None, help="файл ручных добавлений к очереди агента")
     apply_.add_argument(
         "--requeue",
         nargs="+",
@@ -342,6 +385,13 @@ def _apply(args: argparse.Namespace, *, run: Runner, src: TextIO, out: TextIO, e
     command = [sys.executable, "-m", AGENT_MODULE]
     if args.send:
         command.append("--send")
+    # Where the agent takes its queue from. Forwarded rather than decided here:
+    # the agent holds the same default and the same escape hatch, and one
+    # address kept in two places is how the two come to disagree.
+    if args.backend:
+        command += ["--from", str(args.backend)]
+    if args.no_backend:
+        command.append("--no-backend")
     if args.queue:
         command += ["--queue", str(args.queue)]
     if args.requeue:
@@ -407,35 +457,95 @@ def _a_person_is_here(src: TextIO, out: TextIO) -> bool:
 
 
 def _show_queue(args: argparse.Namespace, *, fetch: Fetcher, out: TextIO, err: TextIO) -> int:
-    """Read the queue from wherever it is and print what it means.
+    """Read the queue from the backend, add what a person wrote by hand, print it.
 
-    No account, no browser, no agent: a file and, one day, one GET. This is the
+    No account, no browser, no agent: one GET and one file. This is the
     unattended half of ``apply`` — the same question, answered without being
     able to act on the answer.
+
+    **A backend that does not answer is a failure, not a fallback.** The file is
+    still shown, because rows a person typed are rows somebody wants to see, but
+    the report says the database half is missing and the command exits non-zero.
+    Quietly showing the file alone is exactly how a month-old hand-written row
+    came to be read as this morning's queue.
     """
     source: str = args.source
-    results_path: Path | None = Path(args.results) if args.results else None
+    if not source.startswith(("http://", "https://")):
+        return _show_queue_file(args, Path(source), out=out, err=err)
+
+    warnings: list[str] = []
+    failure = EXIT_OK
+    primary: list[QueueEntry] = []
     try:
-        if source.startswith(("http://", "https://")):
-            raw = fetch(source, args.limit)
-        else:
-            path = Path(source)
-            if not path.is_file():
-                print(
-                    f"queue: нет файла очереди {path}.\n"
-                    "  Пока бэкенд не отдаёт очередь, её формат описан в agent/README.md,\n"
-                    "  а адрес эндпоинта — в --from http://localhost:8000",
-                    file=err,
-                )
-                return EXIT_FAILED
-            raw = path.read_text(encoding="utf-8")
-            # The results of a run are written beside the queue they came from,
-            # so a queue read from a file has a known place to look.
-            results_path = results_path or _results_beside(path)
-        payload = parse_queue(raw)
+        primary = list(parse_queue(fetch(source, args.limit)).items)
     except QueueNotBuiltError as error:
         # Nobody has written this yet, or the two sides are on different
         # versions of the contract. Different answer, different exit code.
+        print(f"queue: {error}", file=err)
+        warnings.append("эндпоинта очереди нет — список ниже собран без базы")
+        failure = EXIT_MISSING_PIECE
+    except QueueUnavailableError as error:
+        print(f"queue: {error}", file=err)
+        warnings.append("база не ответила — список ниже собран без неё")
+        failure = EXIT_FAILED
+    except OSError as error:
+        print(f"queue: не удалось прочитать очередь: {error}", file=err)
+        warnings.append("база не ответила — список ниже собран без неё")
+        failure = EXIT_FAILED
+
+    manual_path = None if args.no_manual else Path(args.manual)
+    extra: list[QueueEntry] = []
+    if manual_path is not None and manual_path.is_file():
+        try:
+            extra = list(parse_queue(manual_path.read_text(encoding="utf-8")).items)
+        except (QueueUnavailableError, OSError) as error:
+            # The hand-written half being unreadable must not cost the half that
+            # came from the database, so it is a line in the report rather than
+            # an exit code.
+            warnings.append(f"{manual_path.name} не прочитан: {error}")
+
+    entries, manual = merge(primary, extra)
+    results_path = Path(args.results) if args.results else _results_for(manual_path)
+    results = parse_results(results_path) if results_path is not None else ResultsPayload()
+    if results_path is not None and manual and not results_path.is_file():
+        # Only worth saying when there are hand-added rows to explain. Everything
+        # the backend serves is already filtered by what the tracker knows — a
+        # vacancy applied to is not in the queue at all — so for those rows the
+        # missing file explains nothing and the line would be noise on every run.
+        warnings.append(
+            f"результатов прошлых прогонов нет ({results_path.name}) — "
+            "«не готово» по ручным строкам показано только по тому, что знает краулер"
+        )
+
+    view = QueueView(
+        source=_describe(source, manual_path, len(manual)),
+        rows=classify(list(entries[: args.limit]), results, manual=manual),
+        results_seen=len(results.results),
+        warnings=tuple(warnings),
+    )
+    print(render(view, encoding=encoding_of(out)), file=out)
+    return failure
+
+
+def _show_queue_file(args: argparse.Namespace, path: Path, *, out: TextIO, err: TextIO) -> int:
+    """One file and nothing else, because that is what was asked for.
+
+    ``--from`` with a path is the transport that needs no server, no database
+    and no token. Nothing is merged into it: a person who named a file is
+    reading that file, and a second source appearing underneath it would be the
+    surprise this command was fixed to stop.
+    """
+    if not path.is_file():
+        print(
+            f"queue: нет файла очереди {path}.\n"
+            "  Очередь собирается из базы: python -m wwao queue --from http://localhost:8000\n"
+            "  Формат файла ручных добавлений — в agent/README.md",
+            file=err,
+        )
+        return EXIT_FAILED
+    try:
+        payload = parse_queue(path.read_text(encoding="utf-8"))
+    except QueueNotBuiltError as error:
         print(f"queue: {error}", file=err)
         return EXIT_MISSING_PIECE
     except QueueUnavailableError as error:
@@ -446,20 +556,40 @@ def _show_queue(args: argparse.Namespace, *, fetch: Fetcher, out: TextIO, err: T
         return EXIT_FAILED
 
     warnings: list[str] = []
-    results = parse_results(results_path) if results_path is not None else ResultsPayload()
-    if results_path is not None and not results_path.is_file():
+    # The results of a run are written beside the queue they came from, so a
+    # queue read from a file has a known place to look.
+    results_path = Path(args.results) if args.results else _results_beside(path)
+    results = parse_results(results_path)
+    if not results_path.is_file():
         warnings.append(
             f"результатов прошлых прогонов нет ({results_path.name}) — "
             "«не готово» показано только по тому, что знает краулер"
         )
     view = QueueView(
-        source=source,
+        source=str(path),
         rows=classify(payload.items[: args.limit], results),
         results_seen=len(results.results),
         warnings=tuple(warnings),
     )
     print(render(view, encoding=encoding_of(out)), file=out)
     return EXIT_OK
+
+
+def _results_for(manual: Path | None) -> Path | None:
+    """Where the last run wrote its outcomes, when there is a file to look beside."""
+    return None if manual is None else _results_beside(manual)
+
+
+def _describe(source: str, manual: Path | None, added: int) -> str:
+    """The header line: both sources, and how much came from the second one.
+
+    Named in the report because the whole defect this replaced was invisible:
+    the header said one path and a reader had no way to know that path was the
+    only thing being read.
+    """
+    if manual is None:
+        return f"{source} (база)"
+    return f"{source} (база) + {manual} (вручную: {added})"
 
 
 def _results_beside(queue: Path) -> Path:

@@ -90,7 +90,16 @@ from agent.letter import UnsafeLetterError
 from agent.letter import check as check_letter
 from agent.mandate import SendMandate, digest
 from agent.prefilter import Verdict, decide_before_opening
-from agent.queue import FileQueue, QueueItem, Result
+from agent.queue import (
+    FileQueue,
+    HttpQueue,
+    MergedQueue,
+    Queue,
+    QueueItem,
+    QueueUnreachableError,
+    Result,
+    ResultsFile,
+)
 from agent.selectors import (
     LetterFieldUnknownError,
     SelectorsNotVerifiedError,
@@ -122,6 +131,14 @@ from agent.submit import (
 #: How many queue items one run will even look at. Well under the daily cap so a
 #: single run cannot exhaust the day's budget by itself.
 BATCH: Final[int] = 20
+
+#: Where the backend is when nobody says otherwise. Both processes belong to the
+#: same person on the same machine — that is the whole arrangement, and it is
+#: also why the endpoint is behind a shared local token rather than a login.
+#: A URL and not a secret, so it is a default and a flag rather than an
+#: environment variable; the token beside it is the opposite and never appears
+#: on a command line.
+DEFAULT_BACKEND: Final[str] = "http://localhost:8000"
 
 #: Marks a journal reason that is hh's own sentence rather than this agent's.
 #:
@@ -382,6 +399,47 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
     return candidates
 
 
+def _queue(base_url: str, manual: Path, *, use_backend: bool) -> Queue:
+    """Where this run takes its work from, and where its outcomes go.
+
+    The backend answers the question the queue *is*: which vacancies scored
+    above the threshold, have a letter and have never been applied to. The file
+    is what a person added by hand, offered after that list rather than instead
+    of it — for a year it was the only source, and a night of crawling, scoring
+    and letter-writing reached the agent as nothing at all.
+
+    A missing file is the ordinary case and not an error: most runs have nothing
+    hand-added. ``--no-backend`` inverts the arrangement for the day the backend
+    is not running, and then the file is all there is — the same program that
+    worked before any endpoint existed.
+    """
+    memory = ResultsFile(manual.with_name(f"{manual.stem}-results.json"))
+    extra = FileQueue(manual) if manual.is_file() else None
+    if not use_backend:
+        if extra is None:
+            raise SystemExit(
+                f"--no-backend, а файла очереди {manual} нет. "
+                "Создайте его (формат — в agent/README.md) или уберите --no-backend."
+            )
+        return extra
+    return MergedQueue(backend=HttpQueue(base_url), extra=extra, memory=memory)
+
+
+def _report(queue: Queue, results: Sequence[Result]) -> None:
+    """Hand the outcomes back, and never lose them to a tracker that is down.
+
+    Called from the ``finally`` that closes a run, which is the one place an
+    exception costs the most: applications have already been sent by then, and
+    a stack trace here would replace the summary of what went out. The local
+    file is written first inside :class:`~agent.queue.MergedQueue`, so a failure
+    to reach the backend is a line to read rather than a record lost.
+    """
+    try:
+        queue.report(results)
+    except QueueUnreachableError as error:
+        print(f"\nРезультаты записаны локально, но трекер их не принял: {error}", file=sys.stderr)
+
+
 def _requeue(journal: Journal, vacancy_ids: Sequence[str]) -> int:
     """Put vacancies a person has dealt with back in the queue. Sends nothing.
 
@@ -474,7 +532,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="дойти до подтверждения и отправить (по умолчанию — только показать)",
     )
-    parser.add_argument("--queue", default=str(QUEUE_PATH), help="файл очереди")
+    parser.add_argument(
+        "--from",
+        dest="backend",
+        default=DEFAULT_BACKEND,
+        help=(
+            "базовый адрес бэкенда, откуда берётся очередь: вакансии со скором "
+            "выше порога, с готовым письмом и без отправленного отклика "
+            "(по умолчанию: %(default)s)"
+        ),
+    )
+    parser.add_argument(
+        "--no-backend",
+        action="store_true",
+        help="не спрашивать бэкенд, работать по одному файлу очереди",
+    )
+    parser.add_argument(
+        "--queue",
+        default=str(QUEUE_PATH),
+        help="файл ручных добавлений к очереди; читается вдобавок к бэкенду",
+    )
     parser.add_argument(
         "--requeue",
         nargs="+",
@@ -501,8 +578,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert_ready_to_apply()
         _assert_idempotency_known()
 
-    queue = FileQueue(Path(args.queue))
-    items = queue.take(BATCH)
+    queue = _queue(args.backend, Path(args.queue), use_backend=not args.no_backend)
+    try:
+        items = queue.take(BATCH)
+    except QueueUnreachableError as error:
+        # The backend is the queue; a run that cannot read it has nothing to
+        # offer and must say why rather than reporting an empty morning.
+        print(str(error), file=sys.stderr)
+        return 1
     candidates = _to_candidates(items, journal)
 
     sent_today = journal.count_sent_since(
@@ -606,7 +689,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # results file and the escape check used to sit after the browser
         # block, where an exception from anywhere inside it skipped both.
         _close_the_books(books, confirmed, attempted, results)
-        queue.report(results)
+        _report(queue, results)
         escaped = _escape_check(gate)
         if escaped is not None and sys.exc_info()[1] is not None:
             # Something else is already leaving. The escape still has to be
