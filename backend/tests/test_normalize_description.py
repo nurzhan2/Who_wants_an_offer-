@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from app.normalize.description import (
+    KNOWN_AMBIGUOUS,
     NOT_SEARCHED_IN_TEXT,
     UPPERCASE_ONLY,
     skills_in_text,
@@ -205,6 +206,21 @@ def test_an_ordinary_word_that_is_also_a_spelling_is_not_searched_for(text: str)
     assert skills_in_text(text).required == ()
 
 
+def test_the_known_ambiguities_are_still_found_and_still_ambiguous() -> None:
+    """Recorded, not fixed — and the test says what recorded means.
+
+    «Swift» the language and SWIFT the payment network are written the same way,
+    in a corpus full of banks. Dropping the spelling would cost the language;
+    keeping it costs a false requirement on a bank vacancy. The choice is kept
+    visible here rather than discovered later by someone wondering why a teller
+    is asked for iOS.
+    """
+    assert "swift" in skills_in_text("Опыт разработки на Swift").required
+    # The false positive the choice buys, asserted so it is a decision on the
+    # record instead of a surprise.
+    assert "swift" in skills_in_text("Проведение платежей через SWIFT").required
+
+
 def test_every_denied_spelling_is_one_the_dictionary_actually_has() -> None:
     """A typo in the deny list would silently stop denying anything.
 
@@ -215,6 +231,7 @@ def test_every_denied_spelling_is_one_the_dictionary_actually_has() -> None:
     spellings = {spelling.casefold() for spelling, _ in known_spellings()}
     assert spellings >= NOT_SEARCHED_IN_TEXT
     assert spellings >= UPPERCASE_ONLY
+    assert spellings >= KNOWN_AMBIGUOUS
 
 
 # ── what the sentence around it says ─────────────────────────────────────────
