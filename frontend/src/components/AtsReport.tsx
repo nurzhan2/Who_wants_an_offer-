@@ -54,17 +54,20 @@ export function AtsReport({ review }: { review: DocumentReview }) {
         label="Названо в резюме"
         hint="требования вакансии, названные тем же словом"
         items={coverage.named}
+        inferred={coverage.inferred}
         weight="font-semibold"
       />
       <Coverage
         label="Есть, но не названо"
         hint="навык у кандидата есть — чинится перегенерацией"
         items={coverage.held_but_unnamed}
+        inferred={coverage.inferred}
       />
       <Coverage
         label="Нет у кандидата"
         hint="не покрыто; приписывать нельзя"
         items={coverage.not_held}
+        inferred={coverage.inferred}
         weight="text-felt-gray"
       />
 
@@ -79,27 +82,46 @@ export function AtsReport({ review }: { review: DocumentReview }) {
   )
 }
 
+/**
+ * One of the three lists, with the inferred requirements in it marked.
+ *
+ * The mark is a third state and belongs to the requirement rather than to the
+ * document: «нет у кандидата» about something the employer asked for and «нет у
+ * кандидата» about something we read out of their prose are different news, and
+ * only one of them is a reason to skip the vacancy. It is rendered as a
+ * suffix — the system has no colour to spend on it — and only on the entries it
+ * applies to, because marking the normal case would bury it.
+ */
 function Coverage({
   label,
   hint,
   items,
+  inferred,
   weight = '',
 }: {
   label: string
   hint: string
   items: string[]
+  inferred: string[]
   weight?: string
 }) {
   if (items.length === 0) {
     return null
   }
+  const guessed = new Set(inferred)
+  const shown = items.map((item) => (guessed.has(item) ? `${item} (из текста)` : item))
   return (
     <div className="mt-element">
       <p className="text-caption uppercase tracking-wide text-felt-gray">
         {label} · {items.length}
       </p>
-      <p className={`text-body-sm text-inkstone ${weight}`}>{items.join(', ')}</p>
+      <p className={`text-body-sm text-inkstone ${weight}`}>{shown.join(', ')}</p>
       <p className="text-caption text-ash-mist">{hint}</p>
+      {items.some((item) => guessed.has(item)) ? (
+        <p className="text-caption text-ash-mist">
+          «из текста» — требование не названо работодателем, а выведено из описания
+        </p>
+      ) : null}
     </div>
   )
 }

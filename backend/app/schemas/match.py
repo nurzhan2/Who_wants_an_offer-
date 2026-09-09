@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.db.enums import MatchBucket
+from app.db.enums import MatchBucket, RequirementSource
 from app.schemas.common import ReadModel
 
 Score = Annotated[Decimal, Field(ge=0, le=100, decimal_places=2)]
@@ -36,6 +36,11 @@ class MatchedSkill(BaseModel):
     #: 1.0 exact, 0.95 alias, 0.5-0.7 related technology, 0.25 same group.
     coverage: Decimal = Field(ge=0, le=1)
     is_required: bool = True
+    #: Whether the employer named this requirement or it was read out of their
+    #: description. Defaulted to the employer's own field so that every match
+    #: stored before ``0014_requirement_source`` keeps validating as what it
+    #: was — at that point nothing else could write a requirement.
+    source: RequirementSource = RequirementSource.EMPLOYER_FIELD
 
 
 class MissingSkill(BaseModel):
@@ -43,6 +48,10 @@ class MissingSkill(BaseModel):
 
     canonical_name: str
     weight: Decimal = Field(ge=0, le=1)
+    #: As on :class:`MatchedSkill`, and it matters more here: "you do not have
+    #: this" about a requirement nobody stated is a gap this project inferred,
+    #: and a person deciding whether to apply may see which kind it is.
+    source: RequirementSource = RequirementSource.EMPLOYER_FIELD
 
 
 class MatchCreate(BaseModel):

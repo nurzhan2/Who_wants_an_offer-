@@ -4,7 +4,7 @@ import { Card, Empty, Failure, Field, Loading, Pill, Score, Section } from '@/co
 import { useGenerateDocument } from '@/hooks/useDocuments'
 import { useVacancy, useWriteLetter } from '@/hooks/queries'
 import { count, date, dateTime, plural, salary, score } from '@/lib/format'
-import { EVIDENCE, outcomeLabel, REMOTE, SKIPPED } from '@/lib/labels'
+import { EVIDENCE, outcomeLabel, REMOTE, REQUIREMENT_SOURCE, SKIPPED } from '@/lib/labels'
 import type { MatchSummary, RequirementStanding } from '@/types/api'
 import type { GeneratedDocument } from '@/types/documents'
 
@@ -125,7 +125,7 @@ export function VacancyDetail({ id }: { id: string }) {
 
       <Section
         title="Требования"
-        note="Три колонки, а не две. Средняя — то, что у кандидата есть, но в этом резюме не названо: score считает это пробелом, хотя чинится это правкой CV."
+        note="Три колонки, а не две. Средняя — то, что у кандидата есть, но в этом резюме не названо: score считает это пробелом, хотя чинится это правкой CV. Строка «выведено из текста описания» значит, что работодатель этого требования не называл — его вычитали из объявления."
       >
         <div className="grid gap-6 lg:grid-cols-3">
           <Column
@@ -200,6 +200,9 @@ function Column({
                 </div>
               ) : null}
               {!row.is_required ? <div className="mt-1 text-small text-muted">не обязательно</div> : null}
+              {REQUIREMENT_SOURCE[row.source] ? (
+                <div className="mt-1 text-small text-muted">{REQUIREMENT_SOURCE[row.source]}</div>
+              ) : null}
             </li>
           ))}
         </ul>

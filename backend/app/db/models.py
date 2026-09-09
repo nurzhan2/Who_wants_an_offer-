@@ -51,6 +51,7 @@ from app.db.enums import (
     PipelineRunStatus,
     ReferenceKind,
     RemoteType,
+    RequirementSource,
     RuleKind,
     RuleScope,
     RuleSeverity,
@@ -495,6 +496,13 @@ class VacancySkill(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     is_required: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     #: 1.00 in the requirements block or the title, 0.60 for a passing mention.
     weight: Mapped[Decimal] = mapped_column(Numeric(3, 2), default=Decimal("1.00"), nullable=False)
+    #: Who says this is a requirement — the employer's own field, or our reading
+    #: of their description. Never mixed: see :class:`RequirementSource`.
+    source: Mapped[RequirementSource] = mapped_column(
+        pg_enum(RequirementSource, "requirement_source"),
+        default=RequirementSource.EMPLOYER_FIELD,
+        nullable=False,
+    )
 
     vacancy: Mapped[Vacancy] = relationship(back_populates="skills")
 

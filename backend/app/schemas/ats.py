@@ -25,6 +25,14 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, computed_field
 
+# The one thing this module takes from elsewhere, and deliberately: where a
+# requirement came from is a fact about the vacancy row, written by
+# ``app.normalize.sync`` and read by matching and by this report alike. A second
+# spelling of it here would be a second vocabulary for one column, which is how
+# two screens end up disagreeing about the same requirement. ``app.db.enums``
+# holds no ORM — that is why it exists — so the import costs nothing.
+from app.db.enums import RequirementSource
+
 
 class Severity(StrEnum):
     """How much a finding matters.
@@ -201,6 +209,12 @@ class RequirementMatch(BaseModel):
     #: reported too — they are still things the employer asked for — but a
     #: screen that shows everything at one weight is a screen nobody reads.
     is_required: bool = True
+    #: Whether the employer named this requirement in a field of their own, or
+    #: it was read out of their description. The report already separates "held
+    #: but not written down" from "not held"; this is a third thing, about the
+    #: requirement rather than about the document, and a candidate rewriting a
+    #: CV around an inferred requirement is entitled to know that is what it is.
+    source: RequirementSource = RequirementSource.EMPLOYER_FIELD
 
 
 class ATSKeywords(BaseModel):

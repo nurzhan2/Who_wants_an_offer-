@@ -191,6 +191,7 @@ def _split(
             is_required=matched.is_required,
             coverage=matched.coverage,
             spelling=spellings.get(matched.canonical_name),
+            source=matched.source,
         )
         for matched in _matched(match)
     ]
@@ -202,6 +203,7 @@ def _split(
             canonical_name=missing.canonical_name,
             is_required=required,
             weight=missing.weight,
+            source=missing.source,
         )
         other = elsewhere.get(missing.canonical_name)
         mention = mentions.get(missing.canonical_name)

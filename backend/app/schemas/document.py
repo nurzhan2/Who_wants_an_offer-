@@ -39,6 +39,10 @@ class RequirementCoverageRead(BaseModel):
     #: missing skill is to learn it, and a hint otherwise would be inviting the
     #: one thing the generator's guard exists to forbid.
     not_held: list[str] = Field(default_factory=list)
+    #: Requirements no employer stated: read out of the description. Crosses the
+    #: three lists above rather than being a fourth one, and is shown as a mark
+    #: on the entries it names.
+    inferred: list[str] = Field(default_factory=list)
     #: Share of the requirement list the document names literally, 0.0-1.0. What
     #: a keyword-matching parser would arrive at, which is a different question
     #: from the match score and must not be displayed as one.

@@ -99,6 +99,7 @@ def _to_read(outcome: DocumentOutcome) -> GeneratedDocumentRead:
                     named=list(review.coverage.named),
                     held_but_unnamed=list(review.coverage.held_but_unnamed),
                     not_held=list(review.coverage.not_held),
+                    inferred=list(review.coverage.inferred),
                     literal_coverage=review.coverage.literal_coverage,
                 ),
             )

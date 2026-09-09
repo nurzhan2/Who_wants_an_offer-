@@ -151,6 +151,8 @@ export interface CursorPage<T> {
   facets: Facets | null
 }
 
+export type RequirementSource = 'employer_field' | 'description_text'
+
 export interface RequirementStanding {
   canonical_name: string
   is_required: boolean
@@ -160,6 +162,11 @@ export interface RequirementStanding {
   /** `other_profile` or `resume_text`; null means no evidence anywhere. */
   evidence: string | null
   evidence_detail: string | null
+  /**
+   * `employer_field` when the employer named the requirement in hh's own
+   * field, `description_text` when it was read out of their description.
+   */
+  source: RequirementSource
 }
 
 export interface RequirementBreakdown {

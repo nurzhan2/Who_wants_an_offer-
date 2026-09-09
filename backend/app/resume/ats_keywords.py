@@ -49,6 +49,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from app.core.logging import get_logger
+from app.db.enums import RequirementSource
 from app.resume.skills import fold
 from app.schemas.ats import ATSKeywords, KeywordStatus, RequirementMatch
 
@@ -155,6 +156,7 @@ def match_requirements(
     held: Sequence[HeldSkill],
     *,
     required: Sequence[bool] | None = None,
+    sources: Sequence[RequirementSource] | None = None,
 ) -> ATSKeywords:
     """Read one document against one vacancy's requirement list.
 
@@ -163,6 +165,10 @@ def match_requirements(
     hard requirements when the caller knows which are which, and defaults to
     treating them all as hard — a vacancy whose source draws no distinction is
     better reported as asking for everything than as asking for nothing.
+    ``sources`` says, per requirement, whether the employer named it or this
+    project read it out of their description; it defaults to the employer,
+    because a caller that does not pass it is a caller reading a structured
+    list.
 
     Duplicates in the requirement list collapse: hh postings do repeat a skill
     under two spellings, and reporting «PostgreSQL» and «Postgres» as two
@@ -171,6 +177,7 @@ def match_requirements(
     document = _spellings_in(text)
     by_fold = _held_by_fold(held)
     hard = list(required) if required is not None else []
+    told = list(sources) if sources is not None else []
 
     matches: list[RequirementMatch] = []
     seen: set[str] = set()
@@ -211,6 +218,7 @@ def match_requirements(
                 found_as=found_as,
                 held_as=held_as,
                 is_required=hard[index] if index < len(hard) else True,
+                source=told[index] if index < len(told) else RequirementSource.EMPLOYER_FIELD,
             )
         )
 

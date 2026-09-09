@@ -28,7 +28,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.db.enums import ApplicationStatus, MatchBucket, ParseStatus, PipelineRunStatus
+from app.db.enums import (
+    ApplicationStatus,
+    MatchBucket,
+    ParseStatus,
+    PipelineRunStatus,
+    RequirementSource,
+)
 from app.letters.examples import OutcomeEvidence
 from app.schemas.ats import ATSReport
 from app.schemas.crawl import CrawlPosition
@@ -225,6 +231,13 @@ class RequirementStanding(BaseModel):
     #: Human-readable pointer to that evidence — the other resume's filename,
     #: or the fragment of this one's text the name was found in.
     evidence_detail: str | None = None
+    #: Who says the vacancy wants this: the employer, in their own structured
+    #: field, or this project, reading their description. A third state beside
+    #: the two above, and a different question — those are about the candidate's
+    #: side of the requirement, this is about whether the requirement was ever
+    #: stated. Defaulted to the employer so that a card built from a match
+    #: stored before ``0014_requirement_source`` keeps saying what it meant.
+    source: RequirementSource = RequirementSource.EMPLOYER_FIELD
 
 
 class RequirementBreakdown(BaseModel):

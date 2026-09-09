@@ -145,6 +145,30 @@ class YamlSkillCanonicalizer:
 
 
 @lru_cache(maxsize=1)
+def known_spellings() -> tuple[tuple[str, str], ...]:
+    """Every spelling the bundled dictionary knows, with the skill it means.
+
+    ``canonicalize`` answers "is this string a skill"; this answers "which
+    strings are". Text extraction needs the second: it has a paragraph rather
+    than a candidate name, and it cannot ask about a string it has not yet
+    decided to cut out of the prose.
+
+    Deliberately a module function rather than a third method on
+    :class:`SkillCanonicalizer`. The protocol is what survives phase 4's swap of
+    the dictionary, and a search index over the spellings of *this* file is a
+    property of this file, not a promise every future canonicaliser must keep.
+
+    Canonical names come first, then aliases, in the order the file lists them.
+    The caller decides how to search; ordering by length is its business.
+    """
+    pairs: list[tuple[str, str]] = []
+    for entry in _read_entries(DEFAULT_DICTIONARY):
+        pairs.append((entry.canonical, entry.canonical))
+        pairs.extend((alias, entry.canonical) for alias in entry.aliases)
+    return tuple(pairs)
+
+
+@lru_cache(maxsize=1)
 def default_canonicalizer() -> SkillCanonicalizer:
     """The process-wide canonicaliser over the bundled dictionary.
 

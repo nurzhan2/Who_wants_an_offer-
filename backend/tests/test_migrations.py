@@ -46,6 +46,7 @@ EXPECTED_ENUM_TYPES = {
     "pipeline_run_status",
     "reference_kind",
     "remote_type",
+    "requirement_source",
     "rule_kind",
     "rule_scope",
     "rule_severity",

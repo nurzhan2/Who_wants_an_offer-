@@ -100,6 +100,16 @@ export const EVIDENCE: Record<string, string> = {
   resume_text: 'названо в тексте этого CV',
 }
 
+/**
+ * Where a requirement came from — a different question from the three columns
+ * around it. Those say what the candidate has; this says whether anybody asked.
+ * Only the inferred half is labelled: a stated requirement is the normal case
+ * and marking every one of them would bury the one line worth reading.
+ */
+export const REQUIREMENT_SOURCE: Record<string, string> = {
+  description_text: 'выведено из текста описания',
+}
+
 export const SKILL_LEVEL: Record<string, string> = {
   basic: 'базово',
   working: 'уверенно',
