@@ -132,37 +132,25 @@ async def _examples(session: AsyncSession, limit: int) -> list[Example]:
     Those are the vacancies this whole change is about, so they are the ones
     worth looking at: the ones with a filled field were already scoreable.
     """
+    stated = select(VacancySkill.id).where(
+        VacancySkill.vacancy_id == Vacancy.id,
+        VacancySkill.source == RequirementSource.EMPLOYER_FIELD,
+    )
     rows = (
         await session.execute(
             select(Vacancy.id, Vacancy.title, Vacancy.description_raw)
-            .where(Vacancy.description_raw.is_not(None))
+            .where(Vacancy.description_raw.is_not(None), ~stated.exists())
             .order_by(Vacancy.first_seen_at.desc(), Vacancy.id)
+            .limit(limit)
         )
     ).all()
 
     shown: list[Example] = []
-    for vacancy_id, title, description in rows:
-        if len(shown) >= limit:
-            break
-        if await _has_stated_skills(session, vacancy_id):
-            continue
+    for _, title, description in rows:
         text = "\n".join(part for part in (title, description) if part)
         found = skills_in_text(text)
         shown.append(Example(title=title, found=found, missed=_missed(text, found)))
     return shown
-
-
-async def _has_stated_skills(session: AsyncSession, vacancy_id: object) -> bool:
-    """Whether any employer named a skill for this vacancy in their own field."""
-    stated = await session.scalar(
-        select(func.count())
-        .select_from(VacancySkill)
-        .where(
-            VacancySkill.vacancy_id == vacancy_id,
-            VacancySkill.source == RequirementSource.EMPLOYER_FIELD,
-        )
-    )
-    return bool(stated)
 
 
 def _missed(text: str, found: TextSkills) -> tuple[str, ...]:
