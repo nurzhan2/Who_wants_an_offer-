@@ -49,6 +49,30 @@ class SkillEvidence(StrEnum):
     STATED = "stated"
 
 
+class RequirementSource(StrEnum):
+    """Where a vacancy's requirement came from, which is not the same as how hard it is.
+
+    ``is_required`` says the employer wants it; this says who says so. The two
+    must never be collapsed: a name the employer typed into hh's key-skills
+    field is a stated requirement, while a name this project found in the prose
+    of the description is our reading of their sentence, and a reading can be
+    wrong in ways a form field cannot.
+
+    The distinction is what makes the 42% of postings that leave the field empty
+    scoreable at all. Before it there was one kind of row, so filling those
+    vacancies from their descriptions would have meant presenting an extraction
+    as an employer's own list — which is worse than the empty coverage it fixes,
+    because nobody reading the card could tell.
+
+    ``docs/MATCHING.md`` prices them differently: 1.00 against 0.60.
+    """
+
+    #: Named by the employer in a structured field — hh's ``keySkills``.
+    EMPLOYER_FIELD = "employer_field"
+    #: Found by :mod:`app.normalize.description` in the description text.
+    DESCRIPTION_TEXT = "description_text"
+
+
 class Seniority(StrEnum):
     """Grade, as advertised by the vacancy or inferred from the resume."""
 

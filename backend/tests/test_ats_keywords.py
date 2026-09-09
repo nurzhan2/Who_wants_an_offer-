@@ -21,6 +21,7 @@ carries no suggestion at all.
 
 import pytest
 
+from app.db.enums import RequirementSource
 from app.resume.ats_keywords import HeldSkill, literal_pattern, match_requirements
 from app.schemas.ats import KeywordStatus
 
@@ -185,6 +186,38 @@ def test_hardness_defaults_to_required_when_the_source_does_not_say() -> None:
     keywords = match_requirements("Python", ("Python", "Kubernetes"), HELD)
 
     assert all(item.is_required for item in keywords.requirements)
+
+
+def test_where_a_requirement_came_from_travels_with_it() -> None:
+    """The report's third state, and it is about the vacancy rather than the CV.
+
+    ``present`` / ``unstated`` / ``absent`` all answer "what does this document
+    do with this requirement". None of them answers "did anybody actually ask
+    for it", and a candidate rewriting a CV around a requirement inferred from
+    prose is entitled to that answer.
+    """
+    keywords = match_requirements(
+        "Python",
+        ("Python", "Kubernetes"),
+        HELD,
+        sources=[RequirementSource.EMPLOYER_FIELD, RequirementSource.DESCRIPTION_TEXT],
+    )
+
+    assert [item.source for item in keywords.requirements] == [
+        RequirementSource.EMPLOYER_FIELD,
+        RequirementSource.DESCRIPTION_TEXT,
+    ]
+
+
+def test_provenance_defaults_to_the_employer_when_the_caller_does_not_say() -> None:
+    """A caller passing a structured list is a caller reading the employer's field.
+
+    Defaulting the other way would relabel every requirement in the queue card
+    — which reads ``key_skills`` straight out of the payload — as an inference.
+    """
+    keywords = match_requirements("Python", ("Python",), HELD)
+
+    assert keywords.requirements[0].source is RequirementSource.EMPLOYER_FIELD
 
 
 def test_a_document_naming_a_gap_does_not_thereby_cover_it() -> None:

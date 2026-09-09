@@ -41,9 +41,21 @@ async def a_profile(db_session: AsyncSession, **overrides: Any) -> Any:
     return created
 
 
-async def a_vacancy(db_session: AsyncSession, seed: str, derived: dict[str, Any] | None) -> Any:
+#: A description naming no technology, so that a test about ``key_skills`` is
+#: about ``key_skills``. The factory's own default says «Python, FastAPI,
+#: PostgreSQL», which ``app.normalize.description`` now reads as requirements —
+#: correctly, and irrelevantly to what these tests are asking.
+NOTHING_TECHNICAL = "Требуется водитель категории B. График 5/2."
+
+
+async def a_vacancy(
+    db_session: AsyncSession,
+    seed: str,
+    derived: dict[str, Any] | None,
+    description: str = NOTHING_TECHNICAL,
+) -> Any:
     """One stored vacancy whose payload the scorer will read."""
-    item = make_upsert_item(seed, "hh")
+    item = make_upsert_item(seed, "hh", description_raw=description)
     raw = dict(item[4])
     if derived is not None:
         raw["_derived"] = derived
@@ -118,6 +130,60 @@ async def test_a_vacancy_whose_employer_listed_no_skills_says_that_too(
     row = await stored(db_session, vacancy_id)
     assert row is not None
     assert any("не указал ключевые навыки" in flag for flag in row.red_flags)
+
+
+async def test_a_requirement_read_from_the_text_says_so_on_the_stored_match(
+    db_session: AsyncSession,
+) -> None:
+    """The third state, where a person actually reads it.
+
+    "The employer listed nothing" and "the employer listed these" were the only
+    two answers this card could give. A vacancy scored on requirements nobody
+    stated is neither, and showing it as the second would put our reading of a
+    sentence under the employer's name — on the card seen just before an
+    application goes out.
+    """
+    await a_profile(db_session)
+    vacancy_id = await a_vacancy(
+        db_session,
+        "from-text",
+        {"work_experience": "between1And3"},
+        description="Требования: Python, PostgreSQL, Kafka.",
+    )
+
+    await score_corpus(db_session)
+
+    row = await stored(db_session, vacancy_id)
+    assert row is not None
+    assert [item["canonical_name"] for item in row.matched_skills] == ["python", "postgresql"]
+    assert {item["source"] for item in row.matched_skills} == {"description_text"}
+    assert [item["source"] for item in row.missing_required] == ["description_text"]
+    assert any("выведены из текста описания" in flag for flag in row.red_flags)
+    # Not the flag it would have had before: it does have requirements now.
+    assert not any("не указал ключевые навыки" in flag for flag in row.red_flags)
+
+
+async def test_a_partly_inferred_requirement_list_says_how_much_of_it_is_inferred(
+    db_session: AsyncSession,
+) -> None:
+    """Mixed lists are the common case once descriptions are read at all.
+
+    The count is in the flag rather than a bare "some of this was inferred",
+    because "one of six" and "five of six" are different vacancies to trust.
+    """
+    await a_profile(db_session)
+    vacancy_id = await a_vacancy(
+        db_session,
+        "mixed",
+        {"key_skills": ["Python"], "work_experience": "between1And3"},
+        description="Также используем Docker и Kafka.",
+    )
+
+    await score_corpus(db_session)
+
+    row = await stored(db_session, vacancy_id)
+    assert row is not None
+    assert any("часть требований выведена из текста описания: 2 из 3" in f for f in row.red_flags)
 
 
 async def test_a_language_the_candidate_lacks_files_the_vacancy_and_keeps_the_row(

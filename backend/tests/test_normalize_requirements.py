@@ -19,6 +19,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.enums import RequirementSource
 from app.db.models import Vacancy, VacancySkill
 from app.db.repositories.vacancy import VacancyRepository
 from app.normalize.requirements import (
@@ -202,11 +203,23 @@ def test_dedupe_keeps_the_first_spelling_it_saw() -> None:
 # ── the row layer ────────────────────────────────────────────────────────────
 
 
+#: A description that names no technology this dictionary knows, so a test
+#: about the structured field is about the structured field. The register is
+#: the corpus's own — half of it is drivers, guards and pharmacists — and the
+#: factory's default description is not: it says «Python, FastAPI, PostgreSQL»,
+#: which the text reader now correctly picks up.
+NOTHING_TECHNICAL = "Требуется водитель категории B. График 5/2, оформление по ТК РК."
+
+
 async def store(
-    db_session: AsyncSession, seed: str, payload: dict[str, Any] | None, slug: str = "hh"
+    db_session: AsyncSession,
+    seed: str,
+    payload: dict[str, Any] | None,
+    slug: str = "hh",
+    description: str = NOTHING_TECHNICAL,
 ) -> UUID:
     """One vacancy carrying a ``_derived`` payload, written as the crawl writes it."""
-    item = make_upsert_item(seed, slug)
+    item = make_upsert_item(seed, slug, description_raw=description)
     raw = dict(item[4])
     if payload is not None:
         raw["_derived"] = payload
@@ -220,6 +233,16 @@ async def names_of(db_session: AsyncSession, vacancy_id: UUID) -> list[str]:
         select(VacancySkill.canonical_name).where(VacancySkill.vacancy_id == vacancy_id)
     )
     return sorted(row[0] for row in rows.all())
+
+
+async def rows_of(db_session: AsyncSession, vacancy_id: UUID) -> list[VacancySkill]:
+    """The skill rows themselves, in name order: weight and provenance included."""
+    rows = await db_session.scalars(
+        select(VacancySkill)
+        .where(VacancySkill.vacancy_id == vacancy_id)
+        .order_by(VacancySkill.canonical_name)
+    )
+    return list(rows.all())
 
 
 async def test_a_stored_payload_becomes_rows_scoring_can_read(db_session: AsyncSession) -> None:
@@ -280,11 +303,11 @@ async def test_a_cross_posted_job_asks_for_what_both_postings_asked_for(
     db_session: AsyncSession,
 ) -> None:
     """One vacancy can carry several source rows, and none of them wins arbitrarily."""
-    item = make_upsert_item("cross", "hh")
+    item = make_upsert_item("cross", "hh", description_raw=NOTHING_TECHNICAL)
     await VacancyRepository(db_session).bulk_upsert(
         [(*item[:4], {"_derived": derived(key_skills=["Python"])})]
     )
-    twin = make_upsert_item("cross", "arbeitnow")
+    twin = make_upsert_item("cross", "arbeitnow", description_raw=NOTHING_TECHNICAL)
     result = await VacancyRepository(db_session).bulk_upsert(
         [(twin[0], "arbeitnow", *twin[2:4], {"_derived": derived(key_skills=["SQL"])})]
     )
@@ -316,6 +339,10 @@ async def test_a_vacancy_with_no_skills_is_counted_not_dropped(db_session: Async
 
     assert outcome.considered == 3
     assert outcome.without_skills == 3
+    # The same three, counted before the description was read: this is the
+    # number the 832 of the live corpus belong to, and it must stay answerable
+    # now that reading the text can move a vacancy out of ``without_skills``.
+    assert outcome.without_field_skills == 3
     assert outcome.skills_written == 0
     assert outcome.years_written == 1
     assert await names_of(db_session, only_language) == []
@@ -331,3 +358,168 @@ async def test_the_backfill_reaches_everything_stored(db_session: AsyncSession) 
     assert outcome.considered >= 2
     assert await names_of(db_session, first) == ["python"]
     assert await names_of(db_session, second) == ["sql"]
+
+
+# ── requirements read out of the description ────────────────────────────────
+
+
+async def test_a_vacancy_with_no_key_skills_is_scoreable_from_its_description(
+    db_session: AsyncSession,
+) -> None:
+    """The 832: nothing in the structured field, requirements in the prose.
+
+    Before this, such a vacancy had no ``vacancy_skill`` row at all and its
+    skill coverage was not low but absent — a fact about our extraction dressed
+    up as a fact about the candidate.
+    """
+    vacancy_id = await store(
+        db_session,
+        "text-only",
+        derived(work_experience="between1And3"),
+        description="Ищем backend-разработчика.\nТребования: Python, FastAPI, PostgreSQL, Docker.",
+    )
+
+    outcome = await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    assert await names_of(db_session, vacancy_id) == ["docker", "fastapi", "postgresql", "python"]
+    assert outcome.from_field == 0
+    assert outcome.from_text == 4
+    assert outcome.rescued_by_text == 1
+    assert outcome.without_field_skills == 1
+    # Not "without skills" any more, which is the whole point of the change.
+    assert outcome.without_skills == 0
+
+
+async def test_a_requirement_found_in_the_text_is_marked_and_weighed_as_one(
+    db_session: AsyncSession,
+) -> None:
+    """0.60 and ``description_text``: a mention, and stored as a mention.
+
+    Both halves matter and neither substitutes for the other. The weight is
+    what docs/MATCHING.md prices a mention at; the source is what lets a card,
+    a report and a query tell an employer's statement from our reading of one.
+    """
+    vacancy_id = await store(
+        db_session, "text-marked", None, description="Стек: Python и PostgreSQL."
+    )
+
+    await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    rows = await rows_of(db_session, vacancy_id)
+    assert [row.canonical_name for row in rows] == ["postgresql", "python"]
+    assert all(row.source is RequirementSource.DESCRIPTION_TEXT for row in rows)
+    assert all(row.weight == Decimal("0.60") for row in rows)
+    assert all(row.is_required for row in rows)
+
+
+async def test_the_employer_s_own_list_wins_a_skill_the_text_also_names(
+    db_session: AsyncSession,
+) -> None:
+    """One row per skill, and it is the stated one.
+
+    ``vacancy_skill`` is unique on (vacancy, name), so this is not a preference
+    but a decision that has to be made. Taking the text's row would relabel a
+    stated requirement as an inference and quietly drop its weight from 1.00 to
+    0.60 — the employer's own list would get worse for having been repeated in
+    their own description.
+    """
+    vacancy_id = await store(
+        db_session,
+        "both",
+        derived(key_skills=["Python"]),
+        description="Нужен Python и немного Docker.",
+    )
+
+    await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    rows = {row.canonical_name: row for row in await rows_of(db_session, vacancy_id)}
+    assert sorted(rows) == ["docker", "python"]
+    assert rows["python"].source is RequirementSource.EMPLOYER_FIELD
+    assert rows["python"].weight == Decimal("1.00")
+    assert rows["docker"].source is RequirementSource.DESCRIPTION_TEXT
+    assert rows["docker"].weight == Decimal("0.60")
+
+
+async def test_a_nice_to_have_from_the_text_is_stored_as_one(db_session: AsyncSession) -> None:
+    """«Будет плюсом» is not a requirement, and the row says so.
+
+    ``is_required=False`` keeps it out of ``skill_coverage_required`` — the
+    scorer selects on that column — so the candidate is not marked short of
+    something the employer offered as optional, while the row still exists for
+    the card to show.
+    """
+    vacancy_id = await store(
+        db_session,
+        "nice",
+        None,
+        description="Требования: Python.\nЗнание Kubernetes будет плюсом.",
+    )
+
+    outcome = await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    rows = {row.canonical_name: row for row in await rows_of(db_session, vacancy_id)}
+    assert rows["python"].is_required is True
+    assert rows["kubernetes"].is_required is False
+    assert outcome.optional_from_text == 1
+
+
+async def test_a_skill_the_description_denies_is_not_a_requirement(
+    db_session: AsyncSession,
+) -> None:
+    """«Опыт с Java не требуется» must not become a Java requirement.
+
+    The safe direction, and the counter exists so that how often the corpus
+    takes it is a measurement rather than an assumption.
+    """
+    vacancy_id = await store(
+        db_session,
+        "denied",
+        None,
+        description="Пишем на Python.\nОпыт с Java не требуется.",
+    )
+
+    outcome = await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    assert await names_of(db_session, vacancy_id) == ["python"]
+    assert outcome.negated_in_text == 1
+
+
+async def test_re_running_over_a_description_does_not_double_the_rows(
+    db_session: AsyncSession,
+) -> None:
+    """Replacement covers both sources at once, or the second pass would fail.
+
+    The rows are deleted and rewritten in one statement per chunk, and the
+    unique constraint on (vacancy, name) is what would catch a merge that
+    forgot the text half.
+    """
+    vacancy_id = await store(
+        db_session, "text-twice", derived(key_skills=["Python"]), description="Также нужен Docker."
+    )
+
+    await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+    await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    assert await names_of(db_session, vacancy_id) == ["docker", "python"]
+
+
+async def test_the_title_is_read_together_with_the_description(
+    db_session: AsyncSession,
+) -> None:
+    """«Python-разработчик» over an empty description still says Python.
+
+    Under the mention's weight, not the stated one: docs/MATCHING.md prices a
+    technology in the title at 1.00, and that tier is deliberately not
+    implemented — a title is still prose we are reading, and the rule for this
+    whole change is to err towards "not required".
+    """
+    item = make_upsert_item("titled", "hh", title="Python-разработчик", description_raw="")
+    result = await VacancyRepository(db_session).bulk_upsert([item])
+    vacancy_id = result.vacancy_ids[0]
+
+    await sync_requirements(db_session, vacancy_ids=[vacancy_id])
+
+    rows = await rows_of(db_session, vacancy_id)
+    assert [row.canonical_name for row in rows] == ["python"]
+    assert rows[0].weight == Decimal("0.60")
+    assert rows[0].source is RequirementSource.DESCRIPTION_TEXT

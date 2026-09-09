@@ -67,7 +67,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
 
-from app.db.enums import MatchBucket, RemoteType, Seniority, SkillLevel
+from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority, SkillLevel
 from app.resume.skills import SkillCanonicalizer, default_canonicalizer
 
 #: Two decimals, the scale of every score column.
@@ -180,6 +180,11 @@ class VacancyFacts:
 
     #: canonical name -> weight, from ``vacancy_skill``.
     required_skills: Mapping[str, Decimal] = field(default_factory=dict)
+    #: canonical name -> who says it is a requirement, from the same rows. A
+    #: name missing from here is read as the employer's own, which is what
+    #: every row in that table was before ``0014_requirement_source`` and what
+    #: the column's own default says.
+    requirement_sources: Mapping[str, RequirementSource] = field(default_factory=dict)
     min_years: Decimal | None = None
     seniority: Seniority | None = None
     city: str | None = None
@@ -207,6 +212,11 @@ class SkillMatch:
     #: letter is built around the matched list, and one claiming JavaScript
     #: because the candidate knows Python is an invented qualification.
     held: bool = True
+    #: Whether the employer named this requirement or we read it out of their
+    #: description. Carried through scoring so that the card, the queue and the
+    #: ATS report can show a third state rather than presenting a reading of
+    #: prose as a stated requirement.
+    source: RequirementSource = RequirementSource.EMPLOYER_FIELD
 
 
 @dataclass(slots=True)
@@ -272,26 +282,38 @@ def skill_coverage(
     required: Mapping[str, Decimal],
     profile_skills: Mapping[str, str],
     *,
+    sources: Mapping[str, RequirementSource] | None = None,
     canonicalizer: SkillCanonicalizer | None = None,
 ) -> tuple[Decimal | None, list[SkillMatch], list[SkillMatch]]:
     """Weighted coverage of a vacancy's requirements, and the two lists behind it.
 
-    ``None`` when the vacancy states no requirements — which is 449 of this
-    corpus's 643 rows. That is not zero coverage: an employer who listed nothing
-    has not said the candidate lacks anything, and scoring it as a total miss
-    would rank every silent posting below every explicit one regardless of fit.
+    ``None`` when the vacancy states no requirements — which was 449 of this
+    corpus's 643 rows before descriptions were read, and is fewer now: since
+    ``0014_requirement_source`` a posting that left hh's field empty can still
+    have requirements, read out of its own text and weighed at 0.60. What has
+    not changed is the meaning of ``None``: an employer who said nothing
+    anywhere has not said the candidate lacks anything, and scoring that as a
+    total miss would rank every silent posting below every explicit one
+    regardless of fit.
     """
     if not required:
         return None, [], []
 
     resolver = canonicalizer or default_canonicalizer()
+    provenance = sources or {}
     matched: list[SkillMatch] = []
     missing: list[SkillMatch] = []
     earned = Decimal("0")
     total = Decimal("0")
     for name, weight in required.items():
         coverage, holds = have(name, profile_skills, canonicalizer=resolver)
-        entry = SkillMatch(canonical_name=name, weight=weight, coverage=coverage, held=holds)
+        entry = SkillMatch(
+            canonical_name=name,
+            weight=weight,
+            coverage=coverage,
+            held=holds,
+            source=provenance.get(name, RequirementSource.EMPLOYER_FIELD),
+        )
         # Split on whether the candidate HOLDS it, not on whether it scored.
         # A skill earning 0.25 for being a neighbour still counts towards the
         # number and still belongs in the missing list, because that is what it
@@ -493,7 +515,10 @@ def score_vacancy(
     result.red_flags.extend(languages.flags)
 
     coverage, matched, missing = skill_coverage(
-        vacancy.required_skills, profile.skills, canonicalizer=canonicalizer
+        vacancy.required_skills,
+        profile.skills,
+        sources=vacancy.requirement_sources,
+        canonicalizer=canonicalizer,
     )
     result.matched = matched
     result.missing = missing

@@ -36,6 +36,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
+from app.db.enums import RequirementSource
 from app.db.models import ProfileSkill, VacancySkill, VacancySource
 from app.db.repositories.profile import ProfileRepository
 from app.resume import ats_audit
@@ -74,14 +75,23 @@ async def held_skills(session: AsyncSession, profile_id: UUID) -> list[HeldSkill
     ]
 
 
-async def requirements_of(session: AsyncSession, vacancy_id: UUID) -> tuple[list[str], list[bool]]:
-    """A vacancy's requirements as the posting spelled them, and which are hard.
+async def requirements_of(
+    session: AsyncSession, vacancy_id: UUID
+) -> tuple[list[str], list[bool], list[RequirementSource]]:
+    """A vacancy's requirements as the posting spelled them, which are hard, and who said so.
 
     Payload first for the spelling, rows second for the hardness, and rows alone
     only when no payload carries a list. That last case is a degraded answer and
     is worth naming: the row names are folded, so a literal check against them
     compares the document with a lowercased string the employer never wrote. It
     is still better than reporting a vacancy as asking for nothing.
+
+    Requirements read out of the description have no employer spelling to use —
+    nobody typed them anywhere — so they are appended under the canonical name
+    the extraction produced, marked with where they came from. They are appended
+    rather than merged into the employer's order for the reason the whole column
+    exists: the list a person reads stays the employer's list, and our reading
+    of their prose comes after it, saying so.
     """
     rows = (
         await session.scalars(
@@ -90,18 +100,33 @@ async def requirements_of(session: AsyncSession, vacancy_id: UUID) -> tuple[list
             .order_by(VacancySkill.is_required.desc(), VacancySkill.canonical_name)
         )
     ).all()
-    hardness = {row.canonical_name: row.is_required for row in rows}
 
     spellings = _key_skills(await _derived_of(session, vacancy_id))
     if not spellings:
         if rows:
             logger.info("ats.requirements_from_rows", vacancy_id=str(vacancy_id), count=len(rows))
-        return [row.canonical_name for row in rows], [row.is_required for row in rows]
+        return (
+            [row.canonical_name for row in rows],
+            [row.is_required for row in rows],
+            [row.source for row in rows],
+        )
 
     # Matched back through the same fold the rows were written under, so a
     # verbatim spelling keeps the hardness its normalised row carries.
-    by_fold = {fold(name): required for name, required in hardness.items()}
-    return spellings, [by_fold.get(fold(name), True) for name in spellings]
+    hard = {fold(row.canonical_name): row.is_required for row in rows}
+    told = {fold(row.canonical_name): row.source for row in rows}
+    names = list(spellings)
+    required = [hard.get(fold(name), True) for name in spellings]
+    sources = [told.get(fold(name), RequirementSource.EMPLOYER_FIELD) for name in spellings]
+
+    spelled = {fold(name) for name in spellings}
+    for row in rows:
+        if fold(row.canonical_name) in spelled:
+            continue
+        names.append(row.canonical_name)
+        required.append(row.is_required)
+        sources.append(row.source)
+    return names, required, sources
 
 
 async def report_for_vacancy(
@@ -121,9 +146,13 @@ async def report_for_vacancy(
 
     profile = await profiles.get(profile_id)
     text = (profile.raw_text if profile else None) or ""
-    requirements, required = await requirements_of(session, vacancy_id)
+    requirements, required, sources = await requirements_of(session, vacancy_id)
     keywords = match_requirements(
-        text, requirements, await held_skills(session, profile_id), required=required
+        text,
+        requirements,
+        await held_skills(session, profile_id),
+        required=required,
+        sources=sources,
     )
     return with_keywords(stored, keywords)
 
@@ -180,9 +209,13 @@ async def audit_generated_for_vacancy(
     is audited on the way out and the report belongs to that document, not to
     the profile.
     """
-    requirements, required = await requirements_of(session, vacancy_id)
+    requirements, required, sources = await requirements_of(session, vacancy_id)
     keywords = match_requirements(
-        text, requirements, await held_skills(session, profile_id), required=required
+        text,
+        requirements,
+        await held_skills(session, profile_id),
+        required=required,
+        sources=sources,
     )
     return ats_audit.audit_generated(text, kind=kind, keywords=keywords)
 

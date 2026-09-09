@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.base import uuid7
-from app.db.enums import ApplicationStatus
+from app.db.enums import ApplicationStatus, RequirementSource
 from app.db.models import (
     Application,
     CandidateProfile,
@@ -95,6 +95,7 @@ async def load_vacancy_facts(session: AsyncSession, vacancy_id: UUID) -> Vacancy
         city=vacancy.city,
         description=vacancy.description_md or vacancy.description_raw,
         key_skills=await _required_skills(session, vacancy_id, derived),
+        inferred_skills=await _inferred_skills(session, vacancy_id),
         language_requirements=_strings(derived, "language_requirements"),
         work_experience=_work_experience(derived),
         professional_roles=role_names(raws),
@@ -453,6 +454,25 @@ async def _required_skills(
     if rows:
         return tuple(row.canonical_name for row in rows)
     return _strings(derived, "key_skills")
+
+
+async def _inferred_skills(session: AsyncSession, vacancy_id: UUID) -> tuple[str, ...]:
+    """Which of those requirements nobody stated — read out of the description.
+
+    A separate read rather than a second return value from the function above,
+    because that one has a payload branch with no provenance to report: a
+    vacancy answered from ``_derived.key_skills`` has no rows, and every name it
+    yields was named by the employer.
+    """
+    rows = await session.scalars(
+        select(VacancySkill.canonical_name)
+        .where(
+            VacancySkill.vacancy_id == vacancy_id,
+            VacancySkill.source == RequirementSource.DESCRIPTION_TEXT,
+        )
+        .order_by(VacancySkill.canonical_name)
+    )
+    return tuple(rows.all())
 
 
 def _strings(derived: list[dict[str, Any]], key: str) -> tuple[str, ...]:

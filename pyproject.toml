@@ -118,6 +118,13 @@ known-first-party = ["app", "factories", "helpers"]
 # requirement list: its docstring quotes the Russian spellings a keyword filter
 # fails on, which is the fact the whole module exists for.
 "backend/app/resume/ats_keywords.py" = ["RUF001", "RUF002", "RUF003"]
+# The module that reads requirements out of a description is made of Russian:
+# the phrases an employer marks a nice-to-have with, the denials that drop a
+# mention, and the Cyrillic spellings of technologies. Every one of them mixes
+# scripts by nature — «C++» inside a Russian sentence is the case the rules
+# exist for — so RUF001-003 fire on the data rather than on a mistake.
+"backend/app/normalize/description.py" = ["RUF001", "RUF002", "RUF003"]
+"backend/tests/test_normalize_description.py" = ["RUF001", "RUF002", "RUF003"]
 "backend/tests/test_ats_keywords.py" = ["RUF001", "RUF002"]
 "backend/tests/test_ats_service.py" = ["RUF001", "RUF002"]
 # Its new cases assert on a Russian resume text layer read against a Russian

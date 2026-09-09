@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.enums import RequirementSource
 from app.db.models import VacancySkill
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.vacancy import VacancyRepository
@@ -231,10 +232,12 @@ async def test_requirements_are_read_in_the_employer_s_own_spelling(
     )
     await db_session.flush()
 
-    names, required = await ats_service.requirements_of(db_session, vacancy_id)
+    names, required, sources = await ats_service.requirements_of(db_session, vacancy_id)
 
     assert names == ["PostgreSQL", "Apache Kafka"]
     assert required == [True, True]
+    # Both were named in the employer's own field, which is what the payload is.
+    assert sources == [RequirementSource.EMPLOYER_FIELD] * 2
 
 
 async def test_hardness_comes_from_the_rows_that_hold_it(db_session: AsyncSession) -> None:
@@ -258,7 +261,7 @@ async def test_hardness_comes_from_the_rows_that_hold_it(db_session: AsyncSessio
     )
     await db_session.flush()
 
-    _, required = await ats_service.requirements_of(db_session, vacancy_id)
+    _, required, _ = await ats_service.requirements_of(db_session, vacancy_id)
 
     assert required == [True, False]
 
@@ -278,9 +281,46 @@ async def test_rows_alone_still_answer_when_no_payload_carries_a_list(
     )
     await db_session.flush()
 
-    names, _ = await ats_service.requirements_of(db_session, vacancy_id)
+    names, _, _ = await ats_service.requirements_of(db_session, vacancy_id)
 
     assert names == ["kubernetes"]
+
+
+async def test_a_requirement_read_from_the_description_is_listed_after_the_employer_s(
+    db_session: AsyncSession,
+) -> None:
+    """Both kinds reach the report, in that order, each saying which it is.
+
+    The employer's list keeps its order and its spellings — that is the string
+    their filter searches for — and what was read out of their prose follows it
+    under the canonical name, because nobody typed a spelling for it anywhere.
+    """
+    vacancy_id = await seed_vacancy(db_session, "ats-mixed", ["PostgreSQL"])
+    db_session.add_all(
+        [
+            VacancySkill(
+                vacancy_id=vacancy_id,
+                canonical_name="postgresql",
+                is_required=True,
+                weight=Decimal("1.00"),
+                source=RequirementSource.EMPLOYER_FIELD,
+            ),
+            VacancySkill(
+                vacancy_id=vacancy_id,
+                canonical_name="docker",
+                is_required=True,
+                weight=Decimal("0.60"),
+                source=RequirementSource.DESCRIPTION_TEXT,
+            ),
+        ]
+    )
+    await db_session.flush()
+
+    names, required, sources = await ats_service.requirements_of(db_session, vacancy_id)
+
+    assert names == ["PostgreSQL", "docker"]
+    assert required == [True, True]
+    assert sources == [RequirementSource.EMPLOYER_FIELD, RequirementSource.DESCRIPTION_TEXT]
 
 
 async def test_held_skills_carry_the_spelling_the_resume_used(

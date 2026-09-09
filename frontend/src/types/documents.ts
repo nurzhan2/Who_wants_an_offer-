@@ -48,6 +48,11 @@ export interface RequirementCoverage {
   held_but_unnamed: string[]
   /** Required and not held. Not fixable, and nothing is suggested. */
   not_held: string[]
+  /**
+   * Requirements the employer never stated: read out of the description text.
+   * Cuts across the three lists above rather than being a fourth one.
+   */
+  inferred: string[]
   literal_coverage: number
 }
 

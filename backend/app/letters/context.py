@@ -96,6 +96,12 @@ class VacancyFacts(Facts):
     description: str | None = None
     #: The vacancy's own requirement list, in the order it stated them.
     key_skills: tuple[str, ...] = ()
+    #: The subset of ``key_skills`` nobody actually stated: names read out of
+    #: the description by :mod:`app.normalize.description`. A subset rather than
+    #: a separate list because they are requirements either way — the letter
+    #: answers them, the coverage counts them — and what changes is only what a
+    #: report is allowed to call them.
+    inferred_skills: tuple[str, ...] = ()
     #: hh mixes language requirements into the same list; the connector keeps
     #: them apart so the skill intersection stays a skill intersection. Verbatim,
     #: because the level and its label are both inside the string.

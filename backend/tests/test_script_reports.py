@@ -23,6 +23,7 @@ from types import ModuleType
 import pytest
 
 from app.matching.scorer import ScoringOutcome
+from app.normalize.description import skills_in_text
 from app.normalize.sync import SyncOutcome
 from app.sources.hh_probe import (
     CatalogFile,
@@ -122,6 +123,67 @@ def test_the_backfill_report_renders_and_stays_inside_cp1251(
 
     printed = capsys.readouterr().out
     assert "1276" in printed
+    printed.encode("cp1251")
+
+
+def test_the_backfill_report_separates_the_two_kinds_of_requirement(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The split is the measurement, so it is printed whatever it says.
+
+    A report that only mentioned the descriptions when they helped would make
+    "they added nothing" invisible — and that is a result about the corpus
+    worth reading, not a failure worth hiding.
+    """
+    backfill.show(
+        SyncOutcome(
+            considered=1958,
+            skills_written=2000,
+            without_skills=300,
+            without_field_skills=832,
+            from_field=1200,
+            from_text=800,
+            rescued_by_text=532,
+            optional_from_text=40,
+            negated_in_text=12,
+        ),
+        1658,
+        337,
+        dry_run=True,
+    )
+
+    printed = capsys.readouterr().out
+    assert "832" in printed
+    assert "532" in printed
+    assert "12" in printed
+    printed.encode("cp1251")
+
+
+def test_the_backfill_report_shows_what_a_description_gave_and_what_it_did_not(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--examples`` is the half of the report an argument can be built from.
+
+    Extraction that only reports what it found is a report that cannot be
+    argued with. The misses are the case for adding a spelling to the
+    dictionary — or for leaving it out.
+    """
+    found = skills_in_text("Требования: Python и PostgreSQL.\nЗнание 1С обязательно.")
+    backfill.show(
+        SyncOutcome(considered=1),
+        1,
+        0,
+        dry_run=True,
+        examples=[
+            backfill.Example(title="Backend-разработчик", found=found, missed=("Знание 1С",)),
+            backfill.Example(title="Водитель", found=skills_in_text("График 5/2"), missed=()),
+        ],
+    )
+
+    printed = capsys.readouterr().out
+    assert "python" in printed
+    assert "ничего не найдено" in printed
+    assert "мимо" in printed
     printed.encode("cp1251")
 
 

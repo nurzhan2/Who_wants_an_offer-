@@ -27,12 +27,13 @@ import structlog
 from sqlalchemy import Select, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.enums import MatchBucket, RemoteType, Seniority
+from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority
 from app.db.models import CandidateProfile, ProfileSkill, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.match import MatchRepository
 from app.matching.rules import (
     ProfileFacts,
     Score,
+    SkillMatch,
     VacancyFacts,
     normalise_similarity,
     score_vacancy,
@@ -227,7 +228,7 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
         )
     ).all()
 
-    skills = await _skills_for(session, ids)
+    skills, sources = await _skills_for(session, ids)
     derived = await _derived_for(session, ids)
     seeds = await _seed_ids(session, ids)
 
@@ -239,6 +240,7 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
                 vacancy_id=row.id,
                 facts=VacancyFacts(
                     required_skills=skills.get(row.id, {}),
+                    requirement_sources=sources.get(row.id, {}),
                     min_years=row.min_years,
                     seniority=Seniority(row.seniority) if row.seniority else None,
                     city=row.city,
@@ -261,17 +263,30 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
     return built
 
 
-async def _skills_for(session: AsyncSession, ids: Sequence[UUID]) -> dict[UUID, dict[str, Decimal]]:
-    """Required skills by vacancy, with their weights."""
+async def _skills_for(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> tuple[dict[UUID, dict[str, Decimal]], dict[UUID, dict[str, RequirementSource]]]:
+    """Required skills by vacancy: their weights, and who says they are required.
+
+    Two mappings rather than one of pairs because the formula wants the weights
+    and only the explanation wants the provenance, and ``VacancyFacts`` keeps
+    them in two fields for the same reason: adding a source must not change
+    what any score is.
+    """
     rows = await session.execute(
-        select(VacancySkill.vacancy_id, VacancySkill.canonical_name, VacancySkill.weight).where(
-            VacancySkill.vacancy_id.in_(ids), VacancySkill.is_required.is_(True)
-        )
+        select(
+            VacancySkill.vacancy_id,
+            VacancySkill.canonical_name,
+            VacancySkill.weight,
+            VacancySkill.source,
+        ).where(VacancySkill.vacancy_id.in_(ids), VacancySkill.is_required.is_(True))
     )
     found: dict[UUID, dict[str, Decimal]] = {}
-    for vacancy_id, name, weight in rows.all():
+    sources: dict[UUID, dict[str, RequirementSource]] = {}
+    for vacancy_id, name, weight, source in rows.all():
         found.setdefault(vacancy_id, {})[name] = weight
-    return found
+        sources.setdefault(vacancy_id, {})[name] = source
+    return found, sources
 
 
 async def _derived_for(session: AsyncSession, ids: Sequence[UUID]) -> dict[UUID, dict[str, Any]]:
@@ -312,11 +327,13 @@ def _to_match(profile_id: UUID, vacancy_id: UUID, score: Score) -> MatchCreate:
         bucket=score.bucket,
         component_scores=MatchComponentScores(**score.components),
         matched_skills=[
-            MatchedSkill(canonical_name=item.canonical_name, coverage=item.coverage)
+            MatchedSkill(
+                canonical_name=item.canonical_name, coverage=item.coverage, source=item.source
+            )
             for item in score.matched
         ],
         missing_required=[
-            MissingSkill(canonical_name=item.canonical_name, weight=item.weight)
+            MissingSkill(canonical_name=item.canonical_name, weight=item.weight, source=item.source)
             for item in score.missing
         ],
         red_flags=_flags(score),
@@ -336,9 +353,30 @@ def _flags(score: Score) -> list[str]:
     flags = list(score.red_flags)
     if score.similarity is None:
         flags.append("семантика не посчитана: у вакансии нет эмбеддинга")
-    if not score.matched and not score.missing:
+    requirements = [*score.matched, *score.missing]
+    if not requirements:
         flags.append("работодатель не указал ключевые навыки")
+    else:
+        flags.extend(_provenance_flags(requirements))
     return flags
+
+
+def _provenance_flags(requirements: Sequence[SkillMatch]) -> list[str]:
+    """The third state, said out loud on the card.
+
+    Two states existed before: the employer listed requirements, or they listed
+    none. A third one now reaches this card — requirements nobody stated, read
+    out of the description — and it must not look like either. It is not the
+    silence it replaced, and it is not a stated list: the same sentence can be
+    read two ways, and the person about to spend an evening on an application is
+    the one who should get to judge which reading this was.
+    """
+    from_text = sum(1 for item in requirements if item.source is RequirementSource.DESCRIPTION_TEXT)
+    if not from_text:
+        return []
+    if from_text == len(requirements):
+        return ["навыки не названы работодателем: требования выведены из текста описания"]
+    return [f"часть требований выведена из текста описания: {from_text} из {len(requirements)}"]
 
 
 def _verdict(score: Score) -> str | None:

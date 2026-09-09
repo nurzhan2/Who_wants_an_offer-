@@ -314,6 +314,26 @@ def test_a_requirement_the_profile_lacks_is_reported_as_a_gap_not_hidden() -> No
     assert "Kubernetes" not in coverage.held_but_unnamed
 
 
+@pytest.mark.unit
+def test_a_requirement_nobody_stated_is_marked_as_one_in_the_report() -> None:
+    """The third state, on the report handed over with a generated CV.
+
+    «Нет у кандидата: Kubernetes» reads as a reason to skip the vacancy. If
+    nobody actually asked for Kubernetes — if it was read out of a sentence in
+    the description — that is a different piece of news, and the report has to
+    be able to say which one it is showing.
+    """
+    context = cv_context(vacancy=vacancy_facts(inferred_skills=("Kubernetes",)))
+    arrangement = compose_fallback(context)
+
+    coverage = review.coverage_of(render.to_text(arrangement, context), context)
+
+    assert "Kubernetes" in coverage.not_held
+    assert coverage.inferred == ("Kubernetes",)
+    # The stated ones stay unmarked: marking everything would say nothing.
+    assert "Python" not in coverage.inferred
+
+
 # ── the structural half: there is nowhere to put a wrong value ────────
 
 

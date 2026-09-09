@@ -68,6 +68,11 @@ class RequirementCoverage(BaseModel):
     held_but_unnamed: tuple[str, ...] = ()
     #: Required and not held. Reported plainly, with nothing suggested.
     not_held: tuple[str, ...] = ()
+    #: Cuts across the three above rather than joining them: the requirements
+    #: the employer never stated, read out of their description instead. A
+    #: candidate rewriting a CV around one is entitled to know that is what it
+    #: is, and the three lists cannot say it — they are about the document.
+    inferred: tuple[str, ...] = ()
 
     @property
     def required_total(self) -> int:
@@ -139,7 +144,10 @@ def coverage_of(text: str, context: CVContext) -> RequirementCoverage:
         else:
             unnamed.append(requirement)
     return RequirementCoverage(
-        named=tuple(named), held_but_unnamed=tuple(unnamed), not_held=tuple(not_held)
+        named=tuple(named),
+        held_but_unnamed=tuple(unnamed),
+        not_held=tuple(not_held),
+        inferred=tuple(context.vacancy.inferred_skills),
     )
 
 
