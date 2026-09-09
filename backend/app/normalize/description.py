@@ -67,6 +67,16 @@ NOT_SEARCHED_IN_TEXT: frozenset[str] = frozenset(
 #: the team" is not, and no word boundary can tell them apart.
 UPPERCASE_ONLY: frozenset[str] = frozenset({"rest"})
 
+#: Known ambiguities neither list settles, recorded rather than quietly lived
+#: with. «Swift» is a language and SWIFT is how banks move money, and this
+#: corpus is full of banks; «Oracle» is a database and a company, and a vacancy
+#: naming the employer is not asking for the database. Both are written the same
+#: way in both senses, so case cannot separate them and dropping them would cost
+#: the real thing. They stay, they are wrong sometimes, and the false positives
+#: are visible in ``scripts/backfill_skills.py --examples``, which is where a
+#: decision about them would have to come from.
+KNOWN_AMBIGUOUS: frozenset[str] = frozenset({"swift", "oracle"})
+
 #: A spelling this short is a word of some language as often as it is a skill —
 #: «C», «Go», «мл», «py». Case is what separates them: a technology is a proper
 #: name and gets a capital letter, «идти в ногу» and «500 мл» do not.
