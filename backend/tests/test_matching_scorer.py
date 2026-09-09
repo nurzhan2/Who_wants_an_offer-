@@ -92,7 +92,9 @@ async def test_a_score_is_stored_with_the_reasons_behind_it(db_session: AsyncSes
     assert row.profile_id == profile.id
     assert [item["canonical_name"] for item in row.matched_skills] == ["python"]
     assert [item["canonical_name"] for item in row.missing_required] == ["kafka"]
-    assert row.component_scores["skill_coverage_required"] == "50.00"
+    # One of two stated requirements, over two stated plus the one every
+    # posting has and did not write down. See ``rules.UNSTATED_REQUIREMENT``.
+    assert row.component_scores["skill_coverage_required"] == "33.33"
     assert row.verdict is not None
 
 
@@ -282,7 +284,10 @@ async def test_the_candidates_skill_level_reaches_the_score(db_session: AsyncSes
 
     row = await stored(db_session, vacancy_id)
     assert row is not None
-    assert row.component_scores["skill_coverage_required"] == "70.00"
+    # 0.85 for a skill held at «working», over one stated requirement plus one
+    # assumed: the level multiplier still reaches the score, which is what this
+    # test is about, and the list length now bounds it.
+    assert row.component_scores["skill_coverage_required"] == "35.00"
 
 
 async def test_no_active_profile_is_an_error_with_a_way_out_not_an_empty_result(
@@ -319,4 +324,9 @@ async def test_only_the_required_skills_of_the_vacancy_are_read(
     row = await stored(db_session, vacancy_id)
     assert row is not None
     assert [item["canonical_name"] for item in row.missing_required] == []
-    assert row.component_scores["skill_coverage_required"] == "100.00"
+    # Kafka is a nice-to-have and is not among the requirements, so what is
+    # covered is one of one stated — plus the one every posting has and did not
+    # write down: 1/(1+1). Full marks are no longer reachable and the ceiling is
+    # what the employer stated; what this test is about is unchanged, and the
+    # empty ``missing_required`` above is where it is asserted.
+    assert row.component_scores["skill_coverage_required"] == "50.00"

@@ -19,6 +19,7 @@ when one call fixes it.
 import argparse
 import asyncio
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
@@ -30,6 +31,7 @@ from app.db.models import CandidateProfile, ProfileSkill
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import session_factory
 from app.matching.embeddings import EmbeddingError, encode_profile
+from app.matching.rules import UNSTATED_REQUIREMENT
 from app.matching.scorer import ProfileNotReadyError, ScoringOutcome, score_corpus
 
 RULE = "-" * 78  # ASCII: this report is printed to a cp1251 console
@@ -53,6 +55,17 @@ def parse_args() -> argparse.Namespace:
         "--no-embed-profile",
         action="store_true",
         help="do not embed the profile even if it has no vector",
+    )
+    parser.add_argument(
+        "--unstated",
+        type=Decimal,
+        default=None,
+        metavar="N",
+        help=(
+            "requirements to assume the posting did not write down, in weight units "
+            f"(default: {UNSTATED_REQUIREMENT}); 0 scores the corpus the way it was "
+            "scored before that assumption existed"
+        ),
     )
     return parser.parse_args()
 
@@ -91,10 +104,10 @@ async def ensure_profile_embedding(*, allowed: bool) -> str | None:
         return "эмбеддинг профиля посчитан впервые"
 
 
-async def run(*, dry_run: bool, limit: int | None) -> ScoringOutcome:
+async def run(*, dry_run: bool, limit: int | None, unstated: Decimal) -> ScoringOutcome:
     """Score, and keep it only if this is not a rehearsal."""
     async with session_factory() as session:
-        outcome = await score_corpus(session, limit=limit)
+        outcome = await score_corpus(session, limit=limit, unstated=unstated)
         if dry_run:
             await session.rollback()
         else:
@@ -102,7 +115,13 @@ async def run(*, dry_run: bool, limit: int | None) -> ScoringOutcome:
     return outcome
 
 
-def show(outcome: ScoringOutcome, note: str | None, *, dry_run: bool) -> None:
+def show(
+    outcome: ScoringOutcome,
+    note: str | None,
+    *,
+    dry_run: bool,
+    unstated: Decimal = UNSTATED_REQUIREMENT,
+) -> None:
     """Print it, in the order a person reads it."""
     print(RULE)
     print("СКОРИНГ" + ("  (ничего не записано, --dry-run)" if dry_run else ""))
@@ -110,6 +129,11 @@ def show(outcome: ScoringOutcome, note: str | None, *, dry_run: bool) -> None:
     if note:
         print(f"  {note}")
         print()
+    # Printed on every run, not only when it is unusual: two runs of this report
+    # with different values here are not comparable, and a number missing from
+    # the header is the number nobody notices was different.
+    print(f"  неназванных требований в делителе  {unstated}")
+    print()
     print(f"  вакансий рассмотрено   {outcome.considered}")
     print(f"  записано match-строк   {outcome.written}")
     print(f"  сидовых пропущено      {outcome.skipped_seeds}")
@@ -131,9 +155,10 @@ async def main() -> int:
     """Run it."""
     args = parse_args()
     configure_logging()
+    unstated = UNSTATED_REQUIREMENT if args.unstated is None else args.unstated
     try:
         note = await ensure_profile_embedding(allowed=not args.no_embed_profile)
-        outcome = await run(dry_run=args.dry_run, limit=args.limit)
+        outcome = await run(dry_run=args.dry_run, limit=args.limit, unstated=unstated)
     except ProfileNotReadyError as error:
         # The CLI already sets this example: when a link is missing, say which
         # one rather than returning an empty result as a success.
@@ -143,7 +168,7 @@ async def main() -> int:
         print(f"  {error}")
         print(RULE)
         return 1
-    show(outcome, note, dry_run=args.dry_run)
+    show(outcome, note, dry_run=args.dry_run, unstated=unstated)
     return 0
 
 

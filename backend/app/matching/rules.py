@@ -48,8 +48,11 @@ land in the divisor, and each case has a reason a reader can check.
 
 This is also what the brief asks for in as many words. A vacancy with no
 embedding is still scored on its skills instead of dropping to a silent zero:
-perfect skill coverage without a vector scores 75 and lands in ``strong``,
-which is what «получать score по навыкам с честной пометкой» has to mean.
+three stated requirements, all met, with no vector, score 64 and land in
+``stretch`` — which is what «получать score по навыкам с честной пометкой» has
+to mean. (It was 75 and ``strong`` until :data:`UNSTATED_REQUIREMENT`; the
+semantic half of that number never changed, the ceiling on the skills half
+did.)
 
 :attr:`Score.counted` records which components were in the divisor, so the
 explanation can say so instead of leaving a reader to wonder.
@@ -72,6 +75,35 @@ from app.resume.skills import SkillCanonicalizer, default_canonicalizer
 
 #: Two decimals, the scale of every score column.
 CENTS: Final[Decimal] = Decimal("0.01")
+
+#: One requirement every posting has and did not write down, in the same units
+#: as ``vacancy_skill.weight``. It is added to the denominator of the coverage
+#: ratio and to nothing else, so a vacancy that stated more requirements is
+#: allowed to claim a higher coverage than one that stated fewer.
+#:
+#: **Why it exists.** Coverage was ``earned / stated``, which makes "the one
+#: thing they wrote down is Linux, and you know Linux" a *perfect* match — the
+#: same 1.0 a candidate gets for meeting ten requirements out of ten. Measured
+#: on the live corpus on 9 September 2026, that put five postings at 87.5-88.6
+#: at the top of the queue for a Python backend profile: an IBM engineer, a
+#: communications engineer, a network engineer, a structured-cabling designer,
+#: each with exactly one requirement and «совпадает: linux» as the whole
+#: explanation. The formula was not measuring fit; it was measuring how little
+#: the employer had said.
+#:
+#: **Why one, and why it is not a threshold.** Every posting wants things it
+#: did not list — hh's own field is optional and 893 of 1958 employers left it
+#: empty, which is the same fact seen from the other side. Assuming exactly one
+#: such requirement, never covered, is the smallest statement of "a short list
+#: is weak evidence" that has no step in it: 1 of 1 becomes 0.50, 2 of 2 is
+#: 0.67, 5 of 5 is 0.83, 10 of 10 is 0.91. A cut-off at *n* requirements would
+#: need a number nobody measured and would put a cliff between two vacancies
+#: that differ by one line of a job ad.
+#:
+#: The consequence worth saying out loud: a score of 100 is no longer reachable.
+#: The ceiling is what the employer said: 78 for a single requirement, 85 for
+#: two, 96 for ten. That is the point rather than a side effect.
+UNSTATED_REQUIREMENT: Final[Decimal] = Decimal("1.0")
 
 #: From ``docs/MATCHING.md``. Not renormalised here — that happens per vacancy,
 #: over whichever of these could be measured for it.
@@ -284,8 +316,20 @@ def skill_coverage(
     *,
     sources: Mapping[str, RequirementSource] | None = None,
     canonicalizer: SkillCanonicalizer | None = None,
+    unstated: Decimal = UNSTATED_REQUIREMENT,
 ) -> tuple[Decimal | None, list[SkillMatch], list[SkillMatch]]:
     """Weighted coverage of a vacancy's requirements, and the two lists behind it.
+
+    ``earned / (stated + unstated)``. The divisor carries one requirement the
+    posting did not write down — see :data:`UNSTATED_REQUIREMENT` — so that
+    meeting the only thing an employer named is not the same answer as meeting
+    ten things out of ten. Without it the top of the queue was five postings
+    whose whole requirement list was «linux».
+
+    ``unstated`` is a parameter so the size of that assumption can be measured
+    rather than argued about: ``scripts/run_matching.py --unstated 0`` scores
+    the corpus exactly as it was scored before this existed, and any other value
+    prints what it would do to the buckets.
 
     ``None`` when the vacancy states no requirements — which was 449 of this
     corpus's 643 rows before descriptions were read, and is fewer now: since
@@ -294,7 +338,8 @@ def skill_coverage(
     not changed is the meaning of ``None``: an employer who said nothing
     anywhere has not said the candidate lacks anything, and scoring that as a
     total miss would rank every silent posting below every explicit one
-    regardless of fit.
+    regardless of fit. ``unstated`` does not change that: one assumed
+    requirement and nothing to weigh it against is not a measurement.
     """
     if not required:
         return None, [], []
@@ -323,7 +368,7 @@ def skill_coverage(
         total += weight
     if total == 0:
         return None, matched, missing
-    return earned / total, matched, missing
+    return earned / (total + unstated), matched, missing
 
 
 def experience_fit(required: Decimal | None, candidate: Decimal | None) -> Decimal | None:
@@ -507,8 +552,13 @@ def score_vacancy(
     profile: ProfileFacts,
     *,
     canonicalizer: SkillCanonicalizer | None = None,
+    unstated: Decimal = UNSTATED_REQUIREMENT,
 ) -> Score:
-    """One vacancy against one profile: the number, and every reason for it."""
+    """One vacancy against one profile: the number, and every reason for it.
+
+    ``unstated`` is handed through to :func:`skill_coverage` and is the one knob
+    a measurement run turns; see :data:`UNSTATED_REQUIREMENT`.
+    """
     result = Score(similarity=vacancy.similarity)
 
     reason, languages = hard_filters(vacancy, profile)
@@ -519,6 +569,7 @@ def score_vacancy(
         profile.skills,
         sources=vacancy.requirement_sources,
         canonicalizer=canonicalizer,
+        unstated=unstated,
     )
     result.matched = matched
     result.missing = missing

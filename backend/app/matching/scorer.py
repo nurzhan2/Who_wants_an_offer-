@@ -31,6 +31,7 @@ from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority
 from app.db.models import CandidateProfile, ProfileSkill, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.match import MatchRepository
 from app.matching.rules import (
+    UNSTATED_REQUIREMENT,
     ProfileFacts,
     Score,
     SkillMatch,
@@ -95,9 +96,20 @@ class ProfileNotReadyError(Exception):
 
 
 async def score_corpus(
-    session: AsyncSession, *, profile_id: UUID | None = None, limit: int | None = None
+    session: AsyncSession,
+    *,
+    profile_id: UUID | None = None,
+    limit: int | None = None,
+    unstated: Decimal = UNSTATED_REQUIREMENT,
 ) -> ScoringOutcome:
-    """Score every vacancy against the active profile and store the reasons."""
+    """Score every vacancy against the active profile and store the reasons.
+
+    ``unstated`` is passed straight to the formula and exists so that a run can
+    measure what changing it would do — ``--unstated 0`` is the corpus as it was
+    scored before :data:`app.matching.rules.UNSTATED_REQUIREMENT` existed. It is
+    a parameter of one run, never stored: two runs at different values must not
+    leave rows that look alike.
+    """
     profile = await _profile(session, profile_id)
     facts = await _profile_facts(session, profile)
     outcome = ScoringOutcome()
@@ -116,7 +128,7 @@ async def score_corpus(
                 outcome.without_embedding += 1
             if not row.facts.required_skills:
                 outcome.without_skills += 1
-            score = score_vacancy(row.facts, facts, canonicalizer=canonicalizer)
+            score = score_vacancy(row.facts, facts, canonicalizer=canonicalizer, unstated=unstated)
             outcome.buckets[score.bucket] = outcome.buckets.get(score.bucket, 0) + 1
             if score.bucket == MatchBucket.FILTERED:
                 outcome.filtered += 1

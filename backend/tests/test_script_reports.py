@@ -18,11 +18,16 @@ what holds them to it.
 
 import importlib.util
 import re
+from decimal import Decimal
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
+from app.db.base import uuid7
+from app.db.enums import RequirementSource
+from app.matching.rules import skill_coverage
 from app.matching.scorer import ScoringOutcome
 from app.normalize.description import skills_in_text
 from app.normalize.sync import SyncOutcome
@@ -58,6 +63,7 @@ def _script(name: str) -> ModuleType:
 
 matching = _script("run_matching")
 backfill = _script("backfill_skills")
+coverage = _script("measure_coverage")
 hh_roles = _script("probe_hh_roles")
 
 
@@ -206,6 +212,98 @@ def test_both_scripts_report_a_dry_run_as_a_dry_run(
 
     printed = capsys.readouterr().out
     assert printed.count("--dry-run") == 2
+
+
+# -- the coverage measurement ------------------------------------------
+
+
+def _row(size: int, *, matched: int, weight: str = "1", score: str | None = "88.0") -> Any:
+    """One vacancy for the report: ``size`` requirements, ``matched`` of them met."""
+    names = [f"skill-{index}" for index in range(size)]
+    return coverage.Row(
+        vacancy_id=uuid7(),
+        title="Инженер по обслуживанию оборудования IBM",
+        requirements=tuple(
+            coverage.Requirement(
+                canonical_name=name,
+                weight=Decimal(weight),
+                source=RequirementSource.DESCRIPTION_TEXT,
+            )
+            for name in names
+        ),
+        raw=Decimal(matched) / Decimal(size),
+        matched=tuple(names[:matched]),
+        missing=tuple(names[matched:]),
+        score=None if score is None else Decimal(score),
+        bucket="apply_now",
+    )
+
+
+def test_the_coverage_report_renders_and_stays_inside_cp1251(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every section, over the shape that prompted the measurement.
+
+    One vacancy stating one requirement and meeting it — the five postings at
+    the top of the queue — beside one stating ten and meeting six.
+    """
+    rows = [_row(1, matched=1), _row(10, matched=6, score="74.0")]
+
+    coverage.sizes(rows)
+    coverage.coverage(rows)
+    coverage.assumption(rows)
+    coverage.top(rows, 2)
+
+    printed = capsys.readouterr().out
+    assert "1 требование" in printed
+    assert "полное" in printed
+    assert "unstated" in printed
+    printed.encode("cp1251")
+
+
+def test_the_simulated_coverage_is_the_formula_and_not_an_approximation_of_it() -> None:
+    """The table of candidate values has to be the same arithmetic as the score.
+
+    It is computed from the raw ratio rather than by rescoring — cheap, and one
+    query instead of a pass over the corpus — so this is the assertion that the
+    shortcut is exact. A simulation that is nearly right is how a formula gets
+    chosen against a number nobody actually produced.
+    """
+    required = {"linux": Decimal("0.60"), "docker": Decimal("1.00")}
+    held = {"linux": "strong", "docker": "strong"}
+    row = coverage.Row(
+        vacancy_id=uuid7(),
+        title="x",
+        requirements=(
+            coverage.Requirement("linux", Decimal("0.60"), RequirementSource.DESCRIPTION_TEXT),
+            coverage.Requirement("docker", Decimal("1.00"), RequirementSource.EMPLOYER_FIELD),
+        ),
+        raw=skill_coverage(required, held, unstated=Decimal("0"))[0] or Decimal("0"),
+        matched=("linux", "docker"),
+        missing=(),
+        score=Decimal("80"),
+        bucket="strong",
+    )
+
+    for unstated in (Decimal("0"), Decimal("0.5"), Decimal("1"), Decimal("2")):
+        assert row.coverage(unstated) == skill_coverage(required, held, unstated=unstated)[0]
+
+
+def test_the_scoring_report_names_the_assumption_it_scored_under(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Two runs at different values are two different numbers, not one moving one.
+
+    The value is printed on every run rather than only when it is unusual: a
+    header that says nothing when the default is in force is a header that makes
+    a measurement run indistinguishable from an ordinary one in a log.
+    """
+    matching.show(_scored(), None, dry_run=True, unstated=Decimal("0"))
+
+    printed = capsys.readouterr().out
+    assert "неназванных требований" in printed
+    assert "0" in printed
+    printed.encode("cp1251")
 
 
 # -- the hh catalogue probe --------------------------------------------

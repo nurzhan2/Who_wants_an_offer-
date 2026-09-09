@@ -17,9 +17,11 @@ from app.db.enums import MatchBucket, RemoteType, Seniority
 from app.matching.rules import (
     LANGUAGE_GAP_PENALTY,
     STRUCTURAL,
+    UNSTATED_REQUIREMENT,
     WEIGHTS,
     ProfileFacts,
     VacancyFacts,
+    _weighted,
     bucket_for,
     cefr_rank,
     experience_fit,
@@ -49,9 +51,21 @@ CANDIDATE = ProfileFacts(
 
 
 def vacancy(**overrides: object) -> VacancyFacts:
-    """A vacancy that passes every gate, so a test can break exactly one thing."""
+    """A vacancy that passes every gate, so a test can break exactly one thing.
+
+    Three requirements rather than one, and that is not cosmetic. Since
+    ``UNSTATED_REQUIREMENT`` the size of the requirement list is part of the
+    answer: a posting that states one thing cannot reach full coverage, by
+    design. A fixture whose default was a single requirement would make every
+    unrelated test read the number of the degenerate case and quietly assert
+    that it is normal.
+    """
     base: dict[str, object] = {
-        "required_skills": {"python": Decimal("1")},
+        "required_skills": {
+            "python": Decimal("1"),
+            "postgresql": Decimal("1"),
+            "docker": Decimal("1"),
+        },
         "min_years": Decimal("6"),
         "city": "Алматы",
         "remote": RemoteType.FULL,
@@ -100,7 +114,12 @@ def test_a_perfect_match_can_actually_reach_apply_now() -> None:
         CANDIDATE,
     )
 
-    assert perfect.final_score == Decimal("100.00")
+    # 100 is no longer the top, and that is the second deviation rather than a
+    # regression: ``UNSTATED_REQUIREMENT`` puts one requirement nobody wrote
+    # down into the divisor, so the ceiling is what the employer said — 85.42 on
+    # a list of two, 78 on a list of one, 96 on a list of ten. What this test is
+    # about survives it: the band the document defines is reachable.
+    assert perfect.final_score == Decimal("85.42")
     assert perfect.bucket == MatchBucket.APPLY_NOW
     assert "domain_fit" not in perfect.counted
     assert "skill_coverage_nice" not in perfect.counted
@@ -124,23 +143,38 @@ def test_a_component_with_no_data_source_at_all_neither_helps_nor_hurts() -> Non
         CANDIDATE,
     )
 
-    assert scored.final_score == Decimal("100.00")
+    # A single stated requirement, met at full strength, and everything else
+    # perfect: 78.13. The distance from 100 is the two structural components
+    # renormalised away (which is what this test is about) plus the one
+    # requirement this posting did not write down (which is what the test below
+    # is about) — and neither of them is a fault of the candidate.
+    assert scored.final_score == Decimal("78.13")
     assert not STRUCTURAL & set(scored.counted)
 
 
 def test_a_vacancy_without_a_vector_is_still_scored_on_its_skills() -> None:
     """The brief's requirement, and the exact number it produces.
 
-    128 of 643 rows have no embedding, and the backlog moves, so this
-    population changes between runs. Perfect skill coverage with no vector
-    scores 75 and lands in ``strong``: not the silent zero the brief rules out,
-    and not the same as an identical vacancy that also matched semantically.
+    Three requirements, all met, and no vector: 64.06 and ``stretch``. It used
+    to be 75 and ``strong``, and both halves of that moved for reasons worth
+    keeping apart. The semantic gap is charged as an evidence gap and always
+    was; what changed is the ceiling on the skills half, because a list of
+    three stated requirements can now reach 0.75 rather than 1.0.
+
+    What the brief asked for is unchanged and is what this asserts: a vacancy
+    with no vector is scored on what it does have, with a flag saying so —
+    never the silent zero, and never the same number as an identical vacancy
+    that also matched semantically. (Measured 9 September 2026: no vacancy in
+    the corpus is in this state any more, all 1958 carry vectors. The rule
+    stays because a vacancy is written before its vector is computed.)
     """
     unembedded = score_vacancy(vacancy(similarity=None), CANDIDATE)
+    embedded = score_vacancy(vacancy(), CANDIDATE)
 
-    assert unembedded.final_score == Decimal("75.00")
-    assert unembedded.bucket == MatchBucket.STRONG
+    assert unembedded.final_score == Decimal("64.06")
+    assert unembedded.bucket == MatchBucket.STRETCH
     assert "semantic_similarity" not in unembedded.counted
+    assert unembedded.final_score < embedded.final_score
 
 
 def test_the_modifiers_alone_cannot_carry_a_vacancy_into_the_shortlist() -> None:
@@ -176,13 +210,24 @@ def test_an_employer_who_states_no_experience_is_not_charged_for_the_silence() -
     silent = score_vacancy(vacancy(min_years=None), CANDIDATE)
 
     assert "experience_fit" not in silent.counted
-    # Not identical, and the small gap is the honest one: the component that
-    # dropped out had scored 1.0, so removing it lowers the mean of what is
-    # left. What matters is that the vacancy keeps its band. Charging the
-    # silence the way an evidence gap is charged would put it at 76.25 and out
-    # of apply_now entirely, which is the failure this case exists to avoid.
-    assert silent.bucket == stated.bucket == MatchBucket.APPLY_NOW
-    assert stated.final_score - silent.final_score < Decimal("2")
+    # Not identical, and the gap is the honest one: the component that dropped
+    # out had scored 1.0, so removing it lowers the mean of what is left. What
+    # matters is that the vacancy keeps its band rather than being pushed out of
+    # it for a blank field.
+    assert silent.bucket == stated.bucket == MatchBucket.STRONG
+    assert stated.final_score - silent.final_score < Decimal("4")
+    # And the comparison that names the rule: charged the way an evidence gap is
+    # charged — weight kept in the divisor, value zero — the same silence would
+    # cost thirteen points instead of four.
+    charged = _weighted(
+        {
+            "skill_coverage_required": silent.components["skill_coverage_required"] / 100,
+            "semantic_similarity": silent.components["semantic_similarity"] / 100,
+            "experience_fit": Decimal("0"),
+            "logistics_fit": silent.components["logistics_fit"] / 100,
+        }
+    )
+    assert charged < silent.final_score - Decimal("10")
 
 
 def test_a_vacancy_with_nothing_measurable_scores_zero_rather_than_raising() -> None:
@@ -204,9 +249,95 @@ def test_coverage_is_weighted_and_lists_both_sides() -> None:
         {"python": Decimal("1"), "kafka": Decimal("1")}, {"python": "strong"}
     )
 
-    assert coverage == Decimal("0.5")
+    # One of the two stated requirements, over two stated plus one assumed.
+    assert coverage == Decimal("1") / Decimal("3")
     assert [item.canonical_name for item in matched] == ["python"]
     assert [item.canonical_name for item in missing] == ["kafka"]
+
+
+def test_meeting_the_only_stated_requirement_is_not_a_perfect_match() -> None:
+    """The measurement that forced this, in the shape it arrived in.
+
+    On 9 September 2026 the top of the queue for a Python backend profile was
+    five postings at 87.5-88.6: an IBM engineer, a communications engineer, a
+    network engineer, a structured-cabling designer. Each stated exactly one
+    requirement, each explained itself with «совпадает: linux», and each scored
+    as a full match — because ``earned / stated`` over a list of one is 1.0.
+
+    The list length is now part of the answer: one requirement out of one plus
+    one nobody stated is a half, not a whole.
+    """
+    one = skill_coverage({"linux": Decimal("1")}, {"linux": "strong"})[0]
+    ten = skill_coverage(
+        {name: Decimal("1") for name in ("python", "postgresql", "docker", "git")},
+        {"python": "strong", "postgresql": "strong", "docker": "strong", "git": "strong"},
+    )[0]
+
+    assert one == Decimal("0.5")
+    assert ten is not None and ten > one, "four of four says more than one of one"
+
+
+def test_the_longer_the_stated_list_the_more_coverage_it_can_claim() -> None:
+    """Monotone, and with no step in it anywhere.
+
+    The alternative on the table was a threshold — ignore the component below
+    *n* requirements — and this is the property that argues against it: two
+    vacancies that differ by one line of a job ad differ by a little, at every
+    length, rather than by everything at one length and nothing anywhere else.
+    """
+    held = {name: "strong" for name in ("python", "postgresql", "docker", "git", "sql", "linux")}
+    covers = [
+        skill_coverage({name: Decimal("1") for name in list(held)[:size]}, held)[0]
+        for size in range(1, len(held) + 1)
+    ]
+
+    assert all(value is not None for value in covers)
+    assert covers == sorted(covers)  # type: ignore[type-var]
+    assert covers[0] == Decimal("0.5")
+    assert covers[-1] is not None and covers[-1] < Decimal("1"), "and never quite reaches 1.0"
+
+
+def test_the_assumption_is_a_parameter_so_the_corpus_can_be_measured_without_it() -> None:
+    """``--unstated 0`` is the corpus as it was scored before this existed.
+
+    A change to the shape of a score is not something to argue about: it is
+    something to run twice. Which is only possible if the old behaviour is
+    still reachable, exactly, from the same code.
+    """
+    required = {"linux": Decimal("1")}
+
+    assert skill_coverage(required, {"linux": "strong"}, unstated=Decimal("0"))[0] == Decimal("1")
+    assert skill_coverage(required, {"linux": "strong"})[0] == Decimal("0.5")
+    assert Decimal("1.0") == UNSTATED_REQUIREMENT, "one requirement, in weight units"
+
+
+def test_a_single_requirement_from_the_description_no_longer_reaches_the_queue() -> None:
+    """The five postings, scored end to end rather than as a ratio.
+
+    ``agent_queue_min_score`` is 70 and is not being lowered or raised: what
+    changed is that a vacancy whose entire requirement list is one word read out
+    of its own description cannot clear it any more. The same posting still
+    scores — it is not filtered, and the candidate really does know Linux — it
+    simply stops outranking every vacancy that stated what it wanted.
+    """
+    posting = vacancy(
+        # One requirement, found in the description rather than stated: 0.60 is
+        # what such a row weighs, and the assumption is in the same units, so an
+        # inferred list of one is weaker evidence than a stated list of one.
+        # That is the intended ordering. (``python`` rather than the ``linux``
+        # of the live case only because it is what this file's candidate holds;
+        # the shape is the same one.)
+        required_skills={"python": Decimal("0.60")},
+        similarity=Decimal("0.77"),
+    )
+
+    before = score_vacancy(posting, CANDIDATE, unstated=Decimal("0"))
+    after = score_vacancy(posting, CANDIDATE)
+
+    assert before.final_score >= Decimal("85")
+    assert before.bucket == MatchBucket.APPLY_NOW
+    assert after.final_score < Decimal("70")
+    assert [item.canonical_name for item in after.matched] == ["python"]
 
 
 def test_a_vacancy_that_lists_no_skills_is_not_a_vacancy_the_candidate_fails() -> None:
