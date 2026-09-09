@@ -229,13 +229,61 @@ def test_apply_without_send_is_a_dry_run() -> None:
 
 
 def test_apply_forwards_only_the_flags_it_declares() -> None:
-    """A closed set: queue file and requeue, and nothing invented in between."""
+    """A closed set: where the queue comes from, the manual file, requeue.
+
+    ``--from`` and ``--no-backend`` say which list the agent is offered — the
+    database's, or one file — and neither says anything about consent. They are
+    forwarded rather than resolved here because the agent holds the same default,
+    and one address kept in two places is how two places come to disagree.
+    """
     runner = Recorder()
 
-    run_cli(["apply", "--send", "--queue", "q.json", "--requeue", "1", "2"], run=runner, tty=True)
+    run_cli(
+        [
+            "apply",
+            "--send",
+            "--from",
+            "http://127.0.0.1:9000",
+            "--queue",
+            "q.json",
+            "--requeue",
+            "1",
+            "2",
+        ],
+        run=runner,
+        tty=True,
+    )
 
     assert runner.commands == [
-        [sys.executable, "-m", "agent.run", "--send", "--queue", "q.json", "--requeue", "1", "2"]
+        [
+            sys.executable,
+            "-m",
+            "agent.run",
+            "--send",
+            "--from",
+            "http://127.0.0.1:9000",
+            "--queue",
+            "q.json",
+            "--requeue",
+            "1",
+            "2",
+        ]
+    ]
+
+
+def test_apply_can_be_told_to_work_off_the_file_alone() -> None:
+    """The escape hatch reaches the agent, and it is the only way to the file.
+
+    A run that fell back to ``agent/queue.json`` on its own would put a
+    hand-written row in front of a person as though the pipeline had produced
+    it, which is the defect this whole arrangement replaced.
+    """
+    runner = Recorder()
+
+    run_cli(["apply", "--no-backend", "--queue", "q.json"], run=runner, tty=True)
+
+    assert runner.commands == [
+        [sys.executable, "-m", "agent.run", "--no-backend", "--queue", "q.json"]
     ]
 
 
@@ -539,7 +587,7 @@ def test_the_queue_can_come_from_the_endpoint_instead_of_the_file() -> None:
         return json.dumps({"version": 1, "items": [a_queue()]})
 
     code, out, _ = run_cli(
-        ["queue", "--from", "http://localhost:8000", "--limit", "7"], fetch=fetch
+        ["queue", "--from", "http://localhost:8000", "--limit", "7", "--no-manual"], fetch=fetch
     )
 
     assert code == 0
@@ -553,7 +601,9 @@ def test_an_endpoint_that_is_not_written_yet_points_at_the_file(tmp_path: Path) 
     def fetch(base_url: str, limit: int) -> str:
         raise QueueNotBuiltError("404: эндпоинта очереди в этом бэкенде нет")
 
-    code, _, err = run_cli(["queue", "--from", "https://example.invalid"], fetch=fetch)
+    code, _, err = run_cli(
+        ["queue", "--from", "https://example.invalid", "--no-manual"], fetch=fetch
+    )
 
     assert code == cli.EXIT_MISSING_PIECE
     assert "эндпоинта очереди" in err
@@ -570,7 +620,9 @@ def test_a_backend_that_is_down_is_not_the_same_as_a_backend_without_the_endpoin
     def unreachable(base_url: str, limit: int) -> str:
         raise QueueUnavailableError("Не удалось спросить: соединение отклонено")
 
-    code, _, err = run_cli(["queue", "--from", "http://localhost:8000"], fetch=unreachable)
+    code, _, err = run_cli(
+        ["queue", "--from", "http://localhost:8000", "--no-manual"], fetch=unreachable
+    )
 
     assert code == cli.EXIT_FAILED
     assert "соединение отклонено" in err
@@ -666,6 +718,153 @@ def test_a_stream_that_cannot_answer_at_all_counts_as_nobody() -> None:
 
     assert code == cli.EXIT_NO_HUMAN
     assert runner.commands == []
+
+
+# ── the queue is the database's, and the file adds to it ──────────────
+#
+# ``agent/queue.json`` was the whole queue until 2026-09-09. A night of
+# crawling, scoring and letter writing therefore reached this report as one row
+# somebody had typed in weeks earlier, with no score — and the header named the
+# file, so nothing about the output said what was missing. These tests are about
+# the arrangement that replaced it.
+#
+# Note what every test above had to start doing: naming ``--no-manual`` or a
+# temporary file. The default manual path is the owner's real
+# ``agent/queue.json``, which is gitignored and exists on their machine, and a
+# test that reads it would pass in CI and fail on the laptop it matters on.
+
+
+def _serves(*items: dict[str, object]) -> Fetcher:
+    """A backend that answers with these items."""
+
+    def fetch(base_url: str, limit: int) -> str:
+        return json.dumps({"version": 1, "items": list(items)}, ensure_ascii=False)
+
+    return fetch
+
+
+def test_the_queue_comes_from_the_database_without_being_asked_to(tmp_path: Path) -> None:
+    """The default source is the backend. That is the whole defect, in one line.
+
+    Nothing but this decides which question ``wwao queue`` answers: "what did
+    the pipeline produce" or "what is in a file somebody edits by hand".
+    """
+    asked: list[str] = []
+
+    def fetch(base_url: str, limit: int) -> str:
+        asked.append(base_url)
+        return json.dumps({"version": 1, "items": [a_queue()]})
+
+    code, out, _ = run_cli(["queue", "--manual", str(tmp_path / "nothing.json")], fetch=fetch)
+
+    assert code == 0
+    assert asked == [cli.DEFAULT_BACKEND]
+    assert "ГОТОВО К ОТКЛИКУ: 1" in out
+
+
+def test_a_hand_written_row_is_added_to_the_queue_and_marked_as_one(tmp_path: Path) -> None:
+    """Both halves, in order, and each readable as what it is.
+
+    The scored row leads because the score is the only reason to prefer one
+    vacancy over another, and the hand-added one says where it came from — its
+    empty score column would otherwise read as "scoring has not run".
+    """
+    manual = write_queue(tmp_path / "queue.json", a_queue(vacancy_id="222222222", score=None))
+
+    code, out, _ = run_cli(["queue", "--manual", str(manual)], fetch=_serves(a_queue()))
+
+    assert code == 0
+    assert "ГОТОВО К ОТКЛИКУ: 2" in out
+    assert out.index(VACANCY) < out.index("222222222")
+    assert "добавлено вручную" in out
+    # And the header says both sources rather than one path.
+    assert "(база)" in out and str(manual) in out
+
+
+def test_a_vacancy_in_both_halves_is_shown_once_as_the_database_has_it(tmp_path: Path) -> None:
+    """The file is where a person adds what the queue missed; they overlap.
+
+    The database's row wins: it is the one carrying the score and the letter the
+    pipeline wrote.
+    """
+    manual = write_queue(tmp_path / "queue.json", a_queue(title="набрано руками", score=None))
+
+    out = run_cli(["queue", "--manual", str(manual)], fetch=_serves(a_queue()))[1]
+
+    assert "ГОТОВО К ОТКЛИКУ: 1" in out
+    assert "набрано руками" not in out
+    assert "добавлено вручную" not in out
+
+
+def test_a_backend_that_is_down_does_not_let_the_file_pass_for_the_queue(
+    tmp_path: Path,
+) -> None:
+    """The failure is loud, the hand-written rows are still shown, and the code is not 0.
+
+    Showing the file alone and exiting 0 is precisely the behaviour that made a
+    month-old row look like this morning's queue. Hiding the file instead would
+    lose rows somebody asked for. So: both, and a warning naming which half is
+    missing.
+    """
+
+    def unreachable(base_url: str, limit: int) -> str:
+        raise QueueUnavailableError("Не удалось спросить: соединение отклонено")
+
+    manual = write_queue(tmp_path / "queue.json", a_queue(vacancy_id="222222222"))
+
+    code, out, err = run_cli(["queue", "--manual", str(manual)], fetch=unreachable)
+
+    assert code == cli.EXIT_FAILED
+    assert "соединение отклонено" in err
+    assert "список ниже собран без неё" in out
+    assert "222222222" in out
+
+
+def test_a_missing_results_file_is_only_worth_saying_when_it_explains_something(
+    tmp_path: Path,
+) -> None:
+    """Everything the backend serves is already filtered by what the tracker knows.
+
+    A vacancy already applied to is not in the queue at all, so for those rows
+    ``queue-results.json`` explains nothing — and a warning printed on every
+    single run is a warning nobody reads by the third day.
+    """
+    without = run_cli(["queue", "--manual", str(tmp_path / "none.json")], fetch=_serves(a_queue()))[
+        1
+    ]
+    manual = write_queue(tmp_path / "queue.json", a_queue(vacancy_id="222222222"))
+    with_manual = run_cli(["queue", "--manual", str(manual)], fetch=_serves(a_queue()))[1]
+
+    assert "результатов прошлых прогонов нет" not in without
+    assert "результатов прошлых прогонов нет" in with_manual
+
+
+def test_no_manual_shows_the_database_and_nothing_else(tmp_path: Path) -> None:
+    """For the run that wants to see exactly what the pipeline produced."""
+    manual = write_queue(tmp_path / "queue.json", a_queue(vacancy_id="222222222"))
+
+    out = run_cli(["queue", "--manual", str(manual), "--no-manual"], fetch=_serves(a_queue()))[1]
+
+    assert "222222222" not in out
+    assert "ГОТОВО К ОТКЛИКУ: 1" in out
+
+
+def test_naming_a_file_reads_that_file_and_nothing_underneath_it(tmp_path: Path) -> None:
+    """``--from`` with a path is the no-server transport, and it stays literal.
+
+    A second source appearing under a file somebody named would be the same
+    surprise in the other direction.
+    """
+    queue = write_queue(tmp_path / "queue.json", a_queue())
+
+    def never(base_url: str, limit: int) -> str:
+        raise AssertionError(f"the backend was asked anyway: {base_url}")
+
+    code, out, _ = run_cli(["queue", "--from", str(queue)], fetch=never)
+
+    assert code == 0
+    assert str(queue) in out
+    assert "(база)" not in out
 
 
 # ── the transport, the one thing that would talk to a backend ─────────

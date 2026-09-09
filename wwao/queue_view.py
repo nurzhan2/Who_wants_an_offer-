@@ -9,11 +9,20 @@ imports the backend, and reading ``agent/queue.json`` as a *file* is not an
 import: ``agent/hosts.py`` reads ``backend/app/sources/hh_sites.yaml`` the same
 way and for the same reason.
 
-**Two transports, one shape.** ``--from`` takes either an HTTP base URL, where
-``/api/v1/applications/queue`` answers behind a local token, or a path to the
-JSON file that works with no server, no database and no token at all. The
-parsing and everything below it is identical, so which one is in use changes
-nothing about the report.
+**Two transports, one shape, and one of them is the queue.** ``--from`` takes
+an HTTP base URL, where ``/api/v1/applications/queue`` answers behind a local
+token, or a path to a JSON file that works with no server, no database and no
+token at all. The parsing and everything below it is identical, so which one is
+in use changes nothing about the report.
+
+What changed is which one answers the question by default. The queue is a fact
+about the database — vacancies scored above ``agent_queue_min_score``, with a
+letter written and no application sent — and for a year this command read
+``agent/queue.json`` instead: a file somebody edits by hand. A night of
+crawling, scoring and letter writing therefore showed up here as one row typed
+in weeks earlier, with no score, and nothing said that was what you were
+looking at. Now the backend answers and the file is merged in behind it, marked
+as hand-added; see :func:`merge`.
 
 **Why a vacancy is not ready is the interesting half of the report.** A list of
 what is ready answers "what will happen"; the rest answers "why is this thing I
@@ -34,6 +43,7 @@ order of the list means nothing.
 """
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final, final
@@ -244,7 +254,41 @@ def parse_results(path: Path) -> ResultsPayload:
         return ResultsPayload()
 
 
-def classify(entries: list[QueueEntry], results: ResultsPayload) -> tuple[Row, ...]:
+def merge(
+    primary: Sequence[QueueEntry], extra: Sequence[QueueEntry]
+) -> tuple[tuple[QueueEntry, ...], frozenset[str]]:
+    """The database's queue, plus the rows a person added to the file by hand.
+
+    The backend answers the question the queue *is*: which vacancies scored
+    above the threshold, have a letter written and have never been applied to.
+    ``agent/queue.json`` used to be the only source, so a night of crawling,
+    scoring and letter writing showed up here as whatever somebody had typed
+    into that file — once, weeks earlier — and nothing said so.
+
+    Order is the point of the merge. What the pipeline produced leads, and the
+    hand-written rows follow: an entry typed into the file carries no score, and
+    putting it above a scored one hides the only reason there is to prefer one
+    vacancy over another. A vacancy in both is the backend's row — same reason.
+
+    Returns the entries and the ids that came from the file, because the report
+    has to say which is which. A row with no score looks identical to a row the
+    scoring step never reached, and those are different problems.
+    """
+    entries = list(primary)
+    seen = {entry.vacancy_id for entry in entries}
+    added: list[str] = []
+    for entry in extra:
+        if entry.vacancy_id in seen:
+            continue
+        seen.add(entry.vacancy_id)
+        entries.append(entry)
+        added.append(entry.vacancy_id)
+    return tuple(entries), frozenset(added)
+
+
+def classify(
+    entries: list[QueueEntry], results: ResultsPayload, *, manual: frozenset[str] = frozenset()
+) -> tuple[Row, ...]:
     """Decide, for each entry, whether it is ready and what to say about it.
 
     Every applicable reason is collected rather than the first one found: a
@@ -274,7 +318,11 @@ def classify(entries: list[QueueEntry], results: ResultsPayload) -> tuple[Row, .
             blockers.append("работодатель закрыл приём откликов")
         if entry.external_application:
             blockers.append("отклик оформляется на сайте работодателя, руками")
-        if entry.score is None:
+        if entry.vacancy_id in manual:
+            # Said before the missing score below it, because it explains the
+            # missing score: nobody scored this row, somebody typed it.
+            notes.append("добавлено вручную — этой строки нет в очереди из базы")
+        elif entry.score is None:
             notes.append("оценка соответствия не посчитана — порядок списка ничего не значит")
         if not entry.letter:
             notes.append("письма нет — отклик уйдёт без сопроводительного")

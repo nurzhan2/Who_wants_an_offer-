@@ -51,6 +51,7 @@ from app.db.base import uuid7
 from app.db.enums import ApplicationStatus, MatchBucket
 from app.db.models import Application
 from app.db.repositories import MatchRepository, ProfileRepository, VacancyRepository
+from app.letters.store import save_letter
 from app.schemas.agent import (
     CONTRACT_VERSION,
     AgentStatus,
@@ -527,6 +528,75 @@ async def test_the_queue_offers_nothing_a_person_or_a_run_already_acted_on(
 
     assert len(before.items) == 1
     assert after.items == []
+
+
+@pytest.mark.db
+async def test_a_letter_written_tonight_reaches_the_queue_and_leaves_it_when_it_is_sent(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """The whole point of the queue, in one test: pipeline in, application out.
+
+    Every step of this was covered separately and the thing they add up to was
+    not, which is exactly how the queue could go a year reading a hand-written
+    file while ``wwao letters`` wrote five letters a night into the database.
+    Here the real letter writer runs — ``app.letters.store.save_letter``, the
+    function ``wwao letters`` ends at — and the vacancy has to appear with its
+    score and the skills behind it, then disappear once the agent reports the
+    send.
+
+    The order is the assertion. Before the letter there is nothing to offer: an
+    item with no letter is one the agent refuses anyway.
+    """
+    profile = await profiles.create(make_profile())
+    vacancy_id = await _posting(vacancies, seed="queue-lifecycle", external_id=HH_ID, url=HH_URL)
+    await matches.bulk_upsert(
+        [
+            make_match(
+                profile.id,
+                vacancy_id,
+                Decimal("88"),
+                matched=["python", "postgresql"],
+                missing_required=["kubernetes"],
+            )
+        ]
+    )
+    await db_session.flush()
+
+    assert (await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)).items == []
+
+    letter = "Здравствуйте! Пишу по вакансии."
+    await save_letter(
+        db_session,
+        vacancy_id=vacancy_id,
+        text=letter,
+        profile_id=profile.id,
+        rules_version="workshop:1:test",
+    )
+
+    served = await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)
+
+    assert [item.vacancy_id for item in served.items] == [HH_ID]
+    item = served.items[0]
+    assert item.letter == letter
+    assert item.score == Decimal("88.00")
+    # The breakdown, not just the number: what a person reads on the card is
+    # «closed: python, postgresql / not closed: kubernetes», and a queue that
+    # served the score alone would leave them nothing to decide with.
+    assert item.match is not None
+    assert [skill.canonical_name for skill in item.match.matched_skills] == [
+        "python",
+        "postgresql",
+    ]
+    assert [skill.canonical_name for skill in item.match.missing_required] == ["kubernetes"]
+    assert item.score_explanation is not None
+    assert "kubernetes" in item.score_explanation
+
+    await agent_queue.record_results(db_session, [_sent()])
+
+    assert (await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)).items == []
 
 
 @pytest.mark.db

@@ -340,7 +340,7 @@ async def test_a_vacancy_with_no_skills_is_counted_not_dropped(db_session: Async
     assert outcome.considered == 3
     assert outcome.without_skills == 3
     # The same three, counted before the description was read: this is the
-    # number the 832 of the live corpus belong to, and it must stay answerable
+    # number the 893 of the live corpus belong to, and it must stay answerable
     # now that reading the text can move a vacancy out of ``without_skills``.
     assert outcome.without_field_skills == 3
     assert outcome.skills_written == 0
@@ -366,7 +366,7 @@ async def test_the_backfill_reaches_everything_stored(db_session: AsyncSession) 
 async def test_a_vacancy_with_no_key_skills_is_scoreable_from_its_description(
     db_session: AsyncSession,
 ) -> None:
-    """The 832: nothing in the structured field, requirements in the prose.
+    """The 893: nothing in the structured field, requirements in the prose.
 
     Before this, such a vacancy had no ``vacancy_skill`` row at all and its
     skill coverage was not low but absent — a fact about our extraction dressed

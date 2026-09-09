@@ -1,10 +1,12 @@
 """Reading a vacancy's requirements out of the prose it is written in.
 
 ``keySkills`` is a structured field and an optional one. Measured on this corpus
-on 9 September 2026: 832 of 1958 vacancies — 42% — carry none, and their
+on 9 September 2026: 893 of 1958 vacancies — 46% — carry none, and their
 requirements are in the description instead, as sentences. Nothing read those
-sentences, so for those 832 the skill coverage of every match was not "low" but
-absent, and the reason was our data, not the candidate.
+sentences, so for those 893 the skill coverage of every match was not "low" but
+absent, and the reason was our data, not the candidate. Reading them rescued
+450 of the 893; the other 443 name nothing this dictionary knows, which is what
+a vacancy for a driver or a pharmacist looks like.
 
 **Deterministic, and no model.** The same dictionary that canonicalises the
 profile's skills and hh's ``keySkills`` (:mod:`app.resume.skills`) is turned

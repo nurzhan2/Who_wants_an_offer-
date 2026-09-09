@@ -80,9 +80,10 @@ class SyncOutcome:
     #: requirements — and now also have a description that names nothing this
     #: dictionary knows, which is what a vacancy for a driver looks like.
     without_skills: int = 0
-    #: Vacancies whose employer left the structured field empty. The 832 the
-    #: whole change is about, counted before the description is read, so that
-    #: "how many were rescued" stays answerable after it is.
+    #: Vacancies whose employer left the structured field empty. The 893 of the
+    #: live corpus this whole change is about, counted before the description is
+    #: read, so that "how many were rescued" stays answerable after it is — on
+    #: 9 September 2026 the answer was 450.
     without_field_skills: int = 0
     #: Rows by where they came from. These sum to ``skills_written``.
     from_field: int = 0

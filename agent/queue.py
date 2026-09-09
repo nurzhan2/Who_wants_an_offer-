@@ -1,4 +1,4 @@
-"""What the agent works from, and why it is a file today.
+"""What the agent works from: the backend's queue, plus a file for hand-additions.
 
 The brief says the agent's only contact with the backend is its HTTP API: it
 takes a queue and returns results, with no database access. That is the right
@@ -8,14 +8,22 @@ It was written before the endpoint existed. For a while ``api/v1`` mounted only
 resume, profile, sources and pipeline, so the honest thing was to define the
 contract, implement the client against it, and ship something the owner could
 actually run — which is :class:`FileQueue`, the same JSON read from
-``agent/queue.json``. ``/api/v1/applications`` has since landed against this
-shape, behind a shared local token; both transports are kept, because the file
-needs no server, no database and no token, and that is what a person can run on
-the first day of a fresh checkout.
+``agent/queue.json``.
 
-Swapping one for the other is a single line in the CLI, and the tests run
-against the shape rather than against either source, so nothing below the
-transport had to change when the endpoint arrived.
+``/api/v1/applications`` has since landed against this shape, behind a shared
+local token, and **it is the queue**: what the pipeline produced overnight —
+scored, above the threshold, with a letter written and no application sent —
+exists only in the database, and for a while nothing here asked for it. A run
+read a file a person had edited a month earlier and reported that as the queue.
+
+Both transports are therefore kept and :class:`MergedQueue` puts them in their
+places: the backend answers what is worth applying to, and the file is where a
+person adds something the pipeline did not offer. The file still needs no
+server, no database and no token, which is what makes it the fallback on the
+first day of a fresh checkout — ``--no-backend`` in ``agent/run.py``.
+
+The tests run against the shape rather than against either source, so nothing
+below the transport had to change when the endpoint arrived.
 
 The fields are chosen so the prefilter can run **before** a page is opened, which
 is the whole point of a prefilter. Every one of them is something the crawler in
@@ -217,6 +225,18 @@ def _score(value: object) -> float | None:
 @final
 class QueueFormatError(Exception):
     """The queue is not in the shape this agent understands."""
+
+
+@final
+class QueueUnreachableError(Exception):
+    """The backend did not answer, and the message says what to do about it.
+
+    Separate from :class:`QueueFormatError` because the answers differ: a
+    malformed queue is somebody's mistake to fix, a backend that is not running
+    is a service to start — or a reason to fall back to the file, which needs no
+    server at all. Raised instead of letting ``httpx`` out so that a run ends
+    with a sentence a person can act on rather than a stack trace.
+    """
 
 
 @final
@@ -487,13 +507,16 @@ class HttpQueue:
         """``GET {base}/api/v1/applications/queue?limit=…``."""
         import httpx
 
-        response = httpx.get(
-            f"{self.base_url}/api/v1/applications/queue",
-            params={"limit": limit},
-            headers=self._headers(),
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
+        try:
+            response = httpx.get(
+                f"{self.base_url}/api/v1/applications/queue",
+                params={"limit": limit},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise QueueUnreachableError(self._unreachable(error, "очередь")) from error
         payload = response.json()
         if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
             raise QueueFormatError("Ответ бэкенда не содержит items")
@@ -503,10 +526,101 @@ class HttpQueue:
         """``POST {base}/api/v1/applications/results``."""
         import httpx
 
-        response = httpx.post(
-            f"{self.base_url}/api/v1/applications/results",
-            json={"version": CONTRACT_VERSION, "results": [r.to_json() for r in results]},
-            headers=self._headers(),
-            timeout=self.timeout,
+        try:
+            response = httpx.post(
+                f"{self.base_url}/api/v1/applications/results",
+                json={"version": CONTRACT_VERSION, "results": [r.to_json() for r in results]},
+                headers=self._headers(),
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+        except httpx.HTTPError as error:
+            raise QueueUnreachableError(self._unreachable(error, "результаты")) from error
+
+    def _unreachable(self, error: Exception, what: str) -> str:
+        """One sentence naming the address, the failure and the way round it.
+
+        The status code is spelled out where there is one, because 401 and 503
+        are configuration and everything else is not: the endpoint sits behind
+        a shared local token, and «no token here» and «no token there» are
+        different five-minute problems. The token itself is never printed.
+        """
+        import httpx
+
+        detail = str(error) or error.__class__.__name__
+        if isinstance(error, httpx.HTTPStatusError):
+            code = error.response.status_code
+            detail = f"{code}"
+            if code in (401, 403):
+                detail += f" — очередь закрыта локальным токеном ({TOKEN_VARIABLE})"
+            elif code == 503:
+                detail += f" — у бэкенда не задан {TOKEN_VARIABLE}"
+            elif code == 404:
+                detail += " — этого эндпоинта в бэкенде нет"
+        return (
+            f"{self.base_url} не отдал {what}: {detail}. "
+            "Запустите бэкенд или возьмите одну ручную очередь: --no-backend."
         )
-        response.raise_for_status()
+
+
+@final
+class MergedQueue:
+    """The backend's queue, plus whatever a person put in the file by hand.
+
+    The queue is a question about the database — vacancies scored above
+    ``agent_queue_min_score`` that have a letter and no application yet — and
+    the backend answers it. ``agent/queue.json`` used to be the only source,
+    which meant a night of crawling, scoring and letter writing produced nothing
+    the agent could see: it read a file somebody had edited a month earlier.
+
+    So the file stays, as an addition rather than as the source. What a person
+    typed into it is offered after what the pipeline produced, and only when the
+    backend did not already offer the same vacancy — an entry added by hand
+    carries no score, and showing it in place of the scored row would hide the
+    only reason to prefer one vacancy over another.
+
+    **Results go everywhere they can.** To the local file first, because that
+    record must survive a tracker that is down — a run that sent applications
+    and then failed to say so is the one outcome worth engineering against — and
+    to the backend after, including the results of hand-added items: an id it
+    does not know writes nothing at the far end, and one it does know is an
+    application the tracker should have.
+    """
+
+    def __init__(
+        self,
+        *,
+        backend: Queue,
+        extra: Queue | None = None,
+        memory: ResultSink | None = None,
+    ) -> None:
+        self.backend = backend
+        self.extra = extra
+        self.memory = memory
+
+    def take(self, limit: int) -> Sequence[QueueItem]:
+        """The backend's items first, then the hand-written ones it did not name."""
+        items = list(self.backend.take(limit))
+        if self.extra is None or len(items) >= limit:
+            return items
+        seen = {item.vacancy_id for item in items}
+        for item in self.extra.take(limit):
+            if len(items) >= limit:
+                break
+            if item.vacancy_id in seen:
+                continue
+            seen.add(item.vacancy_id)
+            items.append(item)
+        return items
+
+    def report(self, results: Sequence[Result]) -> None:
+        """Write the local record, then hand the same results to the tracker.
+
+        In that order and never the other way round: the file write cannot fail
+        for a reason outside this machine, and if the POST does, what happened
+        is already on disk. The caller decides what a failed hand-over means —
+        here it is simply not allowed to lose the record.
+        """
+        if self.memory is not None:
+            self.memory.report(results)
+        self.backend.report(results)

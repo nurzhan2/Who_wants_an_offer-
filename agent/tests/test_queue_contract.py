@@ -30,7 +30,7 @@ import respx
 from agent.human import Candidate
 from agent.letter import check as check_letter
 from agent.mandate import digest
-from agent.queue import HttpQueue, QueueItem
+from agent.queue import HttpQueue, QueueItem, QueueUnreachableError
 
 pytestmark = pytest.mark.unit
 
@@ -206,6 +206,55 @@ def test_without_a_token_no_header_is_invented() -> None:
     HttpQueue(BASE, token="").take(5)
 
     assert "authorization" not in route.calls[0].request.headers
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "says"),
+    [
+        (401, "AGENT_API_TOKEN"),
+        (503, "AGENT_API_TOKEN"),
+        (404, "этого эндпоинта"),
+        (500, "500"),
+    ],
+)
+def test_a_backend_that_refuses_says_which_five_minute_problem_it_is(
+    monkeypatch: pytest.MonkeyPatch, status: int, says: str
+) -> None:
+    """The queue is the backend's, so "it did not answer" has to be actionable.
+
+    401 and 503 are configuration on two different sides, 404 is a version
+    mismatch and everything else is a service that fell over. One exit code for
+    all four sends whoever reads the morning log to the wrong place three times
+    out of four.
+    """
+    monkeypatch.setenv("AGENT_API_TOKEN", "s3cret-token")
+    respx.get(QUEUE_URL).mock(return_value=httpx.Response(status))
+
+    with pytest.raises(QueueUnreachableError) as failure:
+        HttpQueue(BASE).take(5)
+
+    message = str(failure.value)
+    assert says in message
+    assert "--no-backend" in message, "and how to work without it"
+    assert "s3cret-token" not in message, "the token is never printed"
+
+
+@respx.mock
+def test_a_backend_that_is_not_running_is_not_a_stack_trace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary case: nothing is listening on the port.
+
+    ``httpx.ConnectError`` reaching a person is a stack trace where a sentence
+    belongs — and the sentence has to name the address, because the default is
+    localhost and the backend may well be somewhere else.
+    """
+    monkeypatch.delenv("AGENT_API_TOKEN", raising=False)
+    respx.get(QUEUE_URL).mock(side_effect=httpx.ConnectError("Connection refused"))
+
+    with pytest.raises(QueueUnreachableError, match=BASE):
+        HttpQueue(BASE).take(5)
 
 
 def test_the_token_is_read_from_the_environment_and_never_from_the_code(

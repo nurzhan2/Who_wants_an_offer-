@@ -126,6 +126,16 @@ reason each vacancy is *not* ready — no letter, an employer test, a closed
 posting, an application already sent — because that list is what you would
 otherwise reconstruct by hand.
 
+`queue` and `apply` both take that list from the backend
+(`GET /api/v1/applications/queue`, behind `AGENT_API_TOKEN`): the vacancies
+scored above `agent_queue_min_score` that have a letter and no application yet.
+`agent/queue.json` is still read, as hand-added rows merged in behind that list
+and marked as such — it was the *only* source until 9 September 2026, which is
+why a night of crawling, scoring and letter writing used to show up as one row
+somebody typed in weeks earlier. A backend that does not answer is reported and
+exits non-zero rather than falling back to the file; `--no-backend` (agent) and
+`--from <file>` (wwao) ask for the file deliberately.
+
 `apply` is the only subcommand that sends anything, and it needs a person at the
 keyboard. It opens **your** hh account in a visible browser window, shows a card
 per vacancy — the id, the link, the employer, the match score with its reasoning,
