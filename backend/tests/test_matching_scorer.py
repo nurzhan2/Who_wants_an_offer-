@@ -78,6 +78,11 @@ async def test_a_score_is_stored_with_the_reasons_behind_it(db_session: AsyncSes
     The letter generator builds the letter around the overlap, the dashboard
     prints a «почему» column, and a person reads the card before an application
     goes out. None of them can do anything with a bare 62.
+
+    **Before ``UNSTATED_REQUIREMENT``** one of two held was stored as "50.00".
+    The divisor now carries one requirement the employer did not write down,
+    so the same overlap is 1/3 and is stored as "33.33"; the two lists behind
+    it are unchanged.
     """
     profile = await a_profile(db_session)
     vacancy_id = await a_vacancy(
@@ -92,7 +97,7 @@ async def test_a_score_is_stored_with_the_reasons_behind_it(db_session: AsyncSes
     assert row.profile_id == profile.id
     assert [item["canonical_name"] for item in row.matched_skills] == ["python"]
     assert [item["canonical_name"] for item in row.missing_required] == ["kafka"]
-    assert row.component_scores["skill_coverage_required"] == "50.00"
+    assert row.component_scores["skill_coverage_required"] == "33.33"
     assert row.verdict is not None
 
 
@@ -269,6 +274,11 @@ async def test_the_candidates_skill_level_reaches_the_score(db_session: AsyncSes
 
     Asserted through the whole path rather than on the pure function, because
     the column it comes from is the one thing this layer can get wrong.
+
+    **Before ``UNSTATED_REQUIREMENT``** one requirement held at ``basic`` was
+    stored as "70.00" — the multiplier itself. It is now 0.7 over a divisor of
+    1 + 1, "35.00". The level still reaches the score in full: held at
+    ``strong`` the same row would store "50.00", and 35 is 0.7 of that.
     """
     profile = await a_profile(db_session)
     await db_session.execute(
@@ -282,7 +292,7 @@ async def test_the_candidates_skill_level_reaches_the_score(db_session: AsyncSes
 
     row = await stored(db_session, vacancy_id)
     assert row is not None
-    assert row.component_scores["skill_coverage_required"] == "70.00"
+    assert row.component_scores["skill_coverage_required"] == "35.00"
 
 
 async def test_no_active_profile_is_an_error_with_a_way_out_not_an_empty_result(
@@ -304,7 +314,12 @@ async def test_no_active_profile_is_an_error_with_a_way_out_not_an_empty_result(
 async def test_only_the_required_skills_of_the_vacancy_are_read(
     db_session: AsyncSession,
 ) -> None:
-    """A row marked not-required must not silently become a hard requirement."""
+    """A row marked not-required must not silently become a hard requirement.
+
+    **Before ``UNSTATED_REQUIREMENT``** this asserted "100.00": Python alone,
+    held. Python alone is now 1 / (1 + 1), "50.00". The number still tells the
+    two cases apart — had Kafka been read as required it would be "33.33".
+    """
     await a_profile(db_session)
     vacancy_id = await a_vacancy(db_session, "optional", {"key_skills": ["Python", "Kafka"]})
     await db_session.execute(
@@ -319,4 +334,4 @@ async def test_only_the_required_skills_of_the_vacancy_are_read(
     row = await stored(db_session, vacancy_id)
     assert row is not None
     assert [item["canonical_name"] for item in row.missing_required] == []
-    assert row.component_scores["skill_coverage_required"] == "100.00"
+    assert row.component_scores["skill_coverage_required"] == "50.00"

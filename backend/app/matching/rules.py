@@ -47,9 +47,10 @@ three and a half times as much as logistics. What changes is only which of them
 land in the divisor, and each case has a reason a reader can check.
 
 This is also what the brief asks for in as many words. A vacancy with no
-embedding is still scored on its skills instead of dropping to a silent zero:
-perfect skill coverage without a vector scores 75 and lands in ``strong``,
-which is what «получать score по навыкам с честной пометкой» has to mean.
+embedding is still scored on its skills instead of dropping to a silent zero,
+which is what «получать score по навыкам с честной пометкой» has to mean. Its
+ceiling is 75, approached rather than reached since
+:data:`UNSTATED_REQUIREMENT`: one held requirement scores 53, ten score 71.
 
 :attr:`Score.counted` records which components were in the divisor, so the
 explanation can say so instead of leaving a reader to wonder.
@@ -83,6 +84,14 @@ WEIGHTS: Final[dict[str, Decimal]] = {
     "domain_fit": Decimal("0.10"),
     "logistics_fit": Decimal("0.10"),
 }
+
+#: One requirement the employer did not write down, added to the divisor of
+#: skill coverage. In the units of ``vacancy_skill.weight`` — not of
+#: :data:`WEIGHTS` — so it counts as much as a requirement named in the
+#: employer's own field (1.0) and more than one read out of the description
+#: (0.6). See :func:`skill_coverage` for the measurement that produced it and
+#: the consequence it carries.
+UNSTATED_REQUIREMENT: Final[Decimal] = Decimal("1.0")
 
 #: The two components that say whether the candidate can do the job. Their
 #: weight stays in the divisor even when they cannot be measured, so that a
@@ -323,7 +332,19 @@ def skill_coverage(
         total += weight
     if total == 0:
         return None, matched, missing
-    return earned / total, matched, missing
+    # One requirement the employer did not write down, in the same units as the
+    # weights. Measured 9 Sep 2026 on the live corpus: five vacancies reached
+    # 87.5-88.6 and topped the queue on a single matched requirement each, read
+    # out of their own description text — the ratio cannot tell one-of-one from
+    # ten-of-ten. hh's key-skills field is optional and 893 of 1958 employers
+    # left it empty, so the list is what somebody found time to type, not what
+    # the job needs. The allowance is smooth over the whole length (1 stated ->
+    # 0.50, 2 -> 0.67, 5 -> 0.83, 10 -> 0.91) rather than a threshold, which
+    # would need a number nobody has measured and would put a cliff between two
+    # postings that differ by one line of an advert.
+    # Consequence to state out loud: 100 is no longer reachable. The ceiling is
+    # how much the employer said — 78 at one requirement, 96 at ten.
+    return earned / (total + UNSTATED_REQUIREMENT), matched, missing
 
 
 def experience_fit(required: Decimal | None, candidate: Decimal | None) -> Decimal | None:
