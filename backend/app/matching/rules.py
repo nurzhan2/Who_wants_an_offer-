@@ -66,6 +66,7 @@ rather than scoring zero.
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
+from enum import StrEnum
 from typing import Final
 
 from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority, SkillLevel
@@ -86,12 +87,34 @@ WEIGHTS: Final[dict[str, Decimal]] = {
 }
 
 #: One requirement the employer did not write down, added to the divisor of
-#: skill coverage. In the units of ``vacancy_skill.weight`` — not of
-#: :data:`WEIGHTS` — so it counts as much as a requirement named in the
-#: employer's own field (1.0) and more than one read out of the description
-#: (0.6). See :func:`skill_coverage` for the measurement that produced it and
-#: the consequence it carries.
+#: skill coverage, as a count of requirements. What one of them weighs is
+#: :class:`UnstatedRequirement`'s question. See :func:`skill_coverage` for the
+#: measurement that produced it and the consequence it carries.
 UNSTATED_REQUIREMENT: Final[Decimal] = Decimal("1.0")
+
+
+class UnstatedRequirement(StrEnum):
+    """What the one requirement the employer did not write down weighs.
+
+    Both stay selectable — ``scripts/run_matching.py --unstated`` — because the
+    choice between them is to be settled by measuring the corpus, not by
+    argument.
+    """
+
+    #: :data:`UNSTATED_REQUIREMENT` times the mean weight of this vacancy's own
+    #: requirements. The unwritten requirement is as well evidenced as what we
+    #: have about this vacancy, so a list read out of the description (0.6
+    #: each) and a named one (1.0 each) are judged by the same rule.
+    MEAN_WEIGHT = "mean-weight"
+    #: :data:`UNSTATED_REQUIREMENT` flat, in ``vacancy_skill.weight`` units.
+    #: Judges a list read out of the description more strictly than a named
+    #: one — 0.375 against 0.5 for one held requirement — which is a penalty
+    #: for leaving an optional field empty.
+    FIXED = "fixed"
+
+
+#: The rule a scoring pass uses unless told otherwise.
+DEFAULT_UNSTATED: Final[UnstatedRequirement] = UnstatedRequirement.MEAN_WEIGHT
 
 #: The two components that say whether the candidate can do the job. Their
 #: weight stays in the divisor even when they cannot be measured, so that a
@@ -293,6 +316,7 @@ def skill_coverage(
     *,
     sources: Mapping[str, RequirementSource] | None = None,
     canonicalizer: SkillCanonicalizer | None = None,
+    unstated: UnstatedRequirement = DEFAULT_UNSTATED,
 ) -> tuple[Decimal | None, list[SkillMatch], list[SkillMatch]]:
     """Weighted coverage of a vacancy's requirements, and the two lists behind it.
 
@@ -344,7 +368,22 @@ def skill_coverage(
     # postings that differ by one line of an advert.
     # Consequence to state out loud: 100 is no longer reachable. The ceiling is
     # how much the employer said — 78 at one requirement, 96 at ten.
-    return earned / (total + UNSTATED_REQUIREMENT), matched, missing
+    # What the unwritten requirement weighs is the rule's business; see
+    # ``UnstatedRequirement``. On a list of named requirements the two agree.
+    allowance = unstated_allowance(total, len(required), unstated)
+    return earned / (total + allowance), matched, missing
+
+
+def unstated_allowance(total: Decimal, count: int, rule: UnstatedRequirement) -> Decimal:
+    """The weight of the one requirement the employer did not write down.
+
+    ``total`` and ``count`` are the summed weight and number of the requirements
+    that were written down; ``count`` is never zero here, because a vacancy with
+    no requirements has no coverage to divide.
+    """
+    if rule is UnstatedRequirement.FIXED:
+        return UNSTATED_REQUIREMENT
+    return UNSTATED_REQUIREMENT * total / Decimal(count)
 
 
 def experience_fit(required: Decimal | None, candidate: Decimal | None) -> Decimal | None:
@@ -528,6 +567,7 @@ def score_vacancy(
     profile: ProfileFacts,
     *,
     canonicalizer: SkillCanonicalizer | None = None,
+    unstated: UnstatedRequirement = DEFAULT_UNSTATED,
 ) -> Score:
     """One vacancy against one profile: the number, and every reason for it."""
     result = Score(similarity=vacancy.similarity)
@@ -540,6 +580,7 @@ def score_vacancy(
         profile.skills,
         sources=vacancy.requirement_sources,
         canonicalizer=canonicalizer,
+        unstated=unstated,
     )
     result.matched = matched
     result.missing = missing

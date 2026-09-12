@@ -3,6 +3,7 @@
     uv run python scripts/run_matching.py
     uv run python scripts/run_matching.py --dry-run
     uv run python scripts/run_matching.py --limit 50
+    uv run python scripts/run_matching.py --dry-run --unstated fixed
 
 ``wwao match`` wraps this. The formula is ``docs/MATCHING.md``; the deviations
 the data forced are documented in ``app/matching/rules.py`` and named in this
@@ -30,6 +31,7 @@ from app.db.models import CandidateProfile, ProfileSkill
 from app.db.repositories.profile import ProfileRepository
 from app.db.session import session_factory
 from app.matching.embeddings import EmbeddingError, encode_profile
+from app.matching.rules import DEFAULT_UNSTATED, UnstatedRequirement
 from app.matching.scorer import ProfileNotReadyError, ScoringOutcome, score_corpus
 
 RULE = "-" * 78  # ASCII: this report is printed to a cp1251 console
@@ -53,6 +55,15 @@ def parse_args() -> argparse.Namespace:
         "--no-embed-profile",
         action="store_true",
         help="do not embed the profile even if it has no vector",
+    )
+    parser.add_argument(
+        "--unstated",
+        choices=[rule.value for rule in UnstatedRequirement],
+        default=DEFAULT_UNSTATED.value,
+        help=(
+            "what the one requirement the employer did not write down weighs: "
+            "mean-weight (the mean of this vacancy's own weights) or fixed (1.0)"
+        ),
     )
     return parser.parse_args()
 
@@ -91,10 +102,12 @@ async def ensure_profile_embedding(*, allowed: bool) -> str | None:
         return "эмбеддинг профиля посчитан впервые"
 
 
-async def run(*, dry_run: bool, limit: int | None) -> ScoringOutcome:
+async def run(
+    *, dry_run: bool, limit: int | None, unstated: UnstatedRequirement = DEFAULT_UNSTATED
+) -> ScoringOutcome:
     """Score, and keep it only if this is not a rehearsal."""
     async with session_factory() as session:
-        outcome = await score_corpus(session, limit=limit)
+        outcome = await score_corpus(session, limit=limit, unstated=unstated)
         if dry_run:
             await session.rollback()
         else:
@@ -110,6 +123,9 @@ def show(outcome: ScoringOutcome, note: str | None, *, dry_run: bool) -> None:
     if note:
         print(f"  {note}")
         print()
+    # Named every time: bucket counts from two passes are only comparable when
+    # the reader can see which rule weighed the unwritten requirement.
+    print(f"  ненаписанное требование  {outcome.unstated.value}")
     print(f"  вакансий рассмотрено   {outcome.considered}")
     print(f"  записано match-строк   {outcome.written}")
     print(f"  сидовых пропущено      {outcome.skipped_seeds}")
@@ -133,7 +149,11 @@ async def main() -> int:
     configure_logging()
     try:
         note = await ensure_profile_embedding(allowed=not args.no_embed_profile)
-        outcome = await run(dry_run=args.dry_run, limit=args.limit)
+        outcome = await run(
+            dry_run=args.dry_run,
+            limit=args.limit,
+            unstated=UnstatedRequirement(args.unstated),
+        )
     except ProfileNotReadyError as error:
         # The CLI already sets this example: when a link is missing, say which
         # one rather than returning an empty result as a success.

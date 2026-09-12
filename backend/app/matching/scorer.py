@@ -31,9 +31,11 @@ from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority
 from app.db.models import CandidateProfile, ProfileSkill, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.match import MatchRepository
 from app.matching.rules import (
+    DEFAULT_UNSTATED,
     ProfileFacts,
     Score,
     SkillMatch,
+    UnstatedRequirement,
     VacancyFacts,
     normalise_similarity,
     score_vacancy,
@@ -71,10 +73,14 @@ class ScoringOutcome:
     without_embedding: int = 0
     without_skills: int = 0
     buckets: dict[str, int] = field(default_factory=dict)
+    #: Which rule weighed the unwritten requirement. Carried with the counts
+    #: because two passes are only comparable when this is known.
+    unstated: UnstatedRequirement = DEFAULT_UNSTATED
 
     def as_dict(self) -> dict[str, Any]:
         """The counters, for logging."""
         return {
+            "unstated": str(self.unstated),
             "considered": self.considered,
             "written": self.written,
             "skipped_seeds": self.skipped_seeds,
@@ -95,12 +101,16 @@ class ProfileNotReadyError(Exception):
 
 
 async def score_corpus(
-    session: AsyncSession, *, profile_id: UUID | None = None, limit: int | None = None
+    session: AsyncSession,
+    *,
+    profile_id: UUID | None = None,
+    limit: int | None = None,
+    unstated: UnstatedRequirement = DEFAULT_UNSTATED,
 ) -> ScoringOutcome:
     """Score every vacancy against the active profile and store the reasons."""
     profile = await _profile(session, profile_id)
     facts = await _profile_facts(session, profile)
-    outcome = ScoringOutcome()
+    outcome = ScoringOutcome(unstated=unstated)
 
     ids = await _vacancy_ids(session, limit=limit)
     canonicalizer = default_canonicalizer()
@@ -116,7 +126,7 @@ async def score_corpus(
                 outcome.without_embedding += 1
             if not row.facts.required_skills:
                 outcome.without_skills += 1
-            score = score_vacancy(row.facts, facts, canonicalizer=canonicalizer)
+            score = score_vacancy(row.facts, facts, canonicalizer=canonicalizer, unstated=unstated)
             outcome.buckets[score.bucket] = outcome.buckets.get(score.bucket, 0) + 1
             if score.bucket == MatchBucket.FILTERED:
                 outcome.filtered += 1

@@ -22,6 +22,7 @@ from app.db.models import Match, ProfileSkill, VacancySkill
 from app.db.repositories.match import MatchRepository
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.vacancy import VacancyRepository
+from app.matching.rules import UnstatedRequirement
 from app.matching.scorer import ProfileNotReadyError, score_corpus
 from app.normalize.sync import sync_requirements
 from app.schemas.match import MatchCreate
@@ -166,6 +167,38 @@ async def test_a_requirement_read_from_the_text_says_so_on_the_stored_match(
     assert any("выведены из текста описания" in flag for flag in row.red_flags)
     # Not the flag it would have had before: it does have requirements now.
     assert not any("не указал ключевые навыки" in flag for flag in row.red_flags)
+
+
+async def test_the_unwritten_requirement_rule_reaches_the_stored_score(
+    db_session: AsyncSession,
+) -> None:
+    """Both rules stay measurable end to end, so the corpus can decide.
+
+    Three requirements read out of the text at 0.6, two held. The mean rule
+    weighs the unwritten one at 0.6 too: 1.2 / 2.4, "50.00". The flat rule
+    weighs it at 1.0: 1.2 / 2.8, "42.86". The outcome names the rule, because
+    bucket counts from two passes are meaningless without it.
+    """
+    await a_profile(db_session)
+    vacancy_id = await a_vacancy(
+        db_session,
+        "rule",
+        {"work_experience": "between1And3"},
+        description="Требования: Python, PostgreSQL, Kafka.",
+    )
+
+    flat = await score_corpus(db_session, unstated=UnstatedRequirement.FIXED)
+    row = await stored(db_session, vacancy_id)
+    assert row is not None
+    assert flat.unstated is UnstatedRequirement.FIXED
+    assert row.component_scores["skill_coverage_required"] == "42.86"
+
+    mean = await score_corpus(db_session)
+    db_session.expire_all()
+    row = await stored(db_session, vacancy_id)
+    assert row is not None
+    assert mean.unstated is UnstatedRequirement.MEAN_WEIGHT
+    assert row.component_scores["skill_coverage_required"] == "50.00"
 
 
 async def test_a_partly_inferred_requirement_list_says_how_much_of_it_is_inferred(

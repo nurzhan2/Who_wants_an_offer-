@@ -23,6 +23,7 @@ from types import ModuleType
 
 import pytest
 
+from app.matching.rules import UnstatedRequirement
 from app.matching.scorer import ScoringOutcome
 from app.normalize.description import skills_in_text
 from app.normalize.sync import SyncOutcome
@@ -109,6 +110,22 @@ def test_the_scoring_report_names_every_bucket_even_at_zero(
     printed = capsys.readouterr().out
     for _, label in matching.BUCKET_ORDER:
         assert label in printed
+
+
+@pytest.mark.parametrize("rule", list(UnstatedRequirement))
+def test_the_scoring_report_names_the_rule_for_the_unwritten_requirement(
+    rule: UnstatedRequirement, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two passes under different rules print the same shape of report.
+
+    Without the rule on the page, a reader comparing their bucket counts would
+    be comparing two numbers without knowing what separates them.
+    """
+    matching.show(ScoringOutcome(unstated=rule), None, dry_run=True)
+
+    printed = capsys.readouterr().out
+    assert rule.value in printed
+    printed.encode("cp1251")
 
 
 def test_the_backfill_report_renders_and_stays_inside_cp1251(

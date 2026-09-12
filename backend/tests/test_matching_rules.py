@@ -16,11 +16,13 @@ import pytest
 
 from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority
 from app.matching.rules import (
+    DEFAULT_UNSTATED,
     LANGUAGE_GAP_PENALTY,
     STRUCTURAL,
     UNSTATED_REQUIREMENT,
     WEIGHTS,
     ProfileFacts,
+    UnstatedRequirement,
     VacancyFacts,
     bucket_for,
     cefr_rank,
@@ -336,9 +338,14 @@ def test_coverage_is_weighted_and_lists_both_sides() -> None:
     """The explanation is the point: which are covered, which are not.
 
     **Before ``UNSTATED_REQUIREMENT``** one of two held was 0.5. The divisor
-    now carries one unwritten requirement in ``vacancy_skill.weight`` units, so
-    it is 1/3. The weighting itself is now asserted as well, which it was not:
-    the old case had equal weights and would have passed an unweighted mean.
+    now carries one unwritten requirement, so it is 1/3. The weighting itself
+    is now asserted as well, which it was not: the old case had equal weights
+    and would have passed an unweighted mean.
+
+    **Before ``UnstatedRequirement.MEAN_WEIGHT``** the mixed case below was
+    1 / (1.6 + 1.0). The unwritten requirement now weighs the mean of the two
+    written ones, 0.8, so it is 1 / 2.4; the flat rule is still pinned, because
+    it stays selectable for the measurement.
     """
     coverage, matched, missing = skill_coverage(
         {"python": Decimal("1"), "kafka": Decimal("1")}, {"python": "strong"}
@@ -350,31 +357,67 @@ def test_coverage_is_weighted_and_lists_both_sides() -> None:
 
     # A requirement read out of the description weighs 0.6, so missing it
     # costs less than missing one the employer named.
-    weighted, _, _ = skill_coverage(
-        {"python": Decimal("1"), "kafka": Decimal("0.6")}, {"python": "strong"}
-    )
-    assert weighted == Decimal("1") / Decimal("2.6")
+    mixed = {"python": Decimal("1"), "kafka": Decimal("0.6")}
+    weighted, _, _ = skill_coverage(mixed, {"python": "strong"})
+    assert weighted == Decimal("1") / Decimal("2.4")
+    flat, _, _ = skill_coverage(mixed, {"python": "strong"}, unstated=UnstatedRequirement.FIXED)
+    assert flat == Decimal("1") / Decimal("2.6")
 
 
-def test_a_list_read_entirely_from_the_text_is_now_worth_less_than_a_named_one() -> None:
-    """A consequence of ``UNSTATED_REQUIREMENT``, pinned so it cannot go unnoticed.
+def test_a_list_read_from_the_text_is_judged_by_the_same_rule_as_a_named_one() -> None:
+    """The unwritten requirement is as well evidenced as the written ones.
 
-    Before the allowance the 0.6 cancelled out of any list that was all text,
-    and one held requirement was 1.0 whichever field it came from. The
-    allowance is 1.0 in the same units, so it now outweighs a 0.6 list more
-    than a 1.0 one: one held text requirement is 0.375, one named is 0.5.
-    ``docs/MATCHING.md`` records this as a deliberate trade-off rather than as
-    the text-derived penalty it had argued against.
+    **What this asserted before, and why it changed.** Under a flat allowance
+    of 1.0 this test was called «…is now worth less than a named one» and
+    pinned one held text requirement at 0.375 against 0.5 for a named one: the
+    0.6 no longer cancelled, and a vacancy was judged more strictly for leaving
+    hh's optional key-skills field empty — the penalty ``docs/MATCHING.md``
+    argues against. The allowance now weighs the mean of the vacancy's own
+    requirements, so the two are equal again. The flat figure stays pinned
+    because the flat rule stays selectable, and the corpus decides between them.
     """
-    from_text, _, _ = skill_coverage(
-        {"python": Decimal("0.6")},
-        {"python": "strong"},
-        sources={"python": RequirementSource.DESCRIPTION_TEXT},
+    held = {"python": "strong"}
+    text = {"python": RequirementSource.DESCRIPTION_TEXT}
+    from_text, _, _ = skill_coverage({"python": Decimal("0.6")}, held, sources=text)
+    named, _, _ = skill_coverage({"python": Decimal("1")}, held)
+    flat, _, _ = skill_coverage(
+        {"python": Decimal("0.6")}, held, sources=text, unstated=UnstatedRequirement.FIXED
     )
-    named, _, _ = skill_coverage({"python": Decimal("1")}, {"python": "strong"})
 
-    assert from_text == Decimal("0.375")
-    assert named == Decimal("0.5")
+    assert DEFAULT_UNSTATED is UnstatedRequirement.MEAN_WEIGHT
+    assert from_text == named == Decimal("0.5")
+    assert flat == Decimal("0.375")
+
+
+def test_the_rule_reaches_the_score_and_only_moves_lists_with_text_in_them() -> None:
+    """Four held requirements at the corpus's mean similarity, 0.767.
+
+    Named in the employer's field, both rules give 85.43: the mean weight of a
+    named list is 1.0, which is the flat allowance. Read out of the text, the
+    mean rule gives the same 85.43 and ``apply_now``; the flat rule gives 81.31
+    and ``strong`` — the difference the measurement is there to size.
+    """
+    required, candidate = holding(4)
+    from_text = {name: Decimal("0.6") for name in required}
+    text = dict.fromkeys(required, RequirementSource.DESCRIPTION_TEXT)
+
+    def scored(weights: dict[str, Decimal], rule: UnstatedRequirement) -> Decimal:
+        return score_vacancy(
+            vacancy(
+                required_skills=weights,
+                requirement_sources=text if weights is from_text else {},
+                min_years=Decimal("7"),
+                similarity=Decimal("0.767"),
+                seniority=Seniority.SENIOR,
+            ),
+            candidate,
+            unstated=rule,
+        ).final_score
+
+    assert scored(required, UnstatedRequirement.MEAN_WEIGHT) == Decimal("85.43")
+    assert scored(required, UnstatedRequirement.FIXED) == Decimal("85.43")
+    assert scored(from_text, UnstatedRequirement.MEAN_WEIGHT) == Decimal("85.43")
+    assert scored(from_text, UnstatedRequirement.FIXED) == Decimal("81.31")
 
 
 def test_a_vacancy_that_lists_no_skills_is_not_a_vacancy_the_candidate_fails() -> None:
