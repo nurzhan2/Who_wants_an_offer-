@@ -100,6 +100,11 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     raw_text: Mapped[str | None] = mapped_column(Text)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
+    #: The headline alone, compared with each vacancy's title. Kept apart from
+    #: :attr:`embedding` for the reason ``0015_title_embedding`` gives: a title
+    #: compared with a paragraph is not the same measurement as a title
+    #: compared with a title.
+    headline_embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     # Extraction runs in the background; the client polls these.
@@ -417,6 +422,12 @@ class Vacancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: vector needs recomputing.
     embedding_text_hash: Mapped[str | None] = mapped_column(CHAR(64))
     embedded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The title alone. Matching's main signal since ``0015_title_embedding``:
+    #: dissolved into :attr:`embedding` it hardly moved a score. Out of
+    #: REFRESHABLE_COLUMNS for the same reason as the hash above.
+    title_embedding: Mapped[list[float] | None] = mapped_column(Vector(settings.embedding_dim))
+    #: sha256 of the exact title :attr:`title_embedding` was computed from.
+    title_embedding_hash: Mapped[str | None] = mapped_column(CHAR(64))
 
     # Full-text search column. The configuration is hardcoded to 'simple' on
     # purpose: postings mix Russian and English, and to_tsvector(regconfig, text)

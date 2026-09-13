@@ -11,6 +11,7 @@ Numbers quoted in the docstrings come from the live corpus of 643 vacancies.
 
 from dataclasses import replace
 from decimal import ROUND_HALF_UP, Decimal
+from functools import partial
 
 import pytest
 
@@ -21,6 +22,7 @@ from app.matching.rules import (
     STRUCTURAL,
     UNSTATED_REQUIREMENT,
     WEIGHTS,
+    Formula,
     ProfileFacts,
     UnstatedRequirement,
     VacancyFacts,
@@ -31,12 +33,18 @@ from app.matching.rules import (
     language_verdict,
     logistics_fit,
     normalise_similarity,
-    score_vacancy,
     skill_coverage,
 )
+from app.matching.rules import score_vacancy as score_on_any_formula
 from app.resume.skills import default_canonicalizer
 
 pytestmark = pytest.mark.unit
+
+#: Every score in this file is the six-component formula's. It stopped being
+#: the default on 13 Sep 2026 (see ``test_matching_title.py``) and stays
+#: selectable so before-and-after stays reproducible — which is exactly what
+#: pinning it here keeps true.
+score_vacancy = partial(score_on_any_formula, formula=Formula.COMPONENTS)
 
 #: The measured profile: senior backend, seven years, Almaty, ru native + en B2.
 CANDIDATE = ProfileFacts(

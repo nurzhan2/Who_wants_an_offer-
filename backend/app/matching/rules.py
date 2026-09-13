@@ -134,6 +134,46 @@ BUCKETS: Final[tuple[tuple[Decimal, MatchBucket], ...]] = (
     (Decimal("55"), MatchBucket.STRETCH),
 )
 
+
+class Formula(StrEnum):
+    """Which number a scoring pass computes.
+
+    Both stay selectable — ``scripts/run_matching.py --formula`` — so that a
+    before-and-after comparison stays reproducible on the same corpus.
+    """
+
+    #: The title against the profile's headline, then the description against
+    #: the profile. Skills, experience and logistics are still computed and
+    #: stored for the explanation, and do not move the number.
+    TITLE = "title"
+    #: The six weighted components of :data:`WEIGHTS`, renormalised.
+    COMPONENTS = "components"
+
+
+#: The formula a scoring pass uses unless told otherwise.
+DEFAULT_FORMULA: Final[Formula] = Formula.TITLE
+
+#: :attr:`Formula.TITLE`'s two signals. Fixed at 0.7 / 0.3 before the corpus
+#: was measured (13 Sep 2026) and not tuned after: the title is the main
+#: signal, the description the second one. Both are evidence in the sense of
+#: :data:`EVIDENCE` — a missing vector keeps its weight and scores zero.
+TITLE_WEIGHTS: Final[dict[str, Decimal]] = {
+    "title_similarity": Decimal("0.7"),
+    "semantic_similarity": Decimal("0.3"),
+}
+
+#: :attr:`Formula.TITLE`'s bucket floors, from the measured distribution rather
+#: than carried over from :data:`BUCKETS`. On the live corpus (1355 unfiltered
+#: vacancies, 13 Sep 2026) the score spans 64.45-86.87 with its quartiles at
+#: 70.74 / 72.48 / 74.99, so the old floors would call three vacancies in four
+#: a strong match. 75 is the upper quartile, 78 leaves 78 vacancies (about the
+#: top 6%), 80 leaves 24 (about the top 2%).
+TITLE_BUCKETS: Final[tuple[tuple[Decimal, MatchBucket], ...]] = (
+    (Decimal("80"), MatchBucket.APPLY_NOW),
+    (Decimal("78"), MatchBucket.STRONG),
+    (Decimal("75"), MatchBucket.STRETCH),
+)
+
 #: How well a claimed skill counts, by how well the candidate claims to know it.
 LEVEL_MULTIPLIER: Final[dict[str, Decimal]] = {
     SkillLevel.BASIC: Decimal("0.7"),
@@ -229,6 +269,8 @@ class VacancyFacts:
     #: Cosine similarity already normalised into 0..1, or None when either side
     #: has no vector.
     similarity: Decimal | None = None
+    #: The same, between this vacancy's title and the profile's headline.
+    title_similarity: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +311,8 @@ class Score:
     #: Why the vacancy was filtered, in Russian, or None if it was not.
     filtered_reason: str | None = None
     similarity: Decimal | None = None
+    title_similarity: Decimal | None = None
+    formula: Formula = DEFAULT_FORMULA
 
 
 def cefr_rank(level: str) -> int | None:
@@ -568,9 +612,19 @@ def score_vacancy(
     *,
     canonicalizer: SkillCanonicalizer | None = None,
     unstated: UnstatedRequirement = DEFAULT_UNSTATED,
+    formula: Formula = DEFAULT_FORMULA,
 ) -> Score:
-    """One vacancy against one profile: the number, and every reason for it."""
-    result = Score(similarity=vacancy.similarity)
+    """One vacancy against one profile: the number, and every reason for it.
+
+    Under either formula the hard filters decide the bucket first, and the
+    skill breakdown is computed and returned in full: the card, the ATS report
+    and the letter generator read it whichever number was computed.
+    """
+    result = Score(
+        similarity=vacancy.similarity,
+        title_similarity=vacancy.title_similarity,
+        formula=formula,
+    )
 
     reason, languages = hard_filters(vacancy, profile)
     result.red_flags.extend(languages.flags)
@@ -603,15 +657,28 @@ def score_vacancy(
         "logistics_fit": logistics_fit(vacancy, profile),
     }
 
-    result.rule_score = _weighted(measured)
-    result.counted = tuple(name for name, value in measured.items() if value is not None)
+    shown = {**measured, "title_similarity": vacancy.title_similarity}
     result.components = {
         name: (value * 100).quantize(CENTS, rounding=ROUND_HALF_UP)
-        for name, value in measured.items()
+        for name, value in shown.items()
         if value is not None
     }
 
-    result.penalties = _penalties(vacancy, profile, languages)
+    if formula is Formula.TITLE:
+        signals = {name: shown[name] for name in TITLE_WEIGHTS}
+        result.rule_score = _title_weighted(signals)
+        result.counted = tuple(name for name, value in signals.items() if value is not None)
+        # A filter answers "may I apply", a score "how well does it fit", and
+        # this formula keeps the two apart: what used to be subtracted is said
+        # on the card instead.
+        result.red_flags.extend(_soft_fail_flags(vacancy, profile))
+        floors = TITLE_BUCKETS
+    else:
+        result.rule_score = _weighted(measured)
+        result.counted = tuple(name for name, value in measured.items() if value is not None)
+        result.penalties = _penalties(vacancy, profile, languages)
+        floors = BUCKETS
+
     result.final_score = max(
         Decimal("0"), min(Decimal("100"), result.rule_score - result.penalties)
     ).quantize(CENTS, rounding=ROUND_HALF_UP)
@@ -621,8 +688,40 @@ def score_vacancy(
         result.filtered_reason = reason
         result.bucket = MatchBucket.FILTERED
     else:
-        result.bucket = bucket_for(result.final_score)
+        result.bucket = bucket_for(result.final_score, floors)
     return result
+
+
+def _soft_fail_flags(vacancy: VacancyFacts, profile: ProfileFacts) -> list[str]:
+    """The salary soft-fail as a flag, for the formula that does not subtract it.
+
+    The language gap needs nothing here: :func:`language_verdict` already flags
+    it under both formulas.
+    """
+    if (
+        vacancy.salary_min is not None
+        and profile.salary_min is not None
+        and vacancy.salary_min < profile.salary_min * SALARY_SHORTFALL
+    ):
+        return [
+            f"зарплата ниже минимума более чем на 30%: {vacancy.salary_min:g} "
+            f"при минимуме {profile.salary_min:g}"
+        ]
+    return []
+
+
+def _title_weighted(signals: Mapping[str, Decimal | None]) -> Decimal:
+    """:attr:`Formula.TITLE`'s number: both signals are evidence.
+
+    A missing vector keeps its weight in the divisor and scores zero, for the
+    reason :data:`EVIDENCE` gives: a vacancy nobody could compare must not
+    outrank one that was compared and fits.
+    """
+    earned = sum(
+        (TITLE_WEIGHTS[name] * value for name, value in signals.items() if value is not None),
+        Decimal("0"),
+    )
+    return earned / sum(TITLE_WEIGHTS.values(), Decimal("0")) * 100
 
 
 def _penalties(vacancy: VacancyFacts, profile: ProfileFacts, languages: LanguageVerdict) -> Decimal:
@@ -663,9 +762,11 @@ def _weighted(measured: Mapping[str, Decimal | None]) -> Decimal:
     return (earned / divisor) * 100
 
 
-def bucket_for(score: Decimal) -> MatchBucket:
-    """Which bucket a final score lands in."""
-    for floor, bucket in BUCKETS:
+def bucket_for(
+    score: Decimal, floors: Sequence[tuple[Decimal, MatchBucket]] = BUCKETS
+) -> MatchBucket:
+    """Which bucket a final score lands in, on the given formula's floors."""
+    for floor, bucket in floors:
         if score >= floor:
             return bucket
     return MatchBucket.SKIP

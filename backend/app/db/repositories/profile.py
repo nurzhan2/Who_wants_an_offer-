@@ -194,6 +194,15 @@ class ProfileRepository:
         )
         await self.session.execute(stmt)
 
+    async def set_headline_embedding(self, profile_id: UUID, embedding: Sequence[float]) -> None:
+        """Store the headline embedding, the profile's side of title similarity."""
+        stmt = (
+            sa_update(CandidateProfile)
+            .where(CandidateProfile.id == profile_id)
+            .values(headline_embedding=list(embedding), updated_at=func.now())
+        )
+        await self.session.execute(stmt)
+
     async def create_pending(
         self,
         *,

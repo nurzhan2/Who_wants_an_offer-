@@ -55,7 +55,7 @@ from app.db.session import session_factory
 from app.normalize.fingerprint import VERSION as FINGERPRINT_VERSION
 from app.normalize.fingerprint import fingerprint
 from app.normalize.sync import sync_requirements
-from app.pipeline.embedding import EmbeddingOutcome, embed_pending
+from app.pipeline.embedding import EmbeddingOutcome, embed_pending, embed_pending_titles
 from app.schemas.pipeline import PipelineRunCreate, PipelineRunFinish
 from app.schemas.profile import CandidateProfileRead
 from app.schemas.vacancy import VacancyCreate
@@ -152,6 +152,8 @@ class RunReport:
     plan: QueryPlan
     sources: list[SourceOutcome] = field(default_factory=list)
     embedding: EmbeddingOutcome | None = None
+    #: Title vectors, matching's main signal since ``0015_title_embedding``.
+    title_embedding: EmbeddingOutcome | None = None
     dry_run: bool = False
     started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     duration_seconds: float = 0.0
@@ -320,6 +322,8 @@ async def run_pipeline(
 
     async with sessions() as session:
         report.embedding = await embed_pending(session)
+        await session.commit()
+        report.title_embedding = await embed_pending_titles(session)
         await session.commit()
 
     report.duration_seconds = asyncio.get_running_loop().time() - started

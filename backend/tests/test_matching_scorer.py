@@ -22,7 +22,7 @@ from app.db.models import Match, ProfileSkill, VacancySkill
 from app.db.repositories.match import MatchRepository
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.vacancy import VacancyRepository
-from app.matching.rules import UnstatedRequirement
+from app.matching.rules import Formula, UnstatedRequirement
 from app.matching.scorer import ProfileNotReadyError, score_corpus
 from app.normalize.sync import sync_requirements
 from app.schemas.match import MatchCreate
@@ -110,11 +110,15 @@ async def test_a_vacancy_without_an_embedding_says_so_rather_than_scoring_zero(
     Nothing in this test embeds anything, so every vacancy here is in the state
     128 of the corpus's 643 rows are in. The score has to come from the skills,
     and the card has to say which half of the formula it is missing.
+
+    Pinned to the component formula, the only one where skills move the score.
+    Under the title formula a vacancy with neither vector honestly scores zero
+    and says why on the card (``test_matching_title_db.py``).
     """
     await a_profile(db_session)
     vacancy_id = await a_vacancy(db_session, "no-vector", {"key_skills": ["Python"]})
 
-    await score_corpus(db_session)
+    await score_corpus(db_session, formula=Formula.COMPONENTS)
 
     row = await stored(db_session, vacancy_id)
     assert row is not None

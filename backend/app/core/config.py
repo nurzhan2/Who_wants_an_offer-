@@ -333,8 +333,11 @@ class Settings(BaseSettings):
     #: keeping per-source knowledge out of the framework.
     agent_source_slug: str = "hh"
     #: Floor on the match score before a vacancy is worth a slot out of the
-    #: agent's deliberately small daily budget.
-    agent_queue_min_score: Annotated[int, Field(ge=0, le=100)] = 70
+    #: agent's deliberately small daily budget. The floor of ``strong`` on the
+    #: title formula (``rules.TITLE_BUCKETS``), as 70 was on the component one:
+    #: on the corpus measured 13 Sep 2026, 70 lets 1129 of 1355 unfiltered
+    #: vacancies through under the title formula and 78 lets 78.
+    agent_queue_min_score: Annotated[int, Field(ge=0, le=100)] = 78
 
     @field_validator("*", mode="before")
     @classmethod

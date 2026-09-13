@@ -173,6 +173,30 @@ def _needs_embedding() -> ColumnElement[bool]:
     )
 
 
+def _needs_title_embedding() -> ColumnElement[bool]:
+    """Rows whose title vector is missing, or was computed from another title.
+
+    Exact in SQL, unlike :func:`_needs_embedding`: a title is short enough to
+    hash in the database, so no row that is already current is ever offered and
+    the selection cannot be starved by re-crawl churn. The hash is over the
+    stored title byte for byte, the same text the vector is computed from.
+    """
+    return or_(
+        Vacancy.title_embedding.is_(None),
+        Vacancy.title_embedding_hash.is_(None),
+        Vacancy.title_embedding_hash
+        != func.encode(func.sha256(func.convert_to(Vacancy.title, "UTF8")), "hex"),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class TitleCandidate:
+    """A row whose title needs a vector."""
+
+    id: UUID
+    title: str
+
+
 class VacancyRepository:
     """All vacancy reads and writes."""
 
@@ -400,6 +424,48 @@ class VacancyRepository:
                     "vector": list(item.vector),
                     "text_hash": item.text_hash,
                 }
+                for item in items
+            ],
+        )
+        await self.session.flush()
+        return len(items)
+
+    async def needs_title_embedding(self, *, limit: int) -> list[TitleCandidate]:
+        """Rows whose title vector is missing or stale, still-advertised first."""
+        stmt = (
+            select(Vacancy.id, Vacancy.title)
+            .where(_needs_title_embedding())
+            .order_by(Vacancy.last_seen_at.desc(), Vacancy.id)
+            .limit(limit)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return [TitleCandidate(id=row.id, title=row.title) for row in rows]
+
+    async def count_needing_title_embedding(self) -> int:
+        """How many rows :meth:`needs_title_embedding` would offer with no limit."""
+        stmt = select(func.count()).select_from(Vacancy).where(_needs_title_embedding())
+        return int((await self.session.execute(stmt)).scalar_one())
+
+    async def set_title_embeddings(self, items: Sequence[EmbeddedVacancy]) -> int:
+        """Write a batch of title vectors with the hash of the title behind each.
+
+        Against the Table for the reason :meth:`set_embeddings` gives.
+        """
+        if not items:
+            return 0
+        table = cast("Table", Vacancy.__table__)
+        stmt = (
+            sa_update(table)
+            .where(table.c.id == bindparam("row_id"))
+            .values(
+                title_embedding=bindparam("vector"),
+                title_embedding_hash=bindparam("text_hash"),
+            )
+        )
+        await self.session.execute(
+            stmt,
+            [
+                {"row_id": item.id, "vector": list(item.vector), "text_hash": item.text_hash}
                 for item in items
             ],
         )

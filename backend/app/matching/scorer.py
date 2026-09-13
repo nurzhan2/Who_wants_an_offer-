@@ -31,7 +31,9 @@ from app.db.enums import MatchBucket, RemoteType, RequirementSource, Seniority
 from app.db.models import CandidateProfile, ProfileSkill, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.match import MatchRepository
 from app.matching.rules import (
+    DEFAULT_FORMULA,
     DEFAULT_UNSTATED,
+    Formula,
     ProfileFacts,
     Score,
     SkillMatch,
@@ -71,21 +73,26 @@ class ScoringOutcome:
     skipped_seeds: int = 0
     filtered: int = 0
     without_embedding: int = 0
+    without_title_embedding: int = 0
     without_skills: int = 0
     buckets: dict[str, int] = field(default_factory=dict)
     #: Which rule weighed the unwritten requirement. Carried with the counts
     #: because two passes are only comparable when this is known.
     unstated: UnstatedRequirement = DEFAULT_UNSTATED
+    #: Which number was computed, for the same reason.
+    formula: Formula = DEFAULT_FORMULA
 
     def as_dict(self) -> dict[str, Any]:
         """The counters, for logging."""
         return {
+            "formula": str(self.formula),
             "unstated": str(self.unstated),
             "considered": self.considered,
             "written": self.written,
             "skipped_seeds": self.skipped_seeds,
             "filtered": self.filtered,
             "without_embedding": self.without_embedding,
+            "without_title_embedding": self.without_title_embedding,
             "without_skills": self.without_skills,
         }
 
@@ -106,11 +113,12 @@ async def score_corpus(
     profile_id: UUID | None = None,
     limit: int | None = None,
     unstated: UnstatedRequirement = DEFAULT_UNSTATED,
+    formula: Formula = DEFAULT_FORMULA,
 ) -> ScoringOutcome:
     """Score every vacancy against the active profile and store the reasons."""
     profile = await _profile(session, profile_id)
     facts = await _profile_facts(session, profile)
-    outcome = ScoringOutcome(unstated=unstated)
+    outcome = ScoringOutcome(unstated=unstated, formula=formula)
 
     ids = await _vacancy_ids(session, limit=limit)
     canonicalizer = default_canonicalizer()
@@ -124,9 +132,13 @@ async def score_corpus(
                 continue
             if row.facts.similarity is None:
                 outcome.without_embedding += 1
+            if row.facts.title_similarity is None:
+                outcome.without_title_embedding += 1
             if not row.facts.required_skills:
                 outcome.without_skills += 1
-            score = score_vacancy(row.facts, facts, canonicalizer=canonicalizer, unstated=unstated)
+            score = score_vacancy(
+                row.facts, facts, canonicalizer=canonicalizer, unstated=unstated, formula=formula
+            )
             outcome.buckets[score.bucket] = outcome.buckets.get(score.bucket, 0) + 1
             if score.bucket == MatchBucket.FILTERED:
                 outcome.filtered += 1
@@ -223,6 +235,8 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
 
     vector = select(CandidateProfile.embedding).where(CandidateProfile.id == profile_id)
     distance = Vacancy.embedding.cosine_distance(vector.scalar_subquery())
+    headline = select(CandidateProfile.headline_embedding).where(CandidateProfile.id == profile_id)
+    title_distance = Vacancy.title_embedding.cosine_distance(headline.scalar_subquery())
     rows = (
         await session.execute(
             select(
@@ -234,6 +248,7 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
                 Vacancy.salary_min_normalized,
                 Vacancy.employment_type,
                 distance.label("distance"),
+                title_distance.label("title_distance"),
             ).where(Vacancy.id.in_(ids))
         )
     ).all()
@@ -264,6 +279,11 @@ async def _facts_for(session: AsyncSession, ids: Sequence[UUID], profile_id: UUI
                     similarity=(
                         normalise_similarity(1 - float(row.distance))
                         if row.distance is not None
+                        else None
+                    ),
+                    title_similarity=(
+                        normalise_similarity(1 - float(row.title_distance))
+                        if row.title_distance is not None
                         else None
                     ),
                 ),
@@ -363,6 +383,8 @@ def _flags(score: Score) -> list[str]:
     flags = list(score.red_flags)
     if score.similarity is None:
         flags.append("семантика не посчитана: у вакансии нет эмбеддинга")
+    if score.formula is Formula.TITLE and score.title_similarity is None:
+        flags.append("название не сравнено: нет вектора названия вакансии или заголовка профиля")
     requirements = [*score.matched, *score.missing]
     if not requirements:
         flags.append("работодатель не указал ключевые навыки")
@@ -408,6 +430,7 @@ def _verdict(score: Score) -> str | None:
 
 #: Russian names for the components, for the one-line verdict.
 COMPONENT_NAMES: dict[str, str] = {
+    "title_similarity": "названию",
     "skill_coverage_required": "навыкам",
     "skill_coverage_nice": "желательным навыкам",
     "semantic_similarity": "семантике",

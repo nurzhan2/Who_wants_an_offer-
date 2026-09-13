@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.core.config import settings
 from app.core.logging import configure_logging
 from app.db.session import session_factory
-from app.pipeline.embedding import EmbeddingOutcome, embed_pending
+from app.pipeline.embedding import EmbeddingOutcome, embed_pending, embed_pending_titles
 
 RULE = "-" * 72
 
@@ -151,11 +151,35 @@ async def drain(args: argparse.Namespace, *, run_pass: PassRunner = one_pass) ->
     return 0
 
 
+async def titles(args: argparse.Namespace) -> EmbeddingOutcome:
+    """One pass over title vectors, in a session of its own.
+
+    Titles are embedded apart from descriptions since ``0015_title_embedding``
+    and are matching's main signal. They run after the descriptions, and cost a
+    fraction of them: a title is a few words, a description thousands.
+    """
+    async with session_factory() as session:
+        return await embed_pending_titles(session, limit=args.max, time_budget=args.seconds)
+
+
 async def main() -> int:
-    """Drain, or try to."""
+    """Drain, or try to, then do the same for titles."""
     args = parse_args()
     configure_logging()
-    return await drain(args)
+    code = await drain(args)
+    if code != 0:
+        return code
+    outcome = await titles(args)
+    print()
+    print(RULE)
+    print("НАЗВАНИЯ")
+    print(RULE)
+    print(f"  посчитано        {outcome.embedded}")
+    print(f"  осталось         {outcome.backlog}")
+    print(f"  остановлено      {STOPPED.get(outcome.stopped, outcome.stopped)}")
+    if outcome.skipped_reason:
+        print(f"  причина          {outcome.skipped_reason}")
+    return 1 if outcome.stopped == "unavailable" else 0
 
 
 if __name__ == "__main__":

@@ -232,6 +232,70 @@ async def embed_pending(
             return await _finish(vacancies, progress, "budget")
 
 
+async def embed_pending_titles(
+    session: AsyncSession,
+    *,
+    limit: int | None = None,
+    time_budget: float | None = None,
+    clock: Clock = time.monotonic,
+) -> EmbeddingOutcome:
+    """Vectors for titles, the same way :func:`embed_pending` does descriptions.
+
+    Simpler than its sibling in one respect: the selection is exact
+    (``_needs_title_embedding`` hashes the title in SQL), so a row leaves it the
+    moment its vector is written and a window never holds rows with nothing to
+    do. Committed batch by batch for the reason the module docstring gives.
+    The text embedded is the stored title exactly, because that is what the
+    selection hashes.
+    """
+    vacancies = VacancyRepository(session)
+    max_vectors = settings.embedding_max_per_run if limit is None else limit
+    seconds = settings.embedding_time_budget_seconds if time_budget is None else time_budget
+    deadline = clock() + seconds
+    progress = _Progress()
+
+    while True:
+        if progress.embedded >= max_vectors or clock() >= deadline:
+            return await _finish_titles(vacancies, progress, "budget")
+        size = min(settings.embedding_batch_size, max_vectors - progress.embedded)
+        batch = await vacancies.needs_title_embedding(limit=size)
+        if not batch:
+            return await _finish_titles(vacancies, progress, "drained")
+        progress.considered += len(batch)
+        try:
+            vectors = await encode_texts([item.title for item in batch])
+        except EmbeddingError as exc:
+            logger.warning("pipeline.title_embedding.unavailable", error=str(exc))
+            return await _finish_titles(vacancies, progress, "unavailable", skipped_reason=str(exc))
+        progress.embedded += await vacancies.set_title_embeddings(
+            [
+                EmbeddedVacancy(id=item.id, vector=vector, text_hash=text_hash(item.title))
+                for item, vector in zip(batch, vectors, strict=True)
+            ]
+        )
+        await session.commit()
+        progress.batches += 1
+        logger.info(
+            "pipeline.title_embedding.batch", embedded=progress.embedded, batches=progress.batches
+        )
+
+
+async def _finish_titles(
+    vacancies: VacancyRepository,
+    progress: _Progress,
+    reason: StopReason,
+    *,
+    skipped_reason: str | None = None,
+) -> EmbeddingOutcome:
+    """End a title pass with the counted remainder, which is exact here."""
+    return _stop(
+        progress,
+        reason,
+        backlog=await vacancies.count_needing_title_embedding(),
+        skipped_reason=skipped_reason,
+    )
+
+
 def _changed(candidates: Sequence[EmbeddingCandidate], progress: _Progress) -> list[_Pending]:
     """Split a window into the rows whose text actually moved, counting the rest."""
     pending: list[_Pending] = []

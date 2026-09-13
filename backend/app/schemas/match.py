@@ -16,11 +16,15 @@ Score = Annotated[Decimal, Field(ge=0, le=100, decimal_places=2)]
 class MatchComponentScores(BaseModel):
     """Per-component breakdown behind the final score.
 
-    All six are on the 0-100 scale, even though docs/MATCHING.md defines them
-    as 0..1 fractions — the conversion happens on write so nothing downstream
-    has to remember which column uses which scale. Weights live in config.
+    All are on the 0-100 scale, even though docs/MATCHING.md defines them as
+    0..1 fractions — the conversion happens on write so nothing downstream has
+    to remember which column uses which scale. Which of them moved the score
+    depends on the formula, and the stored verdict names them.
     """
 
+    #: Title against headline. Defaulted so that every match stored before
+    #: ``0015_title_embedding`` keeps validating.
+    title_similarity: Score = Decimal("0.00")
     skill_coverage_required: Score = Decimal("0.00")
     skill_coverage_nice: Score = Decimal("0.00")
     semantic_similarity: Score = Decimal("0.00")
