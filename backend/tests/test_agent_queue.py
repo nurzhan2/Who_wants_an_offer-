@@ -646,6 +646,41 @@ async def test_a_score_below_the_floor_is_not_worth_a_slot(
 
 
 @pytest.mark.db
+async def test_a_filtered_vacancy_is_never_offered_whatever_its_score(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """``filtered`` means "do not apply", and the queue is where applying starts.
+
+    Measured 13 Sep 2026: three filtered vacancies — six years asked of 1.1,
+    and English twice — sat in the ready-to-apply list with letters, above the
+    floor. This one scores 99, has a letter, and is asked for with the floor
+    at zero and without requiring a letter. It is still not served.
+    """
+    profile = await profiles.create(make_profile())
+    vacancy_id = await _posting(vacancies, seed="queue-filtered", external_id=HH_ID, url=HH_URL)
+    await matches.bulk_upsert(
+        [make_match(profile.id, vacancy_id, Decimal("99"), bucket=MatchBucket.FILTERED)]
+    )
+    _letter(db_session, vacancy_id)
+    await db_session.flush()
+
+    default = await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)
+    widest = await agent_queue.build_queue(
+        db_session,
+        limit=10,
+        profile_id=profile.id,
+        min_score=Decimal("0"),
+        require_letter=False,
+    )
+
+    assert default.items == []
+    assert widest.items == []
+
+
+@pytest.mark.db
 async def test_the_same_result_posted_twice_leaves_one_row(
     db_session: AsyncSession, vacancies: VacancyRepository
 ) -> None:

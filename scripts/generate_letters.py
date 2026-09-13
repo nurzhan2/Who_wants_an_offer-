@@ -98,7 +98,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", help="profile id; defaults to the active profile")
     parser.add_argument("--limit", type=int, default=5, help="how many vacancies from the queue")
     parser.add_argument(
-        "--min-score", type=Decimal, default=Decimal("70"), help="lowest match score to write for"
+        "--min-score",
+        type=Decimal,
+        default=None,
+        help=(
+            "lowest match score to write for (default: AGENT_QUEUE_MIN_SCORE); "
+            "a filtered vacancy is never written for, whatever its score"
+        ),
     )
     parser.add_argument("--force", action="store_true", help="rewrite a letter that already exists")
     parser.add_argument(

@@ -362,6 +362,11 @@ def _queue_statement(
         )
         .where(Match.profile_id == profile_id)
         .where(Match.score >= min_score)
+        # ``filtered`` is "do not apply", not a low score: a vacancy asking six
+        # years of a candidate with 1.1, or a language they do not speak, keeps
+        # a high similarity and must still never reach the agent. Measured 13
+        # Sep 2026: three such vacancies sat in the ready list above the floor.
+        .where(Match.bucket != MatchBucket.FILTERED)
         .where(Vacancy.is_spam.is_(False))
         .where(~VacancySource.external_id.like(f"%{SEED_ID_MARKER}%"))
         .where(~acted_on)

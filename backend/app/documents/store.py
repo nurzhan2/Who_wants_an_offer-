@@ -29,7 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.base import uuid7
-from app.db.enums import DocumentKind, DocumentSource
+from app.db.enums import DocumentKind, DocumentSource, MatchBucket
 from app.db.models import (
     CandidateProfile,
     GeneratedDocument,
@@ -361,6 +361,9 @@ async def candidates(
             .join(Vacancy, Vacancy.id == Match.vacancy_id)
             .where(Match.profile_id == profile_id)
             .where(Match.score >= min_score)
+            # A filtered vacancy is "do not apply"; a CV or a letter for it is
+            # a model call spent on an application that must not go out.
+            .where(Match.bucket != MatchBucket.FILTERED)
             .where(Vacancy.is_active.is_(True))
             .where(Vacancy.is_spam.is_(False))
             .order_by(Match.score.desc(), Match.vacancy_id)

@@ -355,14 +355,15 @@ async def read_documents(
 async def read_queue(
     session: Annotated[AsyncSession, Depends(get_session)],
     limit: Annotated[int, Query(ge=1, le=100)] = workshop_service.DEFAULT_QUEUE_LIMIT,
-    min_score: Annotated[Decimal, Query(ge=0, le=100)] = workshop_service.DEFAULT_MIN_SCORE,
+    min_score: Annotated[Decimal | None, Query(ge=0, le=100)] = workshop_service.DEFAULT_MIN_SCORE,
 ) -> list[QueuedLetter]:
     """What the workshop offers to write next.
 
     Includes vacancies whose letter is already written, flagged as such: the
     batch writer skips those so a repeated run costs nothing, but a person
     looking at a queue needs to see that one is done rather than wonder where it
-    went.
+    went. Never includes a filtered vacancy, whatever its score, and without
+    ``min_score`` starts at ``agent_queue_min_score``.
     """
     return await workshop_service.queue(session, limit=limit, min_score=min_score)
 

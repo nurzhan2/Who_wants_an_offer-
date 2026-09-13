@@ -20,9 +20,10 @@ from uuid import UUID
 from sqlalchemy import Select, func, nulls_last, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import uuid7
-from app.db.enums import ApplicationStatus, RequirementSource
+from app.db.enums import ApplicationStatus, MatchBucket, RequirementSource
 from app.db.models import (
     Application,
     CandidateProfile,
@@ -145,7 +146,7 @@ async def queue(
     *,
     profile_id: UUID,
     limit: int = 10,
-    min_score: Decimal = Decimal("70"),
+    min_score: Decimal | None = None,
     include_written: bool = False,
 ) -> list[QueuedVacancy]:
     """The best-scoring vacancies that still need a letter, best first.
@@ -154,7 +155,19 @@ async def queue(
     already written is skipped rather than rewritten, so a batch run is safe to
     repeat — the same idempotence rule the connectors follow, for the same
     reason: the expensive call is the one worth not making twice.
+
+    **A filtered vacancy is never queued, whatever its score.** ``filtered``
+    means "do not apply" — a language the candidate does not speak, six years
+    asked of 1.1 — and a letter for it spends a model call on an application
+    that must not go out. Measured 13 Sep 2026: selecting by score alone wrote
+    letters for «.NET Backend Developer» (82.03, filtered on experience) and two
+    vacancies filtered on English, ahead of apply_now vacancies with none.
+
+    ``min_score`` defaults to ``agent_queue_min_score``, the floor the agent
+    queue serves from: a letter below it is written for a vacancy the queue will
+    never offer.
     """
+    threshold = min_score if min_score is not None else Decimal(settings.agent_queue_min_score)
     written = (
         select(Application.vacancy_id)
         .where(Application.cover_letter.is_not(None))
@@ -170,7 +183,8 @@ async def queue(
         )
         .join(Vacancy, Vacancy.id == Match.vacancy_id)
         .where(Match.profile_id == profile_id)
-        .where(Match.score >= min_score)
+        .where(Match.score >= threshold)
+        .where(Match.bucket != MatchBucket.FILTERED)
         .where(Vacancy.is_active.is_(True))
         .where(Vacancy.is_spam.is_(False))
         .order_by(Match.score.desc(), Match.vacancy_id)

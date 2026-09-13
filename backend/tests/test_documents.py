@@ -51,6 +51,7 @@ from app.db.base import uuid7
 from app.db.enums import (
     DocumentKind,
     DocumentSource,
+    MatchBucket,
     RuleKind,
     RuleScope,
     RuleSeverity,
@@ -1487,6 +1488,23 @@ async def test_the_candidates_list_carries_what_the_employer_published(
     assert found[0].employer.accredited_it_employer
     assert found[0].cv_versions == 0
     assert found[0].letter_versions == 0
+
+
+async def test_a_filtered_vacancy_is_not_a_candidate_for_documents_whatever_its_score(
+    db_session: AsyncSession,
+    profiles: ProfileRepository,
+    vacancies: VacancyRepository,
+    matches: MatchRepository,
+) -> None:
+    """A CV or a letter for a "do not apply" vacancy is a model call spent on nothing."""
+    profile_id = await make_profile(profiles)
+    vacancy_id = await make_stored_vacancy(vacancies, db_session, raw={"_derived": {}})
+    await matches.bulk_upsert(
+        [make_match(profile_id, vacancy_id, Decimal("99"), bucket=MatchBucket.FILTERED)]
+    )
+    await db_session.flush()
+
+    assert await document_store.candidates(db_session, profile_id=profile_id) == []
 
 
 # ── the other button ──────────────────────────────────────────────────

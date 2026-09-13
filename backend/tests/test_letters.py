@@ -54,9 +54,10 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import LLMError
 from app.db.base import uuid7
-from app.db.enums import ApplicationStatus, RuleScope
+from app.db.enums import ApplicationStatus, MatchBucket, RuleScope
 from app.db.models import Application, VacancySkill
 from app.db.repositories import MatchRepository, ProfileRepository, VacancyRepository
 from app.documents.rules import version as _rules_version
@@ -939,7 +940,8 @@ async def test_the_queue_is_best_first_and_skips_what_is_already_written(
     await matches.bulk_upsert(
         [
             make_match(profile.id, best.vacancy_id, Decimal("92")),
-            make_match(profile.id, rest.vacancy_id, Decimal("74")),
+            # Above the default floor, ``agent_queue_min_score`` (78).
+            make_match(profile.id, rest.vacancy_id, Decimal("79")),
         ]
     )
 
@@ -957,6 +959,73 @@ async def test_the_queue_is_best_first_and_skips_what_is_already_written(
     assert [item.vacancy_id for item in queued] == [best.vacancy_id, rest.vacancy_id]
     assert [item.vacancy_id for item in after] == [rest.vacancy_id]
     assert len(forced) == 2
+
+
+@pytest.mark.db
+async def test_a_filtered_vacancy_never_gets_a_letter_whatever_its_score(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """``filtered`` is "do not apply", and a letter for it is the first step of applying.
+
+    Measured 13 Sep 2026: ordering by score alone wrote letters for «.NET
+    Backend Developer» (82.03, six years asked of 1.1) and two vacancies that
+    require English, ahead of apply_now vacancies that had none. The filtered
+    one here outscores everything, is asked for with the lowest possible floor
+    and with ``include_written``, and is still not queued.
+    """
+    profile = await profiles.create(make_profile())
+    refused = await vacancies.upsert_by_external_id(
+        make_vacancy("letters-filtered"),
+        source_slug="hh",
+        external_id="hh-f",
+        url="https://e.test/f",
+    )
+    allowed = await vacancies.upsert_by_external_id(
+        make_vacancy("letters-allowed"),
+        source_slug="hh",
+        external_id="hh-a",
+        url="https://e.test/a",
+    )
+    await matches.bulk_upsert(
+        [
+            make_match(profile.id, refused.vacancy_id, Decimal("99"), bucket=MatchBucket.FILTERED),
+            make_match(profile.id, allowed.vacancy_id, Decimal("80")),
+        ]
+    )
+
+    default = await store.queue(db_session, profile_id=profile.id, limit=10)
+    widest = await store.queue(
+        db_session, profile_id=profile.id, limit=10, min_score=Decimal("0"), include_written=True
+    )
+
+    assert [item.vacancy_id for item in default] == [allowed.vacancy_id]
+    assert [item.vacancy_id for item in widest] == [allowed.vacancy_id]
+
+
+@pytest.mark.db
+async def test_the_letter_queue_starts_at_the_agent_queue_floor(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """A letter below ``agent_queue_min_score`` is for a vacancy the queue will never offer.
+
+    The default used to be a hard-coded 70, which on the title formula's scale
+    is the skip bucket.
+    """
+    profile = await profiles.create(make_profile())
+    below = await vacancies.upsert_by_external_id(
+        make_vacancy("letters-below"), source_slug="hh", external_id="hh-l", url="https://e.test/l"
+    )
+    floor = Decimal(settings.agent_queue_min_score)
+    await matches.bulk_upsert([make_match(profile.id, below.vacancy_id, floor - Decimal("0.01"))])
+
+    assert await store.queue(db_session, profile_id=profile.id, limit=10) == []
+    assert len(await store.queue(db_session, profile_id=profile.id, min_score=floor - 1)) == 1
 
 
 @pytest.mark.db

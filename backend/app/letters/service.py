@@ -331,7 +331,7 @@ async def write_batch(
     *,
     profile_id: UUID | None = None,
     limit: int = 10,
-    min_score: Decimal = Decimal("70"),
+    min_score: Decimal | None = None,
     router: LLMRouter | None = None,
     force: bool = False,
     dry_run: bool = False,

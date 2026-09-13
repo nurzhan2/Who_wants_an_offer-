@@ -34,11 +34,13 @@ from app.schemas.dashboard import LetterProblemRead, QueuedLetter, WorkshopResul
 
 logger = get_logger(__name__)
 
-#: Default floor for the queue of vacancies worth a letter. The same number
-#: ``app/letters/service.write_batch`` uses, because a screen that offered
+#: Default floor for the queue of vacancies worth a letter: None, which
+#: ``app/letters/store.queue`` reads as ``agent_queue_min_score`` — the same
+#: floor ``app/letters/service.write_batch`` uses, because a screen that offered
 #: letters for vacancies the batch would not write is a screen that disagrees
-#: with the tool it is a front end for.
-DEFAULT_MIN_SCORE = Decimal("70")
+#: with the tool it is a front end for. A hard-coded 70 was the skip bucket on
+#: the title formula's scale.
+DEFAULT_MIN_SCORE: Decimal | None = None
 
 #: How many vacancies the queue panel shows at once.
 DEFAULT_QUEUE_LIMIT = 20
@@ -53,7 +55,7 @@ async def queue(
     session: AsyncSession,
     *,
     limit: int = DEFAULT_QUEUE_LIMIT,
-    min_score: Decimal = DEFAULT_MIN_SCORE,
+    min_score: Decimal | None = DEFAULT_MIN_SCORE,
     include_written: bool = True,
 ) -> list[QueuedLetter]:
     """The best-scoring vacancies for the active profile, letter or not.
