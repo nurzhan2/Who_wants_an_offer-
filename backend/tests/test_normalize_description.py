@@ -20,11 +20,12 @@ import pytest
 
 from app.normalize.description import (
     KNOWN_AMBIGUOUS,
+    NEEDS_COMPANY,
     NOT_SEARCHED_IN_TEXT,
     UPPERCASE_ONLY,
     skills_in_text,
 )
-from app.resume.skills import known_spellings
+from app.resume.skills import default_canonicalizer, known_spellings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "sources"
 
@@ -162,21 +163,104 @@ def test_go_is_not_found_inside_another_word(text: str) -> None:
 @pytest.mark.parametrize(
     ("text", "found"),
     [
-        ("Опыт разработки на Go от двух лет", True),
-        ("Ready to go, join us", False),
-        ("Знание C и ассемблера", True),
-        ("Пункт c) договора", False),
+        ("Опыт разработки на Go и Python от двух лет", True),
+        ("Ready to go, join us — Python welcome", False),
+        ("Знание C и C++", True),
+        ("Пункт c) договора о Python", False),
     ],
 )
 def test_a_two_letter_name_has_to_be_written_as_a_name(text: str, found: bool) -> None:
-    """Case is the only thing left once boundaries have done their work.
+    """Case is the first thing checked once boundaries have done their work.
 
     A technology is a proper name and is written with a capital letter; the
     English and Russian words that collide with these spellings are not. The
     error this admits is a missed lowercase «go», which costs coverage — the
     direction the brief asks to err in.
+
+    **What this asserted before, and why it changed.** «Опыт разработки на Go
+    от двух лет» and «Знание C и ассемблера» were expected to yield the
+    language. Case was then the whole guard for these two names, and the live
+    corpus showed it is not enough: «C-level», «C&B», «Go-Live», «TO GO» are all
+    capitalised. «Go» and «C» now also need another skill in the sentence (see
+    the corpus tests below), so each positive case here names one, and each
+    negative case names one too — so that it is still case, and not the new
+    rule, that turns it down.
     """
     assert ("go" in skills_in_text(text).required or "c" in skills_in_text(text).required) is found
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # Every line is from the live corpus of 13 Sep 2026, shortened. All are
+        # capitalised, so case alone let every one of them through.
+        "Кофейня формата TO GO",
+        "Участвовать в развитии системы грейдирования совместно с C&B",
+        "Права категории B, C",
+        "Поддержка на этапе Go-Live и в постпроектный период",
+        "Ability to communicate with C-level and deeply technical stakeholders",
+        "We recently closed a Series C equity round",
+        "Знание английского языка на уровне C 1",
+        "Курьер в сервисе еда Yandex Go — гибкий график",
+        "Acting as a Business, Digital, and Go-To-Market expert",
+    ],
+)
+def test_c_or_go_standing_alone_in_a_sentence_is_not_the_language(text: str) -> None:
+    """The measured false positives, and what they have in common.
+
+    Over 1958 live descriptions «C» was a letter of something else in 22
+    vacancies and «Go» in 18 — a barista, a courier, HR, SAP consultants. None
+    of those sentences named any other skill, and every real «C» in the corpus
+    stood beside another language.
+    """
+    found = skills_in_text(text)
+    assert "c" not in found.names
+    assert "go" not in found.names
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Уверенное владение языками программирования C/C++", "c"),
+        ("Proficiency in Go, Python, and JavaScript.", "go"),
+        ("Опыт разработки на одном из языков: Java / Python / Go / PHP", "go"),
+        # Spelled out in the same sentence, so the short spelling needs no company.
+        ("Знание Go (Golang) для задач автоматизации.", "go"),
+        ("Golang-разработчик", "go"),
+    ],
+)
+def test_c_or_go_beside_another_skill_is_still_the_language(text: str, expected: str) -> None:
+    """What the rule keeps: 13 of 14 real «C» and all but two real «Go»."""
+    assert expected in skills_in_text(text).names
+
+
+def test_what_the_company_rule_costs_is_on_the_record() -> None:
+    """Two real mentions from the corpus that the rule loses, asserted as lost.
+
+    Both name the language and nothing else in the sentence, which is exactly
+    what the false positives look like. Kept here so that the price is a
+    decision somebody can read rather than a gap somebody finds.
+    """
+    assert "go" not in skills_in_text("Strong Go, or a path to it.").names
+    assert "c" not in skills_in_text("Базовое понимание языка C — значительный плюс").names
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Strong knowledge of C# and the .NET platform", "c#"),
+        ("Collaborate with ML engineers and product managers", "machine learning"),
+        ("Опыт работы с системами хранения данных (S3-совместимые решения)", "s3"),
+    ],
+)
+def test_other_short_names_still_stand_alone(text: str, expected: str) -> None:
+    """Why the rule is a list of two names and not a length.
+
+    The same rule over every two-character spelling was measured as well: it
+    removed C# from 7 vacancies, ML from 38 and S3 from 7, and every one it
+    removed was real. These three lines are from those vacancies.
+    """
+    assert expected in skills_in_text(text).names
 
 
 def test_rest_the_architecture_is_not_rest_the_remainder() -> None:
@@ -232,6 +316,8 @@ def test_every_denied_spelling_is_one_the_dictionary_actually_has() -> None:
     assert spellings >= NOT_SEARCHED_IN_TEXT
     assert spellings >= UPPERCASE_ONLY
     assert spellings >= KNOWN_AMBIGUOUS
+    resolver = default_canonicalizer()
+    assert {resolver.canonicalize(name) for name in NEEDS_COMPANY} == NEEDS_COMPANY
 
 
 # ── what the sentence around it says ─────────────────────────────────────────

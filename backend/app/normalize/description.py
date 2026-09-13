@@ -69,6 +69,22 @@ NOT_SEARCHED_IN_TEXT: frozenset[str] = frozenset(
 #: the team" is not, and no word boundary can tell them apart.
 UPPERCASE_ONLY: frozenset[str] = frozenset({"rest"})
 
+#: Names whose short spellings are also a letter or an ordinary word. A mention
+#: of one counts only when the same sentence names another skill as well, or
+#: spells this one out in full («Golang»). Capital letters do not settle these:
+#: «C-level», «C&B», «Права категории B, C», «Series C», «Go-To-Market»,
+#: «Go-Live», «Кофейня формата TO GO» are all written as names are.
+#:
+#: Measured 13 Sep 2026 over 1958 live descriptions and labelled by hand. «C»
+#: was the language in 14 of 44 vacancies, and every one of those stood beside
+#: another language, nearly always as «C/C++»; «Go» was the language in 59 of
+#: 82. ``docs/MATCHING.md`` records what the rule keeps and what it costs.
+#:
+#: A list of names, not a length. The same rule applied to every spelling of
+#: two characters removed only real mentions everywhere else — C# in 7
+#: vacancies, ML in 38, S3 in 7 — because none of those is a word of anything.
+NEEDS_COMPANY: frozenset[str] = frozenset({"c", "go"})
+
 #: Known ambiguities neither list settles, recorded rather than quietly lived
 #: with. «Swift» is a language and SWIFT is how banks move money, and this
 #: corpus is full of banks; «Oracle» is a database and a company, and a vacancy
@@ -244,21 +260,32 @@ def _has(sentence: str, markers: tuple[str, ...]) -> bool:
 
 
 def _mentions_in(sentence: str) -> list[tuple[str, str]]:
-    """``(canonical name, the spelling used)`` for every skill in one sentence."""
+    """``(canonical name, the spelling used)`` for every skill in one sentence.
+
+    A name in :data:`NEEDS_COMPANY` survives only beside another skill, or when
+    one of its spellings in this sentence is a long one. Every spelling is
+    looked at for that, not just the first: «Знание Go (Golang)» is the
+    language because of the second word.
+    """
     resolver = default_canonicalizer()
-    found: list[tuple[str, str]] = []
-    seen: set[str] = set()
+    found: dict[str, str] = {}
+    spelled_out: set[str] = set()
     for match in _pattern().finditer(sentence):
         written = match.group(0)
         spelling = _searched.get(_key(written))
         if spelling is None or not _case_allows(spelling, written):
             continue
         name = resolver.canonicalize(written) or resolver.canonicalize(spelling)
-        if name is None or name in seen:
+        if name is None:
             continue
-        seen.add(name)
-        found.append((name, written))
-    return found
+        found.setdefault(name, written)
+        if len(spelling) > SHORT_SPELLING:
+            spelled_out.add(name)
+    return [
+        (name, written)
+        for name, written in found.items()
+        if name not in NEEDS_COMPANY or name in spelled_out or len(found) > 1
+    ]
 
 
 def _case_allows(spelling: str, written: str) -> bool:
