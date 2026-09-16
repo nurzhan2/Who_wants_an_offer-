@@ -1,7 +1,10 @@
 """Health checks for the service and its dependencies."""
 
+import hashlib
 import time
+from functools import cache
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +20,26 @@ def service_version() -> str:
         return version("who-wants-an-offer")
     except PackageNotFoundError:  # pragma: no cover - only hit outside an installed env
         return "0.0.0"
+
+
+@cache
+def code_fingerprint() -> str:
+    """SHA-256 over this package's ``*.py`` files, taken once per process.
+
+    Taken at the first call, which the lifespan makes at startup, so it
+    describes the code the process is running rather than whatever is on disk
+    later. ``wwao/fingerprint.py`` computes the same digest from the checkout
+    without importing ``app``; ``python -m wwao up`` compares the two and says
+    so when the API on its port was started from other code.
+    """
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for path in sorted(root.rglob("*.py")):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 async def check_database(session: AsyncSession) -> ComponentHealth:
@@ -39,6 +62,7 @@ async def check_health(session: AsyncSession) -> HealthResponse:
     return HealthResponse(
         status=overall,
         version=service_version(),
+        code_fingerprint=code_fingerprint(),
         environment=settings.environment,
         components=components,
     )

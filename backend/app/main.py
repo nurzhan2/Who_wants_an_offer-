@@ -17,7 +17,7 @@ from app.db.checks import verify_embedding_dimension
 from app.db.session import dispose_engine, session_factory
 from app.llm.base import LLMTask
 from app.llm.router import get_router
-from app.services.health import service_version
+from app.services.health import code_fingerprint, service_version
 from app.services.resume import fail_interrupted_parses, sweep_orphaned_uploads
 from app.sources.http import close_client as close_source_client
 
@@ -69,6 +69,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # Cheap, and the alternative is discovering the mismatch on the first
     # embedding write, in a different phase of the project.
     verify_llm_routing()
+    # Taken now, while the files on disk are the ones this process imported.
+    code_fingerprint()
     async with session_factory() as session:
         await verify_embedding_dimension(session)
         # A parse is a background task of this process, so anything still

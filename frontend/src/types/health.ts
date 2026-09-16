@@ -10,6 +10,7 @@ export interface ComponentHealth {
 export interface HealthResponse {
   status: ServiceState
   version: string
+  code_fingerprint: string
   environment: string
   components: Record<string, ComponentHealth>
 }

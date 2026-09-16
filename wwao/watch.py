@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, TextIO
 
+from wwao.fingerprint import code_fingerprint, fetch_health
 from wwao.queue_view import local_token
 
 #: The seam the watcher talks to. Token-guarded, like the queue.
@@ -49,8 +50,23 @@ Poster = Callable[[str, dict[str, Any] | None], dict[str, Any]]
 ChildRunner = Callable[[Sequence[str], Callable[[str], None]], int]
 
 
+#: Exit code when the server on the port is not this checkout's: polling it
+#: again changes nothing, so the loop stops and says so.
+EXIT_OTHER_SERVER: Final[int] = 2
+
+
 class WatchError(Exception):
     """The backend refused or could not be reached, in a sentence for a person."""
+
+
+class RouteMissingError(WatchError):
+    """The server answered, and it has no such route.
+
+    Not "the backend did not answer": it did, and the answer is that the process
+    on the port was started from other code. Retrying cannot fix that, so the
+    loop stops on it. Measured 2026-09-17: an API started days earlier kept
+    port 8000 and the watcher logged a 404 on every poll.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,17 +100,32 @@ def watch(
     interval: float = DEFAULT_INTERVAL,
     rounds: int | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    health: Callable[[str], dict[str, object] | None] = fetch_health,
+    fingerprint: Callable[[], str] = code_fingerprint,
 ) -> int:
-    """Claim and run requests until interrupted, or for ``rounds`` polls in tests."""
+    """Claim and run requests until interrupted, or for ``rounds`` polls in tests.
+
+    The server is checked once before the loop: an API started from other code
+    answers ``/health`` like a current one and then 404s every claim, so the
+    watcher says which it is up front. A server that does not answer yet is not
+    an error — the loop waits for it.
+    """
     base = base_url.rstrip("/")
+    body = health(f"{base}/health")
+    if body is not None and body.get("code_fingerprint") != fingerprint():
+        print(other_server(base, "code_fingerprint" in body), file=out)
+        return EXIT_OTHER_SERVER
     print(f"Жду запросов дашборда от {base}. Остановить: Ctrl+C.", file=out)
     done = 0
     while rounds is None or done < rounds:
         done += 1
         try:
             claimed = post(f"{base}{CLAIM_PATH}", None).get("operation")
+        except RouteMissingError as error:
+            print(str(error), file=out)
+            return EXIT_OTHER_SERVER
         except WatchError as error:
-            print(f"Бэкенд не ответил: {error}", file=out)
+            print(str(error), file=out)
             sleep(interval)
             continue
         if not isinstance(claimed, dict):
@@ -168,8 +199,28 @@ _TITLES: Final[dict[str, str]] = {
 }
 
 
+def other_server(base: str, reports_code: bool) -> str:
+    """The sentence for a server on ``base`` that is not this checkout's code."""
+    why = (
+        "запущен из другого кода — из другой папки или до последних изменений"
+        if reports_code
+        else "запущен из старой версии, которая ещё не сообщает, из какого кода она"
+    )
+    return (
+        f"На {base} отвечает другой экземпляр сервера приложения: он {why}. "
+        "Маршрутов, через которые дашборд передаёт запросы агенту, в нём может не быть. "
+        "Остановите его (закройте окно, где он запущен, или завершите процесс на этом порту) "
+        "и запустите start.cmd снова."
+    )
+
+
 def post_over_http(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
-    """POST JSON with the local token and return the decoded answer."""
+    """POST JSON with the local token and return the decoded answer.
+
+    Every failure is named for what it is: no answer at all, an answer refusing
+    the token, a 404 because the route does not exist on that server, or some
+    other status. They need different actions and used to share one sentence.
+    """
     import httpx
 
     token, found_in = local_token()
@@ -177,16 +228,24 @@ def post_over_http(url: str, payload: dict[str, Any] | None) -> dict[str, Any]:
     try:
         response = httpx.post(url, json=payload, headers=headers, timeout=30.0)
     except httpx.HTTPError as error:
-        raise WatchError(f"{url}: {error}") from error
+        raise WatchError(f"Бэкенд не ответил ({url}): {error}. Жду и пробую снова.") from error
     if response.status_code in (401, 403):
         raise WatchError(
-            "бэкенд не принял локальный токен AGENT_API_TOKEN "
-            + (f"(взят из: {found_in})" if token else "(не задан ни в окружении, ни в .env)")
+            f"Бэкенд ответил {response.status_code}: не принял локальный токен AGENT_API_TOKEN "
+            + (f"(взят из: {found_in})." if token else "(не задан ни в окружении, ни в .env).")
+        )
+    if response.status_code == 404:
+        raise RouteMissingError(
+            f"Бэкенд ответил 404: маршрута {httpx.URL(url).path} на этом сервере нет. "
+            + other_server(f"{httpx.URL(url).scheme}://{httpx.URL(url).netloc.decode()}", True)
         )
     if response.status_code == 503:
-        raise WatchError("у бэкенда не задан AGENT_API_TOKEN — пропишите его в .env")
+        raise WatchError(
+            "Бэкенд ответил 503: у него не задан AGENT_API_TOKEN — пропишите его в .env "
+            "и перезапустите сервер."
+        )
     if response.status_code >= 400:
-        raise WatchError(f"{url} ответил {response.status_code}: {response.text[:300]}")
+        raise WatchError(f"Бэкенд ответил {response.status_code} на {url}: {response.text[:300]}")
     decoded = response.json()
     return decoded if isinstance(decoded, dict) else {}
 

@@ -11,6 +11,14 @@ import pytest
 
 from wwao import cli, queue_view, up, watch
 
+FP = "f" * 64
+NETSTAT = (
+    "Активные подключения\n\n"
+    "  Имя    Локальный адрес        Внешний адрес          Состояние       PID\n"
+    "  TCP    127.0.0.1:8000         0.0.0.0:0              ПРОСЛУШИВАНИЕ   32344\n"
+    "  TCP    127.0.0.1:8000         127.0.0.1:51148        TIME_WAIT       0\n"
+)
+
 
 class Child(up.Stoppable):
     def __init__(self, command: Sequence[str]) -> None:
@@ -34,6 +42,8 @@ class FakeMachine(up.Machine):
         npm: bool = True,
         up_urls: set[str] | None = None,
         start_answers: bool = True,
+        other_api: dict[str, object] | None = None,
+        netstat: str | None = NETSTAT,
     ) -> None:
         self.commands: list[list[str]] = []
         self.children: list[Child] = []
@@ -46,10 +56,14 @@ class FakeMachine(up.Machine):
         self._up = set(up_urls or ())
         self._start_answers = start_answers
         self._now = 0.0
+        self._other_api = other_api
+        self._netstat = netstat
         super().__init__(
             run=self._run,
             spawn=self._spawn,
             answers=lambda url: url in self._up,
+            health=self._health,
+            fingerprint=lambda: FP,
             which=self._which,
             sleep=self._sleep,
             clock=lambda: self._now,
@@ -63,7 +77,14 @@ class FakeMachine(up.Machine):
             return "npm" if self._npm else None
         return None
 
+    def _health(self, url: str) -> dict[str, object] | None:
+        if self._other_api is not None:
+            return self._other_api
+        return {"status": "ok", "code_fingerprint": FP} if url in self._up else None
+
     def _run(self, command: Sequence[str], cwd: Path) -> tuple[int, str]:
+        if command[0] == "netstat":
+            return (0, self._netstat) if self._netstat is not None else (1, "")
         self.commands.append(list(command))
         if command[:2] == ["docker", "info"]:
             return (0 if self._docker_running else 1), ""
@@ -262,3 +283,44 @@ def test_up_needs_a_terminal() -> None:
     assert cli.main(["up"], stdin=_Stream(False), stdout=_Stream(False), stderr=err) == (
         cli.EXIT_NO_HUMAN
     )
+
+
+@pytest.mark.parametrize(
+    ("body", "why"),
+    [
+        ({"status": "ok", "version": "0.1.0"}, "более старой версии"),
+        ({"status": "ok", "code_fingerprint": "0" * 64}, "из другого кода"),
+    ],
+)
+def test_an_api_from_other_code_is_not_reused_and_is_named(
+    dotenv: Path, body: dict[str, object], why: str
+) -> None:
+    """Measured 2026-09-17: the old API on 8000 was reused and the watcher 404-ed."""
+    machine = FakeMachine(other_api=body)
+    out = io.StringIO()
+
+    assert up.up(machine, out) == up.EXIT_OTHER_API
+
+    said = out.getvalue()
+    assert "другой экземпляр" in said
+    assert why in said
+    assert "процесс 32344" in said
+    assert "taskkill /PID 32344" in said
+    assert "уже работает" not in said
+    assert machine.children == []
+    assert machine.opened == []
+
+
+def test_without_netstat_the_message_still_says_what_to_stop(dotenv: Path) -> None:
+    machine = FakeMachine(other_api={"status": "ok"}, netstat=None)
+    out = io.StringIO()
+
+    assert up.up(machine, out) == up.EXIT_OTHER_API
+    assert "слушает порт 8000" in out.getvalue()
+
+
+def test_the_listener_is_found_by_address_not_by_the_state_word() -> None:
+    english = NETSTAT.replace("ПРОСЛУШИВАНИЕ", "LISTENING")
+    for listing in (NETSTAT, english):
+        assert up.listener(FakeMachine(netstat=listing), 8000) == "32344"
+    assert up.listener(FakeMachine(netstat=NETSTAT), 5173) is None

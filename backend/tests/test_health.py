@@ -41,3 +41,37 @@ async def test_health_mints_request_id_when_absent(client_without_db: AsyncClien
     response = await client_without_db.get("/health")
 
     assert response.headers[REQUEST_ID_HEADER]
+
+
+async def test_health_names_the_code_it_was_started_from(client_without_db: AsyncClient) -> None:
+    """The package version is the same for every build; this is not.
+
+    ``wwao up`` compares it with the checkout it runs from — see
+    ``wwao/tests/test_fingerprint.py`` for the two sides agreeing.
+    """
+    from app.services.health import code_fingerprint
+
+    body = (await client_without_db.get("/health")).json()
+
+    assert body["code_fingerprint"] == code_fingerprint()
+    assert len(body["code_fingerprint"]) == 64
+
+
+def test_the_launcher_computes_the_same_digest_from_disk() -> None:
+    """Otherwise ``wwao up`` would refuse every perfectly current server.
+
+    ``wwao`` is loaded by path: it is not importable from this test directory,
+    and it must not import ``app`` itself.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    from app.services.health import code_fingerprint
+
+    path = Path(__file__).resolve().parents[2] / "wwao" / "fingerprint.py"
+    spec = importlib.util.spec_from_file_location("wwao_fingerprint", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.code_fingerprint() == code_fingerprint()

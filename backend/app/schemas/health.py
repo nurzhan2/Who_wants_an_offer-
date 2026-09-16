@@ -21,5 +21,9 @@ class HealthResponse(BaseModel):
 
     status: ServiceState
     version: str
+    #: SHA-256 of the source this process was started from. The package version
+    #: is the same for every build, so this is what tells a launcher that the
+    #: API answering on its port is not the code in its checkout.
+    code_fingerprint: str
     environment: str
     components: dict[str, ComponentHealth]

@@ -10,8 +10,14 @@ browser, and then stays in this window as the local agent watcher: the one
 process allowed to act under the owner's hh login (see :mod:`wwao.watch`).
 
 **Checked before started, never started twice.** A database that is already
-up, an API already answering ``/health``, a dev server already on its port —
-each is reused. Closing this window stops only what this window started.
+up, a dev server already on its port — each is reused. An API on port 8000 is
+reused only when it was started from *this* code: its ``/health`` names a
+digest of the source it runs (:mod:`wwao.fingerprint`), and a different one —
+or none, from a build older than the digest — is refused with a sentence that
+says another instance is holding the port and names its process when the
+system will say. Reusing such a server is how, on 2026-09-17, the watcher met a
+404 on every poll with nothing to explain it. Closing this window stops only
+what this window started.
 
 **Nothing here is a shortcut past a rule.** The API is the same ``uvicorn``
 ``make dev`` runs; migrations are ``alembic upgrade head``; the watcher keeps
@@ -24,6 +30,7 @@ Like the rest of this package it imports neither ``app`` nor ``agent``: every
 piece is a child process.
 """
 
+import re
 import secrets
 import shutil
 import subprocess
@@ -38,6 +45,7 @@ from pathlib import Path
 from typing import Final, TextIO
 
 from wwao import queue_view
+from wwao.fingerprint import code_fingerprint, fetch_health
 from wwao.queue_view import TOKEN_VARIABLE, read_dotenv
 
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
@@ -56,6 +64,11 @@ EXIT_MIGRATIONS: Final[int] = 12
 EXIT_NO_API: Final[int] = 13
 EXIT_NO_NODE: Final[int] = 14
 EXIT_NO_WEB: Final[int] = 15
+#: Port 8000 is held by an API started from other code.
+EXIT_OTHER_API: Final[int] = 16
+
+#: The port the API listens on, for the message that names who holds it.
+API_PORT: Final[int] = 8000
 
 
 @dataclass
@@ -68,10 +81,15 @@ class Machine:
     spawn: Callable[[Sequence[str], Path], "Stoppable"]
     #: True when the URL answers with a status below 500.
     answers: Callable[[str], bool]
+    #: The decoded ``/health`` body, whatever its status, or None when nothing
+    #: answered or it was not JSON.
+    health: Callable[[str], dict[str, object] | None]
     which: Callable[[str], str | None] = shutil.which
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
     open_browser: Callable[[str], object] = webbrowser.open
+    #: The digest of the checkout this command runs from.
+    fingerprint: Callable[[], str] = code_fingerprint
     started: list["Stoppable"] = field(default_factory=list)
 
 
@@ -188,11 +206,16 @@ def _migrations(machine: Machine, out: TextIO) -> int:
 
 
 def _api(machine: Machine, out: TextIO) -> int:
-    """Reuse a running API, or start one and wait for ``/health``."""
+    """Reuse the API only if it runs this code; otherwise start one or say who is in the way."""
     health = f"{API_URL}/health"
-    if machine.answers(health):
-        say(out, "Сервер приложения: уже работает.")
-        return EXIT_OK
+    expected = machine.fingerprint()
+    body = machine.health(health)
+    if body is not None:
+        if body.get("code_fingerprint") == expected:
+            say(out, "Сервер приложения: уже работает, код тот же.")
+            return EXIT_OK
+        say(out, other_instance(machine, body))
+        return EXIT_OTHER_API
     say(out, "Сервер приложения: запускаю…")
     machine.started.append(
         machine.spawn(
@@ -204,20 +227,68 @@ def _api(machine: Machine, out: TextIO) -> int:
                 "--host",
                 "127.0.0.1",
                 "--port",
-                "8000",
+                str(API_PORT),
             ],
             REPO_ROOT,
         )
     )
-    if not _wait(machine, health, API_WAIT_SECONDS):
-        say(
-            out,
-            f"Сервер приложения не ответил за {API_WAIT_SECONDS:.0f} с. Проверьте сообщения "
-            "выше: чаще всего это неверная строка в .env или занятый порт 8000.",
-        )
-        return EXIT_NO_API
-    say(out, "Сервер приложения: отвечает.")
-    return EXIT_OK
+    deadline = machine.clock() + API_WAIT_SECONDS
+    while machine.clock() < deadline:
+        body = machine.health(health)
+        if body is not None and body.get("code_fingerprint") == expected:
+            say(out, "Сервер приложения: отвечает.")
+            return EXIT_OK
+        if body is not None:
+            # Something answered, and it is not the process just started.
+            say(out, other_instance(machine, body))
+            return EXIT_OTHER_API
+        machine.sleep(1.0)
+    say(
+        out,
+        f"Сервер приложения не ответил за {API_WAIT_SECONDS:.0f} с. Проверьте сообщения "
+        f"выше: чаще всего это неверная строка в .env или занятый порт {API_PORT}.",
+    )
+    return EXIT_NO_API
+
+
+def other_instance(machine: Machine, body: dict[str, object]) -> str:
+    """The sentence for a port held by an API that is not this checkout's."""
+    pid = listener(machine, API_PORT)
+    who = f" (процесс {pid})" if pid else ""
+    why = (
+        "он запущен из более старой версии, которая ещё не сообщает, из какого кода запущена"
+        if "code_fingerprint" not in body
+        else "он запущен из другого кода: из другой папки или до последних изменений"
+    )
+    stop_it = (
+        f"Остановите его: закройте окно, в котором он запущен, или завершите процесс {pid} "
+        f"(taskkill /PID {pid} /F)"
+        if pid
+        else f"Остановите его: закройте окно, в котором он запущен, или завершите процесс, "
+        f"который слушает порт {API_PORT}"
+    )
+    return (
+        f"На порту {API_PORT} уже отвечает другой экземпляр сервера приложения{who}: {why}. "
+        f"С ним дашборд работать не будет — новых кнопок и маршрутов в нём нет. "
+        f"{stop_it}, и запустите start.cmd снова."
+    )
+
+
+def listener(machine: Machine, port: int) -> str | None:
+    """The PID listening on ``port``, when ``netstat -ano`` will say; else None."""
+    code, output = machine.run(["netstat", "-ano", "-p", "TCP"], REPO_ROOT)
+    if code != 0:
+        return None
+    # Matched by the remote address rather than the state word, which a Russian
+    # Windows may print translated: a listening socket's peer is always *:0.
+    pattern = re.compile(
+        rf"^\s*TCP\s+\S+:{port}\s+(?:0\.0\.0\.0|\[::\]):0\s+\S+\s+(\d+)\s*$", re.IGNORECASE
+    )
+    for line in output.splitlines():
+        match = pattern.match(line)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _web(machine: Machine, out: TextIO) -> int:
@@ -311,4 +382,4 @@ def _answers(url: str) -> bool:
 
 def real_machine() -> Machine:
     """The machine ``python -m wwao up`` runs on."""
-    return Machine(run=_run, spawn=_spawn, answers=_answers)
+    return Machine(run=_run, spawn=_spawn, answers=_answers, health=fetch_health)
