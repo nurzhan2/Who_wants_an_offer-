@@ -18,7 +18,7 @@ from app.db.session import dispose_engine, session_factory
 from app.llm.base import LLMTask
 from app.llm.router import get_router
 from app.services.health import service_version
-from app.services.resume import sweep_orphaned_uploads
+from app.services.resume import fail_interrupted_parses, sweep_orphaned_uploads
 from app.sources.http import close_client as close_source_client
 
 logger = get_logger(__name__)
@@ -71,6 +71,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     verify_llm_routing()
     async with session_factory() as session:
         await verify_embedding_dimension(session)
+        # A parse is a background task of this process, so anything still
+        # pending now was left by a process that died and will never finish.
+        await fail_interrupted_parses(session)
     await probe_optional_providers()
     # A killed process leaves its staged uploads behind; nothing else deletes
     # them, and uploads/ would grow one resume at a time.

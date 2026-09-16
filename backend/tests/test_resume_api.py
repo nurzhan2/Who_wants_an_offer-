@@ -452,3 +452,27 @@ async def test_an_audit_that_breaks_does_not_break_the_upload(
     # The upload still went through the whole path.
     assert profile.parse_status is ParseStatus.PENDING
     assert len(scheduled_parses) == 1
+
+
+async def test_a_parse_left_pending_by_a_dead_process_is_failed_at_startup(
+    db_session: AsyncSession, profiles: ProfileRepository
+) -> None:
+    """Measured: a row from 2026-09-08 said «разбирается» for a week.
+
+    The parse runs inside the API process, so whatever is pending when the
+    process starts belongs to one that is gone — however recent it is. The row
+    is marked, not deleted: it is the owner's to remove.
+    """
+    moment_ago = datetime.now(UTC) - timedelta(seconds=5)
+    profile = await profiles.create_pending(
+        filename="killed.pdf", size_bytes=1024, source_format="pdf", started_at=moment_ago
+    )
+
+    failed = await resume_service.fail_interrupted_parses(db_session)
+
+    assert failed == 1
+    row = await profiles.get(profile.id)
+    assert row is not None
+    assert row.parse_status is ParseStatus.FAILED
+    assert row.parse_error == resume_service.STALE_PARSE_REASON
+    assert "Загрузите резюме заново" in row.parse_error

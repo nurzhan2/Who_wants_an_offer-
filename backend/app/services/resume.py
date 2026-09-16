@@ -35,7 +35,13 @@ from app.services import contacts as contact_service
 
 logger = get_logger(__name__)
 
-STALE_PARSE_REASON = "parsing did not finish; the server may have restarted"
+#: Shown on the documents screen, so Russian. A parse runs inside the API
+#: process; when that process dies the parse dies with it and nothing else will
+#: ever finish it, so the row is told apart from one that is still going.
+STALE_PARSE_REASON = (
+    "Разбор не завершился: сервер остановили, пока он шёл. Загрузите резюме заново — "
+    "эта запись останется в списке, пока вы её не удалите."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,6 +199,29 @@ async def get_profile(session: AsyncSession, profile_id: UUID) -> CandidateProfi
     if failed:
         logger.warning("resume.stale_pending_failed", count=failed)
     return await profiles.get(profile_id)
+
+
+async def fail_interrupted_parses(session: AsyncSession) -> int:
+    """Mark every parse still pending at startup as failed. Called from the lifespan.
+
+    The parse is a background task *of this process*, and this process has only
+    just started — so a row that says ``pending`` now belongs to a process that
+    is gone, whatever its age. Without this such a row sat on the documents
+    screen under «разбирается» for ever (measured: one from 2026-09-08, left by a
+    server killed mid-upload), because only a request for that one profile
+    settled it.
+
+    Marked, never deleted: it is the owner's row and removing it is their call.
+    The one-process assumption is the same one ``app.services.pipeline`` states;
+    under several workers this would fail a sibling's live parse.
+    """
+    failed = await ProfileRepository(session).fail_stale_pending(
+        datetime.now(UTC), STALE_PARSE_REASON
+    )
+    await session.commit()
+    if failed:
+        logger.warning("resume.interrupted_parses_failed", count=failed)
+    return failed
 
 
 async def sweep_orphaned_uploads() -> int:
