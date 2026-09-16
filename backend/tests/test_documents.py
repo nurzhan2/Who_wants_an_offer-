@@ -46,6 +46,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.exceptions import LLMError
 from app.db.base import uuid7
 from app.db.enums import (
@@ -1488,6 +1489,10 @@ async def test_the_candidates_list_carries_what_the_employer_published(
     assert found[0].employer.accredited_it_employer
     assert found[0].cv_versions == 0
     assert found[0].letter_versions == 0
+    # The card says how this one is applied to, and where.
+    assert found[0].source_slug
+    assert found[0].url
+    assert found[0].via_agent is (found[0].source_slug == settings.agent_source_slug)
 
 
 async def test_a_filtered_vacancy_is_not_a_candidate_for_documents_whatever_its_score(

@@ -43,6 +43,7 @@ export function VacancyDocuments({ candidate }: { candidate: DocumentCandidate }
         <p className="text-body-sm text-felt-gray">
           {candidate.company ?? 'компания не указана'} · score {formatScore(candidate.score)}
         </p>
+        <Route candidate={candidate} />
         <EmployerSignals signals={candidate.employer} />
       </header>
 
@@ -74,6 +75,42 @@ export function VacancyDocuments({ candidate }: { candidate: DocumentCandidate }
       )}
       {result && <Result document={result} />}
     </article>
+  )
+}
+
+/**
+ * How this vacancy is applied to, said before the buttons.
+ *
+ * A vacancy on the agent's source is sent by `wwao apply`, and its letter is what
+ * lets it into that queue. Any other is applied to by the owner on the original
+ * page, so the link is the point of the line: the documents below are what they
+ * take with them.
+ */
+function Route({ candidate }: { candidate: DocumentCandidate }) {
+  if (candidate.via_agent) {
+    return (
+      <p className="text-caption text-felt-gray">
+        Автоотклик через агента · {candidate.source_slug}
+      </p>
+    )
+  }
+  return (
+    <p className="text-caption text-felt-gray">
+      Откликнуться самому · {candidate.source_slug || 'источник не указан'}
+      {candidate.url && (
+        <>
+          {' · '}
+          <a
+            href={candidate.url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-obsidian underline underline-offset-2"
+          >
+            открыть оригинал
+          </a>
+        </>
+      )}
+    </p>
   )
 }
 

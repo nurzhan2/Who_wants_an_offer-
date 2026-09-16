@@ -4,11 +4,18 @@
     uv run python scripts/generate_letters.py --limit 5
     uv run python scripts/generate_letters.py --limit 5 --dry-run
     uv run python scripts/generate_letters.py --vacancy <id> --force --show
+    uv run python scripts/generate_letters.py --limit 5 --source others
 
 One vacancy with ``--vacancy``, a queue of them with ``--limit``. The queue is
-the best-scoring matches for the active profile that do not have a letter yet,
-so running it twice does not rewrite yesterday's work; ``--force`` overrides
-that, for both modes.
+the matches for the active profile that do not have a letter yet, so running it
+twice does not rewrite yesterday's work; ``--force`` overrides that, for both
+modes.
+
+**The agent's source comes first.** For a vacancy the agent applies to
+(``AGENT_SOURCE_SLUG``, hh), the letter is what lets it into the agent queue;
+the rest get letters after them and are applied to by hand on the original
+page. ``--source`` narrows the queue: ``agent``, ``others``, or one source by
+name. The report counts what was written on each side.
 
 Nothing here sends anything. Every letter is saved to ``application.cover_letter``
 and read by a person before it goes anywhere near an employer.
@@ -43,16 +50,18 @@ script cannot be the place where the hedge gets dropped.
 import argparse
 import asyncio
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from pathlib import Path
 from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
+from app.core.config import settings
 from app.core.logging import configure_logging
 from app.db.session import session_factory
 from app.letters import store
+from app.letters.channel import SourceScope
 from app.letters.examples import ExamplePool, OutcomeEvidence, summary_ru
 from app.letters.guard import RUSSIAN
 from app.letters.service import LetterOutcome, write_batch, write_letter
@@ -106,6 +115,14 @@ def parse_args() -> argparse.Namespace:
             "a filtered vacancy is never written for, whatever its score"
         ),
     )
+    parser.add_argument(
+        "--source",
+        default=SourceScope.ALL.value,
+        help=(
+            "which vacancies to write for: all (default, the agent's source "
+            f"{settings.agent_source_slug!r} first), agent, others, or one source slug"
+        ),
+    )
     parser.add_argument("--force", action="store_true", help="rewrite a letter that already exists")
     parser.add_argument(
         "--dry-run", action="store_true", help="show the overlap, call no model, write nothing"
@@ -154,6 +171,8 @@ def show(report: Report | None, *, full: bool) -> None:
     print()
     print(RULE)
     print(f"ИТОГО  написано {len(written)} из {len(outcomes)}")
+    for line in split_by_channel(outcomes):
+        print(f"       {line}")
     _show_evidence(report)
     print(RULE)
 
@@ -164,6 +183,37 @@ def show(report: Report | None, *, full: bool) -> None:
             print(f"{outcome.title} / {outcome.company or '—'}")
             print(RULE)
             print(outcome.letter.text if outcome.letter else "")
+
+
+def split_by_channel(outcomes: list[LetterOutcome]) -> list[str]:
+    """Written and considered, for the agent's source and for everything else.
+
+    Two lines always, even at zero: «для hh написано 0» is the line that says the
+    agent queue will stay empty tonight, and dropping it at zero would hide
+    exactly that.
+    """
+    agent = [outcome for outcome in outcomes if outcome.via_agent]
+    others = [outcome for outcome in outcomes if outcome.via_agent is False]
+    unknown = [outcome for outcome in outcomes if outcome.via_agent is None]
+
+    def saved(group: list[LetterOutcome]) -> int:
+        return sum(1 for outcome in group if outcome.saved)
+
+    by_source: dict[str, int] = {}
+    for outcome in others:
+        if outcome.saved:
+            slug = outcome.source_slug or "?"
+            by_source[slug] = by_source.get(slug, 0) + 1
+    detail = ", ".join(f"{slug} {count}" for slug, count in sorted(by_source.items()))
+
+    lines = [
+        f"для {settings.agent_source_slug} (автоотклик)   {saved(agent)} из {len(agent)}",
+        f"остальные (откликнуться самому)   {saved(others)} из {len(others)}"
+        + (f": {detail}" if detail else ""),
+    ]
+    if unknown:
+        lines.append(f"источник не определён   {saved(unknown)} из {len(unknown)}")
+    return lines
 
 
 def _show_evidence(report: Report) -> None:
@@ -190,6 +240,14 @@ def _clip(text: str, width: int) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
+def parse_source(value: str) -> tuple[SourceScope, str | None]:
+    """``--source`` as a scope, or as one named source when it is not a scope."""
+    try:
+        return SourceScope(value), None
+    except ValueError:
+        return SourceScope.ALL, value
+
+
 async def run(args: argparse.Namespace) -> Report | None:
     """Do the work, in one transaction that is committed at the end.
 
@@ -209,17 +267,21 @@ async def run(args: argparse.Namespace) -> Report | None:
             return None
         pool: ExamplePool = await store.load_examples(session, profile_id=profile.profile_id)
         if args.vacancy:
-            outcomes = [
-                await write_letter(
-                    session,
-                    UUID(args.vacancy),
-                    profile,
-                    force=args.force,
-                    dry_run=args.dry_run,
-                    pool=pool,
-                )
-            ]
+            vacancy_id = UUID(args.vacancy)
+            outcome = await write_letter(
+                session,
+                vacancy_id,
+                profile,
+                force=args.force,
+                dry_run=args.dry_run,
+                pool=pool,
+            )
+            route = await store.route_of(session, vacancy_id)
+            if route is not None:
+                outcome = replace(outcome, source_slug=route[0], via_agent=route[1])
+            outcomes = [outcome]
         else:
+            scope, source_slug = parse_source(args.source)
             outcomes = await write_batch(
                 session,
                 profile_id=profile.profile_id,
@@ -228,6 +290,8 @@ async def run(args: argparse.Namespace) -> Report | None:
                 force=args.force,
                 dry_run=args.dry_run,
                 pool=pool,
+                scope=scope,
+                source_slug=source_slug,
             )
         if not args.dry_run:
             await session.commit()

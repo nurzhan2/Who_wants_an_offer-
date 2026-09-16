@@ -256,6 +256,9 @@ async def list_candidates(
             cv_versions=row.cv_versions,
             letter_versions=row.letter_versions,
             employer=row.employer,
+            via_agent=row.via_agent,
+            source_slug=row.source_slug,
+            url=row.url,
         )
         for row in rows
     ]

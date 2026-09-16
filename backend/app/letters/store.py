@@ -33,6 +33,8 @@ from app.db.models import (
     VacancySkill,
     VacancySource,
 )
+from app.letters import channel
+from app.letters.channel import SourceScope
 from app.letters.context import (
     ProfileFacts,
     SkillFact,
@@ -74,6 +76,12 @@ class QueuedVacancy:
     score: Decimal
     #: True when an application row already holds a letter for this vacancy.
     has_letter: bool
+    #: Whether the agent's source lists it — see :mod:`app.letters.channel`.
+    via_agent: bool = False
+    #: The source a person acts on, and its page: the original to apply on by
+    #: hand when ``via_agent`` is false.
+    source_slug: str = ""
+    url: str = ""
 
 
 async def load_vacancy_facts(session: AsyncSession, vacancy_id: UUID) -> VacancyFacts | None:
@@ -148,8 +156,18 @@ async def queue(
     limit: int = 10,
     min_score: Decimal | None = None,
     include_written: bool = False,
+    scope: SourceScope = SourceScope.ALL,
+    source_slug: str | None = None,
 ) -> list[QueuedVacancy]:
-    """The best-scoring vacancies that still need a letter, best first.
+    """The vacancies that still need a letter: the agent's source first, then by score.
+
+    **The agent's vacancies come first, and the rest are not cut.** For a
+    vacancy the agent can apply to, the letter is its ticket into the agent
+    queue; without one the automatic application does not happen. The others
+    get letters after them and are applied to by hand on the original page.
+    Ordering by score alone put all eight apply_now letters on arbeitnow on 13
+    Sep 2026 and left 26 ready hh vacancies without one — and the agent queue
+    empty. ``scope`` narrows to one side; ``source_slug`` to one named source.
 
     "Still need" means no application row holds one. A vacancy whose letter was
     already written is skipped rather than rewritten, so a batch run is safe to
@@ -173,6 +191,7 @@ async def queue(
         .where(Application.cover_letter.is_not(None))
         .where(Application.vacancy_id == Match.vacancy_id)
     )
+    via_agent = channel.on_agent_source(Match.vacancy_id)
     stmt = (
         select(
             Match.vacancy_id,
@@ -180,6 +199,9 @@ async def queue(
             Vacancy.company,
             Match.score,
             written.exists().label("has_letter"),
+            via_agent.label("via_agent"),
+            channel.primary_slug(Match.vacancy_id).label("source_slug"),
+            channel.primary_url(Match.vacancy_id).label("url"),
         )
         .join(Vacancy, Vacancy.id == Match.vacancy_id)
         .where(Match.profile_id == profile_id)
@@ -187,9 +209,12 @@ async def queue(
         .where(Match.bucket != MatchBucket.FILTERED)
         .where(Vacancy.is_active.is_(True))
         .where(Vacancy.is_spam.is_(False))
-        .order_by(Match.score.desc(), Match.vacancy_id)
+        .order_by(via_agent.desc(), Match.score.desc(), Match.vacancy_id)
         .limit(limit)
     )
+    narrowed = channel.scope_condition(Match.vacancy_id, scope, source_slug)
+    if narrowed is not None:
+        stmt = stmt.where(narrowed)
     if not include_written:
         stmt = stmt.where(~written.exists())
 
@@ -201,9 +226,27 @@ async def queue(
             company=row.company,
             score=row.score,
             has_letter=bool(row.has_letter),
+            via_agent=bool(row.via_agent),
+            source_slug=row.source_slug or "",
+            url=row.url or "",
         )
         for row in rows
     ]
+
+
+async def route_of(session: AsyncSession, vacancy_id: UUID) -> tuple[str, bool] | None:
+    """Where one vacancy is applied to: its primary source, and whether via the agent."""
+    row = (
+        await session.execute(
+            select(
+                channel.primary_slug(Vacancy.id).label("source_slug"),
+                channel.on_agent_source(Vacancy.id).label("via_agent"),
+            ).where(Vacancy.id == vacancy_id)
+        )
+    ).one_or_none()
+    if row is None or row.source_slug is None:
+        return None
+    return str(row.source_slug), bool(row.via_agent)
 
 
 async def save_letter(

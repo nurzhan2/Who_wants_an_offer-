@@ -358,6 +358,10 @@ export interface QueuedLetter {
   company: string | null
   score: string
   has_letter: boolean
+  /** True when the agent applies to it; false means «откликнуться самому» on `url`. */
+  via_agent: boolean
+  source_slug: string
+  url: string
 }
 
 export interface OutcomeEvidence {

@@ -114,7 +114,7 @@ One entry point, six subcommands, in the order you use them:
 ```bash
 uv run python -m wwao crawl                # walk the sources (hh, arbeitnow, remotive, …)
 uv run python -m wwao match                # score what was found against the profile
-uv run python -m wwao letters --limit 20   # write cover letters for the top N by score
+uv run python -m wwao letters --limit 20   # write cover letters: hh first, then the rest
 uv run python -m wwao queue                # what is ready to apply to, and why the rest is not
 uv run python -m wwao apply                # show each card and send what you confirm
 uv run python -m wwao outcomes             # read back what hh says about what you sent
@@ -125,6 +125,15 @@ worth running overnight. `queue` is the one to read afterwards: it prints the
 reason each vacancy is *not* ready — no letter, an employer test, a closed
 posting, an application already sent — because that list is what you would
 otherwise reconstruct by hand.
+
+`letters` writes for the agent's source (`AGENT_SOURCE_SLUG`, hh) first: for
+those vacancies a letter is what lets them into the agent queue, and without one
+the automatic application does not happen. Vacancies listed only on other
+sources get letters after them; the dashboard marks them «откликнуться самому»
+with a link to the original, next to the CV and letter buttons. `--source agent`,
+`--source others` or `--source <slug>` narrows the run, and the report counts
+what was written on each side. A filtered vacancy never gets a letter, whatever
+its score, and the floor is `agent_queue_min_score`.
 
 `queue` and `apply` both take that list from the backend
 (`GET /api/v1/applications/queue`, behind `AGENT_API_TOKEN`): the vacancies

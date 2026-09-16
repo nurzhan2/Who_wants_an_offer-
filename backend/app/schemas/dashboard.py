@@ -444,6 +444,11 @@ class QueuedLetter(BaseModel):
     company: str | None = None
     score: Decimal
     has_letter: bool = False
+    #: Whether the agent applies to it (its source lists the vacancy) or the
+    #: owner does, by hand, on :attr:`url` — «откликнуться самому».
+    via_agent: bool = False
+    source_slug: str = ""
+    url: str = ""
 
 
 class LetterRequest(BaseModel):

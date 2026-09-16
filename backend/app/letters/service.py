@@ -32,7 +32,7 @@ browser, under the user's own account, and only after a human has confirmed that
 particular letter for that particular vacancy.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from uuid import UUID
 
@@ -42,6 +42,7 @@ from app.core.logging import get_logger
 from app.db.enums import ReferenceKind, RuleScope
 from app.letters import examples as few_shot
 from app.letters import store
+from app.letters.channel import SourceScope
 from app.letters.context import LetterContext, ProfileFacts, build_context
 from app.letters.examples import ChosenExample, OutcomeEvidence
 from app.letters.generator import GeneratedLetter, LetterUnwritableError, generate
@@ -90,6 +91,11 @@ class LetterOutcome:
     #: was written for. None only when nothing was generated. See
     #: :func:`write_letter` for why the audit happens before the save.
     ats: ATSReport | None = None
+    #: Where the vacancy is applied to — its primary source and whether the
+    #: agent can do it. Filled in by :func:`write_batch` from the queue, and by
+    #: a caller that looked it up; None when nobody did.
+    source_slug: str | None = None
+    via_agent: bool | None = None
 
     @property
     def problems(self) -> tuple[LetterProblem, ...]:
@@ -337,8 +343,12 @@ async def write_batch(
     dry_run: bool = False,
     pool: few_shot.ExamplePool | None = None,
     workshop: Workshop | None = None,
+    scope: SourceScope = SourceScope.ALL,
+    source_slug: str | None = None,
 ) -> list[LetterOutcome]:
     """Work down the queue of vacancies that still need a letter.
+
+    The agent's source first, then the rest — see :func:`app.letters.store.queue`.
 
     Sequential on purpose. The heavy tasks route to the Claude Code CLI, whose
     provider holds a concurrency semaphore of its own; firing a hundred of these
@@ -359,6 +369,8 @@ async def write_batch(
         limit=limit,
         min_score=min_score,
         include_written=force,
+        scope=scope,
+        source_slug=source_slug,
     )
     # Once for the run: the answered applications do not change while a batch is
     # being written, and which of them suit a given vacancy is decided per
@@ -372,16 +384,17 @@ async def write_batch(
         workshop = await load_workshop(session)
     outcomes: list[LetterOutcome] = []
     for item in queued:
+        outcome = await write_letter(
+            session,
+            item.vacancy_id,
+            profile,
+            router=router,
+            force=force,
+            dry_run=dry_run,
+            pool=pool,
+            workshop=workshop,
+        )
         outcomes.append(
-            await write_letter(
-                session,
-                item.vacancy_id,
-                profile,
-                router=router,
-                force=force,
-                dry_run=dry_run,
-                pool=pool,
-                workshop=workshop,
-            )
+            replace(outcome, source_slug=item.source_slug or None, via_agent=item.via_agent)
         )
     return outcomes

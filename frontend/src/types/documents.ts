@@ -118,4 +118,8 @@ export interface DocumentCandidate {
   cv_versions: number
   letter_versions: number
   employer: EmployerSignals
+  /** True when the agent applies to it; false means «откликнуться самому» on `url`. */
+  via_agent: boolean
+  source_slug: string
+  url: string
 }

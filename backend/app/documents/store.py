@@ -45,6 +45,7 @@ from app.documents.context import (
     experience_from_rows,
 )
 from app.documents.employer import EmployerSignals, from_raw
+from app.letters import channel
 from app.schemas.ats import ATSReport
 
 logger = get_logger(__name__)
@@ -316,6 +317,10 @@ class Candidate:
     #: What the employer published about themselves on this posting. Never a
     #: lookup: see :mod:`app.documents.employer`.
     employer: EmployerSignals = field(default_factory=EmployerSignals)
+    #: How it is applied to — see :mod:`app.letters.channel`.
+    via_agent: bool = False
+    source_slug: str = ""
+    url: str = ""
 
 
 async def candidates(
@@ -357,6 +362,9 @@ async def candidates(
                 Match.score,
                 cv_count.label("cv_versions"),
                 letter_count.label("letter_versions"),
+                channel.on_agent_source(Match.vacancy_id).label("via_agent"),
+                channel.primary_slug(Match.vacancy_id).label("source_slug"),
+                channel.primary_url(Match.vacancy_id).label("url"),
             )
             .join(Vacancy, Vacancy.id == Match.vacancy_id)
             .where(Match.profile_id == profile_id)
@@ -380,6 +388,9 @@ async def candidates(
             cv_versions=int(row.cv_versions),
             letter_versions=int(row.letter_versions),
             employer=signals.get(row.vacancy_id, EmployerSignals()),
+            via_agent=bool(row.via_agent),
+            source_slug=row.source_slug or "",
+            url=row.url or "",
         )
         for row in rows
     ]

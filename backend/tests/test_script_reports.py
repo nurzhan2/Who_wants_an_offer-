@@ -20,9 +20,13 @@ import importlib.util
 import re
 from pathlib import Path
 from types import ModuleType
+from uuid import uuid4
 
 import pytest
 
+from app.core.config import settings
+from app.letters.channel import SourceScope
+from app.letters.service import LetterOutcome
 from app.matching.rules import UnstatedRequirement
 from app.matching.scorer import ScoringOutcome
 from app.normalize.description import skills_in_text
@@ -352,3 +356,44 @@ def test_the_plan_section_says_when_there_was_no_profile_to_plan_for(
 
     printed = capsys.readouterr().out
     assert "--keyword" in printed and "ЗАМЕЧАНИЯ" in printed
+
+
+def test_the_letters_report_counts_the_agents_side_and_the_rest_apart() -> None:
+    """«для hh 0 из 1» is the line that says the agent queue stays empty tonight."""
+    script = _script("generate_letters")
+
+    def outcome(*, saved: bool, via_agent: bool | None, slug: str | None) -> LetterOutcome:
+        return LetterOutcome(
+            vacancy_id=uuid4(),
+            title="t",
+            company=None,
+            saved=saved,
+            via_agent=via_agent,
+            source_slug=slug,
+        )
+
+    lines = script.split_by_channel(
+        [
+            outcome(saved=False, via_agent=True, slug=settings.agent_source_slug),
+            outcome(saved=True, via_agent=False, slug="arbeitnow"),
+            outcome(saved=True, via_agent=False, slug="arbeitnow"),
+            outcome(saved=True, via_agent=False, slug="remotive"),
+            outcome(saved=True, via_agent=None, slug=None),
+        ]
+    )
+
+    assert lines[0].startswith(f"для {settings.agent_source_slug} ")
+    assert lines[0].endswith("0 из 1")
+    assert lines[1].endswith("3 из 3: arbeitnow 2, remotive 1")
+    assert lines[2].endswith("1 из 1")
+    for line in lines:
+        line.encode("cp1251")
+
+
+def test_the_letters_source_option_is_a_scope_or_one_source() -> None:
+    """``--source remotive`` names a source; ``--source others`` names a side."""
+    script = _script("generate_letters")
+
+    assert script.parse_source("all") == (SourceScope.ALL, None)
+    assert script.parse_source("others") == (SourceScope.OTHERS, None)
+    assert script.parse_source("remotive") == (SourceScope.ALL, "remotive")

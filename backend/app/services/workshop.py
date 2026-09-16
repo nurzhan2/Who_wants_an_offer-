@@ -84,6 +84,9 @@ async def queue(
             company=item.company,
             score=item.score,
             has_letter=item.has_letter,
+            via_agent=item.via_agent,
+            source_slug=item.source_slug,
+            url=item.url,
         )
         for item in queued
     ]

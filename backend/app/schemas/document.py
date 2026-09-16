@@ -132,3 +132,8 @@ class DocumentCandidateRead(BaseModel):
     #: many people have applied. Read from the stored payload and never looked
     #: up: see :mod:`app.documents.employer`.
     employer: EmployerSignals = EmployerSignals()
+    #: Whether the agent applies to it (its source lists the vacancy) or the
+    #: owner does, by hand, on :attr:`url` — «откликнуться самому».
+    via_agent: bool = False
+    source_slug: str = ""
+    url: str = ""

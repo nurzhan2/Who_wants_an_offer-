@@ -58,13 +58,14 @@ from app.core.config import settings
 from app.core.exceptions import LLMError
 from app.db.base import uuid7
 from app.db.enums import ApplicationStatus, MatchBucket, RuleScope
-from app.db.models import Application, VacancySkill
+from app.db.models import Application, VacancySkill, VacancySource
 from app.db.repositories import MatchRepository, ProfileRepository, VacancyRepository
 from app.documents.rules import version as _rules_version
 from app.letters import examples as few_shot
 from app.letters import prompt as prompt_builder
 from app.letters import service as letters_service
 from app.letters import store
+from app.letters.channel import SourceScope
 from app.letters.context import (
     ProfileFacts,
     SkillFact,
@@ -1003,6 +1004,135 @@ async def test_a_filtered_vacancy_never_gets_a_letter_whatever_its_score(
 
     assert [item.vacancy_id for item in default] == [allowed.vacancy_id]
     assert [item.vacancy_id for item in widest] == [allowed.vacancy_id]
+
+
+async def _listed(vacancies: VacancyRepository, seed: str, slug: str) -> UUID:
+    """One vacancy listed on one source."""
+    result = await vacancies.upsert_by_external_id(
+        make_vacancy(seed),
+        source_slug=slug,
+        external_id=f"{slug}-{seed}",
+        url=f"https://{slug}.test/{seed}",
+    )
+    return result.vacancy_id
+
+
+@pytest.mark.db
+async def test_the_agents_vacancies_get_letters_first_and_the_rest_are_not_cut(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """For hh the letter is the ticket into the agent queue; for the rest it is not.
+
+    Measured 13 Sep 2026: ordered by score alone, all eight apply_now letters
+    went to arbeitnow and 26 ready hh vacancies had none, so the agent queue was
+    empty. The hh vacancy here scores lower and still comes first; the others
+    follow rather than disappearing, marked for applying by hand.
+    """
+    profile = await profiles.create(make_profile())
+    aggregator = await _listed(vacancies, "route-high", "arbeitnow")
+    agent = await _listed(vacancies, "route-low", settings.agent_source_slug)
+    await matches.bulk_upsert(
+        [
+            make_match(profile.id, aggregator, Decimal("95")),
+            make_match(profile.id, agent, Decimal("80")),
+        ]
+    )
+
+    queued = await store.queue(db_session, profile_id=profile.id, limit=10)
+
+    assert [item.vacancy_id for item in queued] == [agent, aggregator]
+    assert [item.via_agent for item in queued] == [True, False]
+    assert queued[1].source_slug == "arbeitnow"
+    assert queued[1].url == "https://arbeitnow.test/route-high"
+
+
+@pytest.mark.db
+async def test_the_source_can_be_narrowed_to_either_side_or_to_one_name(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """``--source agent``, ``--source others``, ``--source remotive``."""
+    profile = await profiles.create(make_profile())
+    agent = await _listed(vacancies, "scope-agent", settings.agent_source_slug)
+    first = await _listed(vacancies, "scope-a", "arbeitnow")
+    second = await _listed(vacancies, "scope-r", "remotive")
+    await matches.bulk_upsert(
+        [make_match(profile.id, vacancy, Decimal("85")) for vacancy in (agent, first, second)]
+    )
+
+    def ids(items: list[store.QueuedVacancy]) -> set[UUID]:
+        return {item.vacancy_id for item in items}
+
+    only_agent = await store.queue(db_session, profile_id=profile.id, scope=SourceScope.AGENT)
+    others = await store.queue(db_session, profile_id=profile.id, scope=SourceScope.OTHERS)
+    named = await store.queue(db_session, profile_id=profile.id, source_slug="remotive")
+
+    assert ids(only_agent) == {agent}
+    assert ids(others) == {first, second}
+    assert ids(named) == {second}
+
+
+@pytest.mark.db
+async def test_a_vacancy_cross_posted_to_the_agents_source_goes_through_the_agent(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """Any listing on hh makes it the agent's, whichever row was stored first."""
+    profile = await profiles.create(make_profile())
+    vacancy = await _listed(vacancies, "cross", "arbeitnow")
+    db_session.add(
+        VacancySource(
+            id=uuid7(),
+            vacancy_id=vacancy,
+            source_slug=settings.agent_source_slug,
+            external_id="cross-agent",
+            url="https://agent.test/cross",
+            raw={},
+        )
+    )
+    await matches.bulk_upsert([make_match(profile.id, vacancy, Decimal("85"))])
+    await db_session.flush()
+
+    [item] = await store.queue(db_session, profile_id=profile.id)
+
+    assert item.via_agent is True
+    assert item.source_slug == settings.agent_source_slug
+    assert item.url == "https://agent.test/cross"
+    assert await store.route_of(db_session, vacancy) == (settings.agent_source_slug, True)
+    assert await store.route_of(db_session, uuid7()) is None
+
+
+@pytest.mark.db
+async def test_a_batch_says_which_side_each_letter_was_for(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """The report's split is read off the outcomes, so the outcomes must carry it."""
+    profile = await profiles.create(make_profile())
+    agent = await _listed(vacancies, "batch-route-agent", settings.agent_source_slug)
+    other = await _listed(vacancies, "batch-route-other", "arbeitnow")
+    await matches.bulk_upsert(
+        [
+            make_match(profile.id, agent, Decimal("80")),
+            make_match(profile.id, other, Decimal("90")),
+        ]
+    )
+
+    outcomes = await write_batch(db_session, profile_id=profile.id, limit=10, dry_run=True)
+
+    assert [(o.vacancy_id, o.via_agent, o.source_slug) for o in outcomes] == [
+        (agent, True, settings.agent_source_slug),
+        (other, False, "arbeitnow"),
+    ]
 
 
 @pytest.mark.db
