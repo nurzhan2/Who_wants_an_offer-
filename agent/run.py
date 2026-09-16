@@ -84,7 +84,7 @@ from agent.browser import open_browser, screenshot_on_error
 from agent.config import JOURNAL_PATH, QUEUE_PATH, Limits
 from agent.gate import InterceptionEscapedError, SubmitGate
 from agent.hosts import open_hh_page
-from agent.human import CancelledError, Candidate, confirm
+from agent.human import CancelledError, Candidate, accept_dashboard_confirmations, confirm
 from agent.journal import Entry, Journal
 from agent.letter import UnsafeLetterError
 from agent.letter import check as check_letter
@@ -275,8 +275,18 @@ def _hh_words_in(entry: Entry | None) -> tuple[str | None, str | None]:
     return "\n".join(visibility) or None, "\n".join(rest) or None
 
 
-def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candidate]:
+def _to_candidates(
+    items: Sequence[QueueItem], journal: Journal, *, dashboard: bool = False
+) -> list[Candidate]:
     """Everything worth showing a human, with the rest recorded and dropped.
+
+    With ``dashboard`` only items the owner confirmed on the dashboard are
+    candidates at all, and one of them the agent set aside earlier
+    (``needs_manual``, ``failed``) is put back in the queue *as the person's
+    move*: the backend spends a dashboard confirmation on the first result the
+    agent reports, so a confirmation served now was given after that result
+    was seen. It is the same move ``--requeue`` makes, made by the same person,
+    in the browser instead of a terminal.
 
     The prefilter runs on what the queue already knows, before any page is
     opened — which is the point of having one. The page is read again later,
@@ -310,7 +320,18 @@ def _to_candidates(items: Sequence[QueueItem], journal: Journal) -> list[Candida
             )
             continue
         seen.add(item.vacancy_id)
+        if dashboard and item.confirmation is None:
+            continue
         previous = journal.get(item.vacancy_id)
+        if dashboard and previous is not None and previous.status in REQUEUEABLE:
+            journal.record(
+                Entry(item.vacancy_id, Status.QUEUED, reason=previous.reason), actor=Actor.HUMAN
+            )
+            print(
+                f"  {item.vacancy_id}: снова в очереди — вы подтвердили её на дашборде "
+                f"после того, как агент её отложил ({previous.status.value})"
+            )
+            previous = journal.get(item.vacancy_id)
         if previous is not None and previous.status is not Status.QUEUED:
             # Already dealt with, or waiting on a person. A run must not drag an
             # item back out of a state only a human may leave — the state
@@ -554,6 +575,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="файл ручных добавлений к очереди; читается вдобавок к бэкенду",
     )
     parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help=(
+            "взять только отклики, подтверждённые на дашборде, и не спрашивать в "
+            "терминале: вопрос уже задан и отвечен в карточке вакансии. Остальное "
+            "не трогать"
+        ),
+    )
+    parser.add_argument(
         "--requeue",
         nargs="+",
         metavar="ID",
@@ -587,7 +617,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         # offer and must say why rather than reporting an empty morning.
         print(str(error), file=sys.stderr)
         return 1
-    candidates = _to_candidates(items, journal)
+    candidates = _to_candidates(items, journal, dashboard=args.dashboard)
+    confirmations = {
+        item.vacancy_id: item.confirmation for item in items if item.confirmation is not None
+    }
 
     sent_today = journal.count_sent_since(
         datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -598,7 +631,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         candidates = candidates[:room]
 
     if not candidates:
-        print("Отправлять нечего.")
+        print(
+            "Отправлять нечего: подтверждённых на дашборде откликов нет."
+            if args.dashboard
+            else "Отправлять нечего."
+        )
         return 0
 
     if not args.send:
@@ -618,9 +655,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     try:
-        mandates = confirm(candidates)
+        mandates = (
+            accept_dashboard_confirmations(candidates, confirmations)
+            if args.dashboard
+            else confirm(candidates)
+        )
     except CancelledError as exc:
         print(f"Ничего не отправлено: {exc}")
+        return 0
+    if not mandates:
+        print("Ничего не отправлено: ни одно подтверждение не подошло к тому, что отправлялось бы.")
         return 0
 
     books = _Bookkeeping(journal)

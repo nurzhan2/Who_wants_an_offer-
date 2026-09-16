@@ -48,6 +48,16 @@ on the card under its own heading and once more for the whole batch, because an
 owner about to send twelve applications should learn from this prompt, not from
 the summary afterwards, that hh thinks all twelve will be limited.
 
+**Since 2026-09-16 there is a second way to say yes, and it is also here.** The
+dashboard shows the same card in a modal — built from the same queue item — and
+records the owner's confirmation bound to a digest of that card.
+:func:`accept_dashboard_confirmations` turns such a confirmation into a mandate
+without asking again, and it gives up nothing the typed word gives: the mandate
+binds the card digest the owner confirmed, the letter's own digest is compared
+with the letter about to be typed, a candidate without a confirmation is left
+alone, and a duplicate is still a cancellation. :func:`mint` is still called
+from this module and nowhere else.
+
 **One candidate per vacancy, checked here as well as upstream.** ``run.py``
 deduplicates the batch; this refuses to mint a second mandate for a vacancy that
 is already in the list, because :func:`mint` is the point where a duplicate
@@ -59,13 +69,13 @@ mints them.
 
 import sys
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Final, TextIO, final
 
 from agent.letter import SafeLetter
 from agent.mandate import SendMandate, digest, mint
-from agent.queue import ATSCard
+from agent.queue import ATSCard, DashboardConfirmation
 from agent.state_page import printable
 
 #: Typed in full to proceed. Not "y": a single character is something a stuck
@@ -363,6 +373,73 @@ def confirm(
         )
         for candidate in kept
     ]
+
+
+def accept_dashboard_confirmations(
+    candidates: Sequence[Candidate],
+    confirmations: Mapping[str, DashboardConfirmation],
+    *,
+    stream_out: TextIO | None = None,
+) -> list[SendMandate]:
+    """Mint one mandate per candidate the owner confirmed on the dashboard.
+
+    Nothing is read from the terminal: the question was asked and answered in
+    the browser, on the same card. What is checked here is that the answer
+    still applies to what will be sent:
+
+    * a candidate with no confirmation gets no mandate;
+    * the letter this process is about to type must have the digest the owner
+      confirmed — a letter the safety check changed, or one regenerated after
+      the backend looked, gets no mandate;
+    * the mandate's ``form_digest`` is the card digest the owner confirmed, so
+      the consent is bound to that card exactly as a typed word is bound to
+      the printed one.
+
+    Each card is still printed, with the moment it was confirmed, so the window
+    shows what is about to go out.
+    """
+    out = stream_out or sys.stdout
+    repeated = sorted(
+        vacancy_id
+        for vacancy_id, times in Counter(c.vacancy_id for c in candidates).items()
+        if times > 1
+    )
+    if repeated:
+        raise CancelledError(
+            f"одна и та же вакансия в списке дважды: {', '.join(repeated)}. Ничего не отправлено."
+        )
+
+    mandates: list[SendMandate] = []
+    for candidate in candidates:
+        confirmation = confirmations.get(candidate.vacancy_id)
+        if confirmation is None:
+            print(
+                f"  {candidate.vacancy_id}: на дашборде не подтверждена — не отправляю.",
+                file=out,
+            )
+            continue
+        letter = None if candidate.letter is None else candidate.letter.text
+        if digest(letter) != confirmation.letter_digest:
+            print(
+                f"  {candidate.vacancy_id}: письмо не то, которое подтверждали на дашборде — "
+                "не отправляю. Откройте вакансию и подтвердите заново.",
+                file=out,
+            )
+            continue
+        print(
+            f"\n{candidate.render()}\n  подтверждено на дашборде: {confirmation.confirmed_at}",
+            file=out,
+        )
+        mandates.append(
+            mint(
+                vacancy_id=candidate.vacancy_id,
+                url=candidate.url,
+                letter=letter,
+                form_digest=confirmation.card_digest,
+            )
+        )
+    _say_it_once_for_the_batch([c for c in candidates if c.vacancy_id in confirmations], out)
+    return mandates
 
 
 def _say_it_once_for_the_batch(candidates: Sequence[Candidate], out: TextIO) -> None:

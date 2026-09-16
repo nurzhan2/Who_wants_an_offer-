@@ -104,6 +104,49 @@ class ATSCard:
         )
 
 
+@final
+@dataclass(frozen=True, slots=True)
+class DashboardConfirmation:
+    """The owner's "yes" to one card, given in the dashboard.
+
+    Mirrors ``app.schemas.agent.DashboardConfirmation``. The backend serves it
+    only while it still describes the item — same card digest, same letter
+    digest, not expired — and this package checks the letter again before it
+    mints anything, because the letter is the one thing it types. The card
+    digest becomes the mandate's ``form_digest``: the same binding the terminal
+    confirmation makes to the card it printed.
+    """
+
+    confirmed_at: str
+    letter_digest: str
+    card_digest: str
+
+    @classmethod
+    def from_json(cls, payload: object) -> "DashboardConfirmation | None":
+        """A confirmation off the wire, or nothing for anything malformed.
+
+        ``None`` rather than an error: a confirmation that cannot be read is a
+        confirmation not given, and the item is simply not sent.
+        """
+        if not isinstance(payload, dict):
+            return None
+        confirmed_at = payload.get("confirmed_at")
+        letter = payload.get("letter_digest")
+        card = payload.get("card_digest")
+        if not (isinstance(confirmed_at, str) and _is_digest(letter) and _is_digest(card)):
+            return None
+        return cls(confirmed_at=confirmed_at, letter_digest=str(letter), card_digest=str(card))
+
+
+def _is_digest(value: object) -> bool:
+    """A lowercase hex SHA-256."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
 def _texts(value: object) -> tuple[str, ...]:
     """A list of strings off the wire, with everything else dropped."""
     if not isinstance(value, list):
@@ -155,6 +198,10 @@ class QueueItem:
     #: backend, or an item with no letter to audit — and the card says so
     #: rather than printing silence, for the same reason it does with the score.
     ats: "ATSCard | None" = None
+    #: The owner's confirmation from the dashboard, when the backend served a
+    #: valid one. Only ``agent.run --dashboard`` acts on it; the terminal flow
+    #: asks the person at the keyboard regardless.
+    confirmation: "DashboardConfirmation | None" = None
 
     @classmethod
     def from_json(cls, payload: dict[str, Any]) -> "QueueItem":
@@ -193,6 +240,7 @@ class QueueItem:
             score=_score(payload.get("score")),
             score_explanation=explanation if isinstance(explanation, str) else None,
             ats=ATSCard.from_json(payload.get("ats")),
+            confirmation=DashboardConfirmation.from_json(payload.get("confirmation")),
         )
 
 
