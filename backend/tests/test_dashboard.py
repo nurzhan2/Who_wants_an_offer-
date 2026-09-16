@@ -495,7 +495,9 @@ async def test_only_a_recorded_send_reaches_the_sent_column(
     be verified at all.
     """
     vacancy_id = await a_vacancy(vacancies, "dash-board")
-    await _application(db_session, vacancy_id, agent_status="sent", sent_at=EPOCH)
+    await _application(
+        db_session, vacancy_id, agent_status="sent", sent_at=EPOCH, hh_negotiations_total=1
+    )
     await _application(db_session, vacancy_id, agent_status="sent")
     await _application(db_session, vacancy_id, agent_status="queued")
 
@@ -503,10 +505,56 @@ async def test_only_a_recorded_send_reaches_the_sent_column(
     columns = {column.key: len(column.cards) for column in board.stages}
 
     assert columns["sent"] == 1
+    assert columns["sent_unconfirmed"] == 0
     assert columns["queued"] == 1
     # The claim without evidence is not silently promoted into a stage; it is
     # visible, in the column for rows that are in none.
     assert len(board.other.cards) == 1
+
+
+async def test_a_send_hh_has_not_confirmed_is_not_in_the_sent_column(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """The first real run (2026-09-16): four sends, no count, no state.
+
+    The agent wrote ``sent_at`` for each of them, and hh's own count never
+    reached the tracker. Such a row is shown, under its own heading, and never
+    beside a send hh confirmed. A count of zero is hh saying there is nothing,
+    so it confirms nothing either; a state for the conversation does.
+    """
+    vacancy_id = await a_vacancy(vacancies, "dash-unconfirmed")
+    await _application(db_session, vacancy_id, agent_status="sent", sent_at=EPOCH)
+    await _application(db_session, vacancy_id, sent_at=EPOCH, hh_negotiations_total=0)
+    await _application(db_session, vacancy_id, sent_at=EPOCH, hh_last_state="RESPONSE")
+
+    board = await tracker_service.board(db_session)
+    columns = {column.key: column.cards for column in board.stages}
+    counts = (await overview_service.build(db_session)).applications
+
+    assert [column.key for column in board.stages] == [
+        "queued",
+        "needs_manual",
+        "sent_unconfirmed",
+        "sent",
+    ]
+    assert len(columns["sent_unconfirmed"]) == 2
+    assert [card.send_confirmed for card in columns["sent"]] == [True]
+    assert (counts.sent, counts.sent_confirmed) == (3, 1)
+
+
+async def test_a_board_card_says_how_old_the_posting_is_and_whether_it_is_there(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """A third of the first real queue was archived by the time it was sent."""
+    vacancy_id = await a_vacancy(vacancies, "dash-fresh")
+    await _application(db_session, vacancy_id, agent_status="queued")
+
+    [card] = [
+        card for column in (await tracker_service.board(db_session)).stages for card in column.cards
+    ]
+
+    assert card.vacancy_active is True
+    assert card.vacancy_last_seen_at is not None
 
 
 async def test_hh_states_are_grouped_and_unknown_ones_survive_verbatim(
@@ -562,6 +610,7 @@ async def test_the_board_carries_the_letter_that_was_actually_typed(
         sent_letter="Что отправили.",
         cover_letter="Что сгенерировали заново.",
         hh_warning="Такой отклик может получить отказ.",
+        hh_negotiations_total=1,
     )
 
     board = await tracker_service.board(db_session)
@@ -783,6 +832,7 @@ async def test_the_counters_read_what_the_agent_wrote(
     counts = (await overview_service.build(db_session)).applications
 
     assert counts.sent == 1
+    assert counts.sent_confirmed == 1
     assert counts.queued == 1
     assert counts.needs_manual == 1
     assert counts.with_letter == 1

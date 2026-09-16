@@ -163,6 +163,12 @@ class ApplicationCounts(BaseModel):
     """
 
     sent: int = 0
+    #: Of :attr:`sent`, the rows hh itself has confirmed: its own count of
+    #: applications on the vacancy is at least one, or it reported a state for
+    #: the conversation. Added 2026-09-16, when the first real run reported four
+    #: sends with neither — a send the agent reported and a send hh confirmed
+    #: are different facts, and only the second is what "отправлено" may mean.
+    sent_confirmed: int = 0
     queued: int = 0
     needs_manual: int = 0
     #: Rows holding a letter, whether or not it has been sent.
@@ -338,6 +344,20 @@ class BoardCard(BaseModel):
     hh_last_state: str | None = None
     hh_last_state_at: datetime | None = None
 
+    #: Whether hh itself confirmed this send: a count of at least one, or a
+    #: state for the conversation. See :func:`send_confirmed`. The board puts a
+    #: send it cannot confirm in a column of its own rather than beside real
+    #: ones, because the first real run produced four of them.
+    send_confirmed: bool = False
+
+    #: How old the posting is and whether it is still there, so nobody confirms
+    #: an application to an archive: a third of the first real queue was.
+    #: ``published_at`` is the employer's date, ``last_seen_at`` the crawler's
+    #: last sighting, ``vacancy_active`` false once the crawler saw it go.
+    vacancy_published_at: datetime | None = None
+    vacancy_last_seen_at: datetime | None = None
+    vacancy_active: bool | None = None
+
 
 class BoardColumn(BaseModel):
     """One column of the board: a stage, or an outcome."""
@@ -496,3 +516,19 @@ class WorkshopResult(BaseModel):
     #: that the screen can say «данных пока мало» and mean it rather than
     #: rendering a percentage computed over two applications.
     evidence_is_enough: bool = False
+
+
+def send_confirmed(
+    *, sent_at: datetime | None, negotiations_total: int | None, last_state: str | None
+) -> bool:
+    """Whether a send is backed by something hh said, rather than by our report.
+
+    The same rule as ``ApplicationRepository.counts`` spells in SQL. ``0`` is hh
+    saying there is no application, so it does not confirm anything; ``None`` is
+    nobody having looked.
+    """
+    if sent_at is None:
+        return False
+    return (negotiations_total is not None and negotiations_total >= 1) or bool(
+        (last_state or "").strip()
+    )

@@ -21,7 +21,7 @@ stop a runaway rather than to page.
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, nulls_last, select
+from sqlalchemy import ColumnElement, and_, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import ScalarSelect
 
@@ -51,6 +51,17 @@ def _url_of_vacancy() -> ScalarSelect[str | None]:
     )
 
 
+def _send_confirmed() -> ColumnElement[bool]:
+    """A send hh itself has confirmed. ``app.schemas.dashboard.send_confirmed`` in SQL."""
+    return and_(
+        Application.sent_at.is_not(None),
+        or_(
+            func.coalesce(Application.hh_negotiations_total, 0) >= 1,
+            func.coalesce(func.trim(Application.hh_last_state), "") != "",
+        ),
+    )
+
+
 class ApplicationRepository:
     """Everything the dashboard reads out of the tracker."""
 
@@ -71,6 +82,7 @@ class ApplicationRepository:
         """
         stmt = select(
             func.count().filter(Application.sent_at.is_not(None)).label("sent"),
+            func.count().filter(_send_confirmed()).label("sent_confirmed"),
             func.count().filter(Application.agent_status == "queued").label("queued"),
             func.count().filter(Application.agent_status == "needs_manual").label("needs_manual"),
             func.count().filter(Application.cover_letter.is_not(None)).label("with_letter"),
@@ -79,6 +91,7 @@ class ApplicationRepository:
         row = (await self.session.execute(stmt)).one()
         return ApplicationCounts(
             sent=row.sent,
+            sent_confirmed=row.sent_confirmed,
             queued=row.queued,
             needs_manual=row.needs_manual,
             with_letter=row.with_letter,
@@ -119,6 +132,10 @@ class ApplicationRepository:
                 Application.hh_negotiations_total,
                 Application.hh_last_state,
                 Application.hh_last_state_at,
+                _send_confirmed().label("send_confirmed"),
+                Vacancy.published_at.label("vacancy_published_at"),
+                Vacancy.last_seen_at.label("vacancy_last_seen_at"),
+                Vacancy.is_active.label("vacancy_active"),
             )
             .join(Vacancy, Vacancy.id == Application.vacancy_id)
             .order_by(last_activity.desc(), Application.id)

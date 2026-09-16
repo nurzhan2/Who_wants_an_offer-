@@ -32,8 +32,14 @@ from app.schemas.dashboard import Board, BoardCard, BoardColumn
 #: read off that at all — see :func:`_stage_of`.
 QUEUED = "queued"
 NEEDS_MANUAL = "needs_manual"
+#: The agent reported a send and hh has not confirmed it yet. Its own column
+#: since 2026-09-16: the first real run reported four sends whose confirmation
+#: never reached the tracker, and a column called «отправлено» has to mean what
+#: hh says, not what our process believed. ``python -m wwao outcomes`` reads the
+#: page again and moves such a row to ``sent`` or leaves it here for a person.
+SENT_UNCONFIRMED = "sent_unconfirmed"
 SENT = "sent"
-STAGES = (QUEUED, NEEDS_MANUAL, SENT)
+STAGES = (QUEUED, NEEDS_MANUAL, SENT_UNCONFIRMED, SENT)
 
 #: hh's states, grouped into the four answers a person actually wants: it was
 #: looked at, it is waiting, they want to talk, they said no. The mapping covers
@@ -82,8 +88,9 @@ async def board(session: AsyncSession) -> Board:
 def _stage_of(card: BoardCard) -> str | None:
     """Which stage column this row belongs in, or None for a row in neither.
 
-    ``sent_at`` decides "sent" and ``agent_status`` does not, even though the
-    agent writes both. The column is a claim that an application actually went
+    ``sent_at`` decides that something was sent and ``agent_status`` does not,
+    even though the agent writes both; hh's own count or state then decides
+    whether the send is confirmed. The column is a claim that an application actually went
     out, and only the process that did the typing writes ``sent_at``; a status
     of ``sent`` on a row with no timestamp is a report that lost its own
     evidence, and showing it beside real ones would make the column unusable as
@@ -94,7 +101,7 @@ def _stage_of(card: BoardCard) -> str | None:
     a job, and putting it in a queue would say the agent is about to act on it.
     """
     if card.sent_at is not None:
-        return SENT
+        return SENT if card.send_confirmed else SENT_UNCONFIRMED
     if card.agent_status in {QUEUED, NEEDS_MANUAL}:
         return card.agent_status
     return None
