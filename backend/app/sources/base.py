@@ -32,7 +32,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from app.core.config import settings
 from app.db.enums import EmploymentType, RemoteType
 from app.schemas.common import CountryCode, LanguageCode
-from app.schemas.crawl import CrawlPosition, SavedState
+from app.schemas.crawl import CrawlPosition, SavedState, SearchPreview, SearchUse
 from app.schemas.vacancy import MAX_POSTED_WITHIN_DAYS
 
 if TYPE_CHECKING:  # pragma: no cover - the runtime import would be a cycle
@@ -49,6 +49,29 @@ type StateLoad = Callable[[str], Awaitable[dict[str, Any] | None]]
 #: Stores it. Called at a point the connector chooses, which is the whole
 #: design: only the connector knows when its position is safe to advance.
 type StateSave = Callable[[str, dict[str, Any]], Awaitable[None]]
+
+
+#: How many terms a preview lists before it says "and N more".
+PREVIEW_TERMS = 12
+
+
+def mentions(haystack: str, needle: str) -> bool:
+    """Whether a casefolded text carries a keyword.
+
+    A single word is a substring test, as it always was. A phrase — a job title
+    the owner typed, «Python Developer» — matches when every one of its words
+    occurs, in any order: «Backend Developer (Python)» is the job the owner
+    means, and a literal substring test would drop it.
+    """
+    words = needle.casefold().split()
+    if len(words) <= 1:
+        return needle.casefold().strip() in haystack
+    return all(word in haystack for word in words)
+
+
+def distinct_terms(queries: Sequence["SearchQuery"]) -> list[str]:
+    """Every keyword of a plan once, in plan order."""
+    return list(dict.fromkeys(word for query in queries for word in query.keywords))
 
 
 class AccessMode(StrEnum):
@@ -351,6 +374,33 @@ class BaseSource(ABC):
         # feeds that keep no position, and making every one of them write an
         # empty override would be noise around the one that needs it.
         return
+
+    def publisher_of(self, raw: dict[str, Any]) -> str | None:
+        """Who originally published a posting this source republished.
+
+        None for a source that is itself the publisher, which is every source
+        except an aggregator. Read from the stored payload, so a person can see
+        "jsearch → LinkedIn" apart from "jsearch → a regional board" without
+        this project ever talking to LinkedIn.
+        """
+        return None
+
+    def preview_search(
+        self, queries: Sequence["SearchQuery"], stored: Sequence[SavedState]
+    ) -> SearchPreview:
+        """What the next run will ask this source for, without asking it.
+
+        The default describes a feed filtered locally by the plan's keywords,
+        which is what the base :meth:`search_batch` amounts to for a source that
+        cannot be queried. A source that sends the terms upstream, or picks
+        catalogue pages with them, overrides this.
+        """
+        terms = distinct_terms(queries)
+        return SearchPreview(
+            use=SearchUse.FILTER,
+            terms=terms[:PREVIEW_TERMS],
+            more=max(0, len(terms) - PREVIEW_TERMS),
+        )
 
     # ── availability ──────────────────────────────────────────────────
 

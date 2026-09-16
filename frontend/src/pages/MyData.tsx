@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { ApiError } from '@/api/client'
 import { Field } from '@/components/Field'
 import { LinkRows } from '@/components/LinkRows'
+import { TargetTitles } from '@/components/TargetTitles'
 import { useActiveProfile, useContacts, useSaveContacts } from '@/hooks/useContacts'
 import type { ContactDraft } from '@/lib/contacts'
 import { diffContacts, hasChanges, toDraft } from '@/lib/contacts'
@@ -123,6 +124,10 @@ export function MyData() {
         }
       }}
     >
+      {/* First, and inside the form only for the layout: it has its own save
+          button, and none of its controls submit the contact block. */}
+      <TargetTitles profileId={profile.data.id} stored={profile.data.target_titles} />
+
       <section className="flex flex-col gap-6">
         <SectionTitle
           title="Контакты"

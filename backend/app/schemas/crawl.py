@@ -7,6 +7,7 @@ module both sides may import is not.
 """
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -63,3 +64,32 @@ class CrawlPosition(BaseModel):
     oldest: datetime | None = None
     #: When the connector last wrote anything about this file.
     updated_at: datetime | None = None
+
+
+class SearchUse(StrEnum):
+    """How a source turns the owner's search into requests."""
+
+    #: The terms are sent upstream as search queries, verbatim.
+    QUERY = "query"
+    #: The whole feed is downloaded and filtered here by the terms.
+    FILTER = "filter"
+    #: The terms choose which catalogue pages are opened first.
+    CATALOG = "catalog"
+
+
+class SearchPreview(BaseModel):
+    """What one source will be asked for on its next run, in order.
+
+    Built by the connector, for the reason :class:`CrawlPosition` is: only the
+    connector knows how its input becomes requests. Pure — no request is made
+    to build it — so a person can change their search and see the effect
+    without spending anything.
+    """
+
+    use: SearchUse
+    #: The requests or catalogue pages, first to be spent first.
+    terms: list[str] = Field(default_factory=list)
+    #: How many more there are beyond :attr:`terms`.
+    more: int = Field(default=0, ge=0)
+    #: One sentence a person can act on: a budget, a staleness, a caveat.
+    note: str | None = None

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 
 from pydantic import BaseModel, Field
 
+from app.schemas.crawl import SearchPreview
 from app.schemas.pipeline import PipelineRunRead
 from app.sources.base import AccessMode, Unavailable
 
@@ -46,6 +47,36 @@ class SourcesResponse(BaseModel):
     #: Connector modules that failed to import, by module name. A typo in one
     #: file must not disable the pipeline, but it must not be invisible either.
     import_errors: dict[str, str] = Field(default_factory=dict)
+
+
+class SourceSearchPreview(BaseModel):
+    """One source's part of the search plan."""
+
+    slug: str
+    name: str
+    enabled: bool
+    #: Why it will not run. None when it will.
+    inactive: Unavailable | None = None
+    preview: SearchPreview
+
+
+class SearchPlanResponse(BaseModel):
+    """What the next run will look for, and where.
+
+    Answers "what did saving my job titles change". Built without a request to
+    any source, from the active profile and what the sources stored last time.
+    """
+
+    #: The titles the plan was built from. Empty means skill keywords were used.
+    target_titles: list[str] = Field(default_factory=list)
+    #: Where the plan's words came from: ``titles``, ``skills`` or ``headline``.
+    basis: str
+    #: The line sources rank by, when there is one.
+    intent: str | None = None
+    queries: int = 0
+    #: Searches the per-run cap cut.
+    dropped: int = 0
+    sources: list[SourceSearchPreview] = Field(default_factory=list)
 
 
 class SourceRunSummary(BaseModel):

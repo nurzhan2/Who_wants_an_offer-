@@ -35,7 +35,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
-from app.sources.base import BaseSource, RateLimit, RawPosting, SearchQuery
+from app.sources.base import BaseSource, RateLimit, RawPosting, SearchQuery, mentions
 from app.sources.registry import register_source
 
 logger = get_logger(__name__)
@@ -107,7 +107,8 @@ class _Page(BaseModel):
 def _matches(job: _Job, keywords: Sequence[str]) -> bool:
     """Whether any keyword occurs in the title, the tags or the description.
 
-    Case-insensitive substring matching, and *any* rather than *all*: the
+    Case-insensitive, and *any* keyword rather than *all*; a multi-word
+    keyword — a job title — matches by all of its words (``base.mentions``): the
     planner crosses skill groups into one query, and requiring every term would
     empty a feed that has no relevance ranking to fall back on. No keywords
     means no filter — the caller asked for the feed itself.
@@ -117,7 +118,7 @@ def _matches(job: _Job, keywords: Sequence[str]) -> bool:
     haystack = " ".join(
         [job.title, " ".join(job.tags), _TAG_RE.sub(" ", job.description)]
     ).casefold()
-    return any(word.casefold() in haystack for word in keywords)
+    return any(mentions(haystack, word) for word in keywords)
 
 
 @register_source

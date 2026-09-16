@@ -61,4 +61,6 @@ export interface ActiveProfile {
   id: string
   name: string | null
   headline: string | null
+  /** Job titles the owner is looking for; empty means "search by skills". */
+  target_titles: string[]
 }

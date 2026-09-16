@@ -610,3 +610,22 @@ def slugs_for(
             continue
         ranked.append((_rank(slug, vocabulary=vocabulary, by_role=by_role), slug))
     return tuple(slug for _, slug in sorted(ranked))
+
+
+def rank_slugs(
+    slugs: Iterable[str],
+    keywords: Sequence[str],
+    *,
+    families: Sequence[RoleFamily] = (),
+    headline: str | None = None,
+) -> tuple[str, ...]:
+    """Re-order an already chosen slug list for a new profile input, offline.
+
+    :func:`slugs_for` needs hh's live role directory to decide which slugs are
+    in; this one takes the list a previous run stored and only orders it, with
+    the same :func:`_rank`. It is what lets a person change their job titles
+    and see which pages will be opened first without a request being made.
+    Every slug counts as named by a role, which is how the stored list got in.
+    """
+    vocabulary = vocabulary_for((), keywords, families, headline)
+    return tuple(sorted(slugs, key=lambda slug: _rank(slug, vocabulary=vocabulary, by_role=True)))

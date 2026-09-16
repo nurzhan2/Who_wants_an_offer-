@@ -485,6 +485,8 @@ def test_a_source_missing_its_credentials_does_not_run(monkeypatch: pytest.Monke
     reads it.
     """
     monkeypatch.setattr(settings, "source_credentials", {})
+    # jsearch also accepts the older RAPIDAPI_KEY, which a developer's .env sets.
+    monkeypatch.setattr(settings, "rapidapi_key", None)
     monkeypatch.setattr(settings, "sources_enabled", frozenset())
     monkeypatch.setattr(settings, "sources_disabled", frozenset())
 

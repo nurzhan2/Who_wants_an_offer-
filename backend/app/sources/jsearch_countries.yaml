@@ -1,0 +1,24 @@
+# Which country JSearch is asked about when the plan names a place.
+#
+# JSearch takes an ISO country and defaults to "us": "Python Developer Almaty"
+# sent without `country` searches American postings for a Kazakh city. The
+# profile stores places as free text, so a place is matched against `aliases`
+# case-insensitively, as a substring, and the first entry that matches wins.
+#
+# A file rather than constants for the reason hh_sites.yaml is one: the places a
+# deployment searches are not a property of the code. A place listed nowhere
+# here is still searched, with the place in the query text and no country.
+countries:
+  - code: kz
+    aliases: [kazakhstan, казахстан, қазақстан, алматы, алма-ата, almaty, астана,
+              astana, нур-султан, шымкент, shymkent, караганда, karaganda]
+  - code: ru
+    aliases: [russia, россия, москва, moscow, санкт-петербург, saint petersburg]
+  - code: de
+    aliases: [germany, deutschland, германия, berlin, берлин, munich, münchen]
+  - code: nl
+    aliases: [netherlands, нидерланды, amsterdam, амстердам]
+  - code: pl
+    aliases: [poland, польша, warsaw, варшава]
+  - code: ae
+    aliases: [uae, оаэ, dubai, дубай]

@@ -10,6 +10,11 @@ cost the illusion that the feed arrives filtered, so the feed is fetched once
 per run and :meth:`RemotiveSource.search` matches ``SearchQuery.keywords``
 against the payload locally. Do not "fix" the parameters back in.
 
+The feed is small by design, not under-read. Re-measured 2026-09-16 with one
+unparameterised call: ``job-count`` and ``total-job-count`` were both 13, spread
+over nine categories, four of them software. A run that stores six of those is
+the keyword filter doing its job; the rest were writers, sales and support.
+
 The second shape-defining fact is the request budget. Remotive's legal notice
 asks for at most about four calls a day and says excessive requests will be
 blocked, so ``min_interval`` and ``cache_ttl`` are both six hours: one run every
@@ -31,7 +36,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
-from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
+from app.schemas.crawl import SavedState, SearchPreview
+from app.sources.base import (
+    AccessMode,
+    BaseSource,
+    RateLimit,
+    RawPosting,
+    SearchQuery,
+    mentions,
+)
 from app.sources.registry import register_source
 
 logger = get_logger(__name__)
@@ -250,6 +263,20 @@ class RemotiveSource(BaseSource):
             emitted += 1
             yield posting
 
+    def preview_search(
+        self, queries: Sequence[SearchQuery], stored: Sequence[SavedState]
+    ) -> SearchPreview:
+        """The local filter, with the size of what it filters stated."""
+        preview = super().preview_search(queries, stored)
+        return preview.model_copy(
+            update={
+                "note": (
+                    "Бесплатная лента Remotive — 13–18 вакансий на все профессии, "
+                    "запрос не чаще раза в 6 часов; фильтр по этим словам применяется здесь."
+                )
+            }
+        )
+
     def _parse(self, payload: Any) -> RemotiveFeed:
         """Validate the envelope, or fail this source with a readable reason."""
         try:
@@ -326,10 +353,11 @@ def _haystack(job: RemotiveJob) -> str:
 def _matches(job: RemotiveJob, needles: tuple[str, ...]) -> bool:
     """Whether any keyword occurs in the posting.
 
-    Deliberately permissive substring matching over title, tags, category and
-    description: this filter only has to cut the obviously unrelated half of a
+    Deliberately permissive matching over title, tags, category and
+    description — a word as a substring, a job title by all of its words
+    (``base.mentions``): this filter only has to cut the obviously unrelated half of a
     mixed feed, and deciding how well a posting actually fits the profile is the
     scoring layer's job, on the full text, with weights.
     """
     haystack = _haystack(job)
-    return any(needle in haystack for needle in needles)
+    return any(mentions(haystack, needle) for needle in needles)

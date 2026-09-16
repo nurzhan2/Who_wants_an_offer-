@@ -11,18 +11,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import get_logger
 from app.db.repositories.pipeline_run import PipelineRunRepository
+from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.source_quota import SourceQuotaRepository
+from app.db.repositories.source_state import SourceStateRepository
 from app.pipeline.runner import RunReport
 from app.schemas.pipeline import PipelineRunRead
+from app.schemas.profile import CandidateProfileRead
 from app.schemas.source import (
     EmbeddingSummary,
     PlanSummary,
     RunResponse,
+    SearchPlanResponse,
     SourceRunSummary,
+    SourceSearchPreview,
     SourcesResponse,
     SourceStatus,
 )
 from app.sources.base import BaseSource, SourceUnavailable, Unavailable
+from app.sources.query_planner import (
+    FALLBACK_HEADLINE_LABEL,
+    TARGET_TITLE_LABEL,
+    intent_for,
+    plan_queries,
+)
 from app.sources.registry import all_sources, disabled_reason, import_errors
 
 logger = get_logger(__name__)
@@ -130,3 +141,49 @@ async def recent_runs(
     """Run history, newest first."""
     runs = await PipelineRunRepository(session).recent(source_slug=source_slug, limit=limit)
     return [PipelineRunRead.model_validate(run) for run in runs]
+
+
+async def search_plan(session: AsyncSession) -> SearchPlanResponse | None:
+    """What the next run will ask each source for, or None with no active profile.
+
+    Built from the same planner the run uses, so what the screen shows is what
+    the run does. No source is contacted: each one renders its part from the
+    plan and from the state it saved last time.
+    """
+    profile = await ProfileRepository(session).get_active()
+    if profile is None:
+        return None
+    read = CandidateProfileRead.model_validate(profile)
+    plan = plan_queries(read)
+    states = SourceStateRepository(session)
+    quotas = SourceQuotaRepository(session)
+
+    previews: list[SourceSearchPreview] = []
+    for source in all_sources():
+        reason = await _reason(source, quotas)
+        previews.append(
+            SourceSearchPreview(
+                slug=source.slug,
+                name=source.name,
+                enabled=reason is None,
+                inactive=reason,
+                preview=source.preview_search(plan.queries, await states.all_for(source.slug)),
+            )
+        )
+    return SearchPlanResponse(
+        target_titles=list(read.target_titles),
+        basis=_basis(plan.groups),
+        intent=intent_for(read),
+        queries=len(plan.queries),
+        dropped=plan.dropped,
+        sources=previews,
+    )
+
+
+def _basis(groups: tuple[str, ...]) -> str:
+    """Where the plan's words came from, in one word the screen translates."""
+    if TARGET_TITLE_LABEL in groups:
+        return "titles"
+    if FALLBACK_HEADLINE_LABEL in groups:
+        return "headline"
+    return "skills" if groups else "none"

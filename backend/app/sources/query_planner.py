@@ -116,6 +116,15 @@ UNKNOWN_SLUG = slugify("")
 #: with a group name coming out of the dictionary.
 FALLBACK_SKILLS_LABEL = "fallback:skills"
 FALLBACK_HEADLINE_LABEL = "fallback:headline"
+#: Label of a group made of one job title the owner typed. Every title shares
+#: it: a label is safe to log, and the titles themselves are the owner's words.
+TARGET_TITLE_LABEL = "target:title"
+
+#: Mirrors ``SearchQuery.headline``.
+MAX_INTENT_CHARS = 300
+#: Between two titles in the intent line. A slash, because hh's ranking reads
+#: words and a slash is not one.
+INTENT_SEPARATOR = " / "
 
 #: Mirrors ``SearchQuery.area``. Anything longer than the field accepts is a
 #: sentence rather than a place, and truncating it would search for half a
@@ -302,6 +311,44 @@ def keyword_groups_for(
     return ()
 
 
+def title_groups_for(profile: CandidateProfileRead) -> tuple[KeywordGroup, ...]:
+    """One group per job title the owner typed, in their order.
+
+    A title is ONE keyword, not its words: «Python Developer» sent to a search
+    API is the phrase the owner means, and split into ``python`` and
+    ``developer`` the second word alone matches every posting in a feed. The
+    sources that filter locally match a phrase by all of its words; see
+    ``app.sources.base.mentions``.
+    """
+    return tuple(
+        KeywordGroup(label=TARGET_TITLE_LABEL, keywords=(title,))
+        for title in profile.target_titles
+        if title.strip()
+    )
+
+
+def intent_for(profile: CandidateProfileRead) -> str | None:
+    """What the owner is looking for, as the one line a source ranks by.
+
+    The typed titles come first and the resume headline after them, so the
+    titles weigh at least as much as the headline everywhere the line is read —
+    hh's slug ranking reads every word of it with the same top weight. Without
+    titles this is the headline alone, which is the previous behaviour.
+    """
+    parts = [*profile.target_titles]
+    headline = " ".join((profile.headline or "").split())
+    if headline and headline.casefold() not in {part.casefold() for part in parts}:
+        parts.append(headline)
+    line = ""
+    for part in parts:
+        candidate = f"{line}{INTENT_SEPARATOR}{part}" if line else part
+        if len(candidate) > MAX_INTENT_CHARS:
+            # Cut at a whole title: half a title is a different job.
+            break
+        line = candidate
+    return line or None
+
+
 def placements_for(profile: CandidateProfileRead) -> tuple[Placement, ...]:
     """Where to look, most promising first, at most :data:`MAX_PLACEMENTS`.
 
@@ -404,7 +451,14 @@ def plan_queries(
     # pagination of the same one. The bounds keep it recognisable as a plan
     # either way.
     wanted = min(MAX_KEYWORD_GROUPS, max(MIN_KEYWORD_GROUPS, math.ceil(budget / len(placements))))
-    groups = keyword_groups_for(profile, canonicalizer=canonicalizer, limit=wanted)
+    # The owner's titles replace the skill groups rather than joining them.
+    # Joined, the skills would still put Go and PHP in the plan beside «Python
+    # Developer», which is the behaviour the titles exist to end. No titles is
+    # the previous plan, unchanged.
+    groups = title_groups_for(profile) or keyword_groups_for(
+        profile, canonicalizer=canonicalizer, limit=wanted
+    )
+    intent = intent_for(profile)
 
     if not groups:
         # Every skill missing from the dictionary and no usable headline. A
@@ -429,7 +483,7 @@ def plan_queries(
                     group,
                     placements[placement_index],
                     posted_within_days=posted_within_days,
-                    headline=" ".join((profile.headline or "").split()) or None,
+                    headline=intent,
                 )
                 ordered.append((group.label, query))
 

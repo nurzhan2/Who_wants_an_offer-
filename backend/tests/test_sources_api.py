@@ -28,6 +28,7 @@ from app.pipeline.embedding import EmbeddingOutcome
 from app.pipeline.runner import RunReport, SourceOutcome
 from app.schemas.pipeline import PipelineRunCreate, PipelineRunFinish
 from app.sources.base import SourceUnavailable, Unavailable
+from app.sources.jsearch import DAILY_ALLOWANCE
 from app.sources.query_planner import QueryPlan
 
 pytestmark = pytest.mark.db
@@ -73,6 +74,9 @@ async def test_an_unconfigured_source_names_the_missing_key_and_nothing_else(
     """The name is what the reader needs to act. A value, a prefix or a length
     would each narrow the key for anyone who can see the screen."""
     monkeypatch.setattr(settings, "source_credentials", {})
+    # The older variable counts as the credential too, and a developer's .env
+    # sets it; cleared so this is about the missing branch wherever it runs.
+    monkeypatch.setattr(settings, "rapidapi_key", None)
 
     body = (await async_client.get(SOURCES_URL)).json()
     jsearch = next(item for item in body["sources"] if item["slug"] == "jsearch")
@@ -116,7 +120,7 @@ async def test_the_page_carries_the_limits_a_reader_needs(
     body = (await async_client.get(SOURCES_URL)).json()
     by_slug = {item["slug"]: item for item in body["sources"]}
 
-    assert by_slug["jsearch"]["daily_quota"] == 100
+    assert by_slug["jsearch"]["daily_quota"] == DAILY_ALLOWANCE
     assert by_slug["jsearch"]["terms_url"]
     assert by_slug["remotive"]["attribution"]
     # An API-mode source without terms cannot be registered, so this is a

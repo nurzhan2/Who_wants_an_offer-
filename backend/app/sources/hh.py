@@ -193,14 +193,22 @@ from pydantic import (
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.db.enums import RemoteType, SalaryPeriod
-from app.schemas.crawl import CrawlPosition, SavedState
-from app.sources.base import AccessMode, BaseSource, RateLimit, RawPosting, SearchQuery
+from app.schemas.crawl import CrawlPosition, SavedState, SearchPreview, SearchUse
+from app.sources.base import (
+    PREVIEW_TERMS,
+    AccessMode,
+    BaseSource,
+    RateLimit,
+    RawPosting,
+    SearchQuery,
+)
 from app.sources.hh_roles import (
     DirectoryRole,
     RoleFamily,
     carries,
     families_for,
     load_families,
+    rank_slugs,
     read_directory,
     roles_for,
     slugs_for,
@@ -2224,6 +2232,58 @@ class HHSource(BaseSource):
     async def _save_plan(self, site: HHSite, plan: CatalogPlan) -> None:
         """Record the plan and its rotation cursor."""
         await self.state_set(self._catalog_key(site), plan.model_dump(mode="json"))
+
+    def preview_search(
+        self, queries: Sequence[SearchQuery], stored: Sequence[SavedState]
+    ) -> SearchPreview:
+        """Which catalogue pages would be opened first under this plan.
+
+        The slug list is the one a previous run resolved and stored; it is
+        re-ordered here with the ranking the crawl uses, under the plan's
+        keywords and intent line, so the effect of new job titles shows before
+        a request is made. When the stored list was resolved under a different
+        line, the next run resolves it again and the set itself may change —
+        the note says so rather than presenting the old set as final.
+        """
+        keywords = tuple(sorted({word for query in queries for word in query.keywords}))
+        headline = next((query.headline for query in queries if query.headline), None)
+        families = families_for(keywords, self.families)
+        wanted = {self._catalog_key(site) for site in self.sites_for(queries)}
+        slugs: dict[str, None] = {}
+        stale = False
+        resolved = False
+        for row in stored:
+            if row.key not in wanted:
+                continue
+            try:
+                plan = CatalogPlan.model_validate(row.value)
+            except ValidationError:
+                logger.warning("sources.hh.state_unreadable", key=row.key)
+                continue
+            resolved = True
+            stale = (
+                stale
+                or plan.headline != headline
+                or set(plan.families) != {family.key for family in families}
+            )
+            slugs.update(dict.fromkeys(plan.slugs))
+        ranked = rank_slugs(slugs, keywords, families=families, headline=headline)
+        if not resolved:
+            note = "Список профессий hh ещё не собирался: он появится после первого прогона."
+        elif stale:
+            note = (
+                "Список собран под прежний поиск, порядок пересчитан под текущий. "
+                "На следующем прогоне hh заново соберёт и сам список профессий (семейства: "
+                f"{', '.join(family.key for family in families) or 'нет'})."
+            )
+        else:
+            note = f"За прогон открывается {CATALOG_PAGES_PER_RUN} страниц каталога."
+        return SearchPreview(
+            use=SearchUse.CATALOG,
+            terms=list(ranked[:PREVIEW_TERMS]),
+            more=max(0, len(ranked) - PREVIEW_TERMS),
+            note=note,
+        )
 
     # ── position ──────────────────────────────────────────────────────
 
