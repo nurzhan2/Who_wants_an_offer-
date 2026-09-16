@@ -64,15 +64,17 @@ changes, so it stays the date an outcome was *first* seen, which is what a
 time-to-answer measurement needs.
 """
 
+import hashlib
+import json
 from collections.abc import Iterable, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -94,6 +96,7 @@ from app.schemas.agent import (
     CONTRACT_VERSION,
     AgentStatus,
     ApplicationResult,
+    DashboardConfirmation,
     MatchExplanation,
     QueueItem,
     QueueResponse,
@@ -136,6 +139,7 @@ async def build_queue(
     profile_id: UUID | None = None,
     min_score: Decimal | None = None,
     require_letter: bool = True,
+    vacancy_id: UUID | None = None,
 ) -> QueueResponse:
     """Vacancies worth an application, best score first.
 
@@ -160,6 +164,7 @@ async def build_queue(
                 min_score=threshold,
                 require_letter=require_letter,
                 limit=limit * OVERFETCH + OVERFETCH,
+                vacancy_id=vacancy_id,
             )
         )
     ).all()
@@ -180,7 +185,8 @@ async def build_queue(
         if item is None:
             continue
         seen.add(row.vacancy_id)
-        items.append(item.model_copy(update={"ats": _ats_summary(item, row, held)}))
+        item = item.model_copy(update={"ats": _ats_summary(item, row, held)})
+        items.append(item.model_copy(update={"confirmation": _confirmation(item, row)}))
 
     logger.info(
         "agent.queue.served",
@@ -305,8 +311,76 @@ async def active_profile_id(session: AsyncSession) -> UUID | None:
 SEED_ID_MARKER: Final[str] = "-dev-"
 
 
+def card_digest(item: QueueItem) -> str:
+    """SHA-256 of everything a confirmation card shows about this item.
+
+    The dashboard computes it when the owner opens the card and again when they
+    confirm; the queue computes it once more before serving the confirmation;
+    the agent binds its mandate to it. Canonical JSON of the item without the
+    confirmation itself and without ``match``, whose content the flat
+    ``score_explanation`` already carries. Any change to what the owner read —
+    a regenerated letter, a rescored vacancy, a new line from hh, a moved link
+    — gives a different digest, and the confirmation stops applying.
+    """
+    payload = item.model_dump(mode="json", exclude={"confirmation", "match"})
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def letter_digest(letter: str | None) -> str:
+    """SHA-256 of a letter, spelled exactly as ``agent.mandate.digest`` spells it.
+
+    The agent compares this with the letter it is about to type, so the two
+    sides must agree on the empty letter too: ``None`` digests as ``""``.
+    """
+    return hashlib.sha256((letter or "").encode("utf-8")).hexdigest()
+
+
+def _confirmation(item: QueueItem, row: Any) -> DashboardConfirmation | None:
+    """The owner's dashboard confirmation, if it still describes this item.
+
+    ``Any`` for the row for the reason :func:`_to_item` gives.
+    """
+    confirmed_at = row.confirmed_at
+    if confirmed_at is None or row.confirmed_card_digest is None:
+        return None
+    if datetime.now(UTC) - confirmed_at > timedelta(hours=settings.agent_confirmation_ttl_hours):
+        return None
+    if row.confirmed_letter_digest != letter_digest(item.letter):
+        return None
+    if row.confirmed_card_digest != card_digest(item):
+        return None
+    return DashboardConfirmation(
+        confirmed_at=confirmed_at,
+        letter_digest=row.confirmed_letter_digest,
+        card_digest=row.confirmed_card_digest,
+    )
+
+
+def _letter_row(column: Any) -> Any:
+    """One column of the row whose letter the queue serves.
+
+    The same row :func:`_queue_statement`'s ``letter`` reads — the oldest one
+    holding a letter — because a confirmation, and hh's lines shown beside it,
+    belong to that letter. ``Any`` because the column type varies per call.
+    """
+    return (
+        select(column)
+        .where(Application.vacancy_id == Vacancy.id)
+        .where(Application.cover_letter.is_not(None))
+        .order_by(Application.created_at, Application.id)
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
 def _queue_statement(
-    *, profile_id: UUID, min_score: Decimal, require_letter: bool, limit: int
+    *,
+    profile_id: UUID,
+    min_score: Decimal,
+    require_letter: bool,
+    limit: int,
+    vacancy_id: UUID | None = None,
 ) -> Select[Any]:
     """One statement, explicit about its columns.
 
@@ -353,6 +427,11 @@ def _queue_statement(
             Match.red_flags,
             Match.experience_gap_years,
             letter.label("letter"),
+            _letter_row(Application.hh_warning).label("hh_warning"),
+            _letter_row(Application.hh_blocking_warning).label("hh_blocking_warning"),
+            _letter_row(Application.confirmed_at).label("confirmed_at"),
+            _letter_row(Application.confirmed_letter_digest).label("confirmed_letter_digest"),
+            _letter_row(Application.confirmed_card_digest).label("confirmed_card_digest"),
         )
         .select_from(Match)
         .join(Vacancy, Vacancy.id == Match.vacancy_id)
@@ -380,6 +459,8 @@ def _queue_statement(
     )
     if require_letter:
         statement = statement.where(letter.is_not(None))
+    if vacancy_id is not None:
+        statement = statement.where(Vacancy.id == vacancy_id)
     return statement
 
 
@@ -427,7 +508,18 @@ def _to_item(row: Any) -> QueueItem | None:
         match=explanation,
         anonymous=bool(derived.get("anonymous", False)),
         employer_on_additional_check=bool(derived.get("employer_on_additional_check", False)),
+        hh_lines=_hh_lines(row.hh_blocking_warning, row.hh_warning),
     )
+
+
+def _hh_lines(*texts: str | None) -> list[str]:
+    """hh's stored sentences, one per line, each once, in the order given."""
+    lines: list[str] = []
+    for text_ in texts:
+        for line in (text_ or "").splitlines():
+            if line.strip() and line.strip() not in lines:
+                lines.append(line.strip())
+    return lines
 
 
 def _ats_summary(item: QueueItem, row: Any, held: Sequence[HeldSkill]) -> ATSSummary | None:
@@ -607,6 +699,16 @@ async def _upsert(
 
     _record_agent(application, result)
     _record_hh(application, result)
+    # One confirmation is one attempt: whatever the agent reports, the "yes" it
+    # acted on is spent. On every row of the vacancy, because the confirmation
+    # sits on the row holding the letter and this result lands on the oldest.
+    await session.execute(
+        update(Application)
+        .where(Application.vacancy_id == vacancy_id)
+        .where(Application.confirmed_at.is_not(None))
+        .values(confirmed_at=None, confirmed_letter_digest=None, confirmed_card_digest=None)
+        .execution_options(synchronize_session="fetch")
+    )
     if result.status is AgentStatus.SENT:
         # The only forward move this endpoint makes, and only forward: a row
         # somebody already dragged to "interview" stays there.

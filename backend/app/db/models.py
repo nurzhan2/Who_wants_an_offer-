@@ -36,6 +36,9 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import (
+    text as sql_text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -745,6 +748,25 @@ class Application(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     #: time-to-answer from :attr:`sent_at` without guessing.
     hh_last_state_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # ── the person's confirmation, given in the dashboard ─────────────
+    #: When the owner confirmed this application on the vacancy card. Written
+    #: only by ``app.services.confirmations`` after the card the owner read was
+    #: recomputed and matched; cleared by the first result the agent reports
+    #: for this vacancy, so one confirmation is one attempt. NULL means nobody
+    #: confirmed it, and the agent's dashboard mode then leaves the vacancy
+    #: alone.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: SHA-256 of the letter the owner read. A regeneration replaces
+    #: :attr:`cover_letter` and so voids the confirmation, here and again in the
+    #: agent, which compares it with the letter it is about to type.
+    confirmed_letter_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    #: SHA-256 of the whole card the owner read — vacancy, link, letter, score
+    #: and its explanation, the ATS summary, hh's warnings. The agent binds its
+    #: mandate to it, the way the terminal confirmation binds the card it
+    #: printed. The queue serves a confirmation only while the card it would
+    #: show today still has this digest.
+    confirmed_card_digest: Mapped[str | None] = mapped_column(CHAR(64))
+
     vacancy: Mapped[Vacancy] = relationship(back_populates="applications")
 
 
@@ -946,7 +968,9 @@ class ReferenceDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     #: Off means "keep it, do not show it". Deleting is also available; this is
     #: for trying a reference out and putting it back.
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sql_text("true"), nullable=False
+    )
 
     #: Provenance of the upload, so a list of five references is legible. NULL
     #: for a reference pasted as text, which is a real and ordinary case.
@@ -989,16 +1013,24 @@ class GenerationRule(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     severity: Mapped[RuleSeverity] = mapped_column(
         pg_enum(RuleSeverity, "rule_severity"),
         default=RuleSeverity.HARD,
+        # Declared to match what 0011_workshop created. The model omitted it,
+        # so ``alembic check`` reported drift on every run and stopped being a
+        # signal anybody could read (fixed 2026-09-16).
+        server_default=sql_text("'hard'::rule_severity"),
         nullable=False,
     )
     #: This kind's parameters, as ``app.workshop.rules.RuleParams`` dumps them.
     #: Carries ``kind`` itself, so a row is self-describing and a mismatch
     #: between the column and the payload fails validation rather than being
     #: resolved by whichever the reader happened to trust.
-    params: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    params: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default=sql_text("'{}'::jsonb"), nullable=False
+    )
     #: What a person is shown when this rule is broken. Russian, theirs, and
     #: **never sent to the model** — the block the model is shown is rendered
     #: from ``params`` by code, so a sentence typed here cannot become an
     #: instruction. See ``app/workshop/prompt.py``.
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_active: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default=sql_text("true"), nullable=False
+    )

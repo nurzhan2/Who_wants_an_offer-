@@ -44,6 +44,7 @@ result leaves ``application.sent_letter`` NULL. Nothing here fills that gap
 from ``cover_letter``, and the reason is under the field itself.
 """
 
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, Final
@@ -127,6 +128,23 @@ class MatchExplanation(BaseModel):
     experience_gap_years: Decimal | None = None
 
 
+class DashboardConfirmation(BaseModel):
+    """The owner's "yes" to one card, given in the dashboard and still valid.
+
+    Served on a queue item only while it still describes what would be sent:
+    the card the queue would show now has ``card_digest``, the letter has
+    ``letter_digest``, and the confirmation is younger than
+    ``AGENT_CONFIRMATION_TTL_HOURS``. Anything else is served as no
+    confirmation at all, and the agent's dashboard mode then leaves the item
+    alone. The agent re-checks the letter itself before minting a mandate
+    bound to ``card_digest``. See ``app.services.confirmations``.
+    """
+
+    confirmed_at: datetime
+    letter_digest: str = Field(min_length=64, max_length=64)
+    card_digest: str = Field(min_length=64, max_length=64)
+
+
 class QueueItem(BaseModel):
     """One vacancy offered to the agent.
 
@@ -185,6 +203,13 @@ class QueueItem(BaseModel):
     #: inbox. ``None`` means the item carries no letter and nothing was audited,
     #: which a card must not print as a pass.
     ats: ATSSummary | None = None
+    #: What hh said about this vacancy on earlier runs, one line each, as the
+    #: tracker stored it. Part of the card the owner confirms in the dashboard.
+    hh_lines: list[str] = Field(default_factory=list)
+    #: The owner's confirmation from the dashboard, when there is a valid one.
+    #: ``None`` for every item the owner has not confirmed there — which the
+    #: terminal flow does not care about and the dashboard flow refuses to send.
+    confirmation: DashboardConfirmation | None = None
 
 
 class QueueResponse(BaseModel):

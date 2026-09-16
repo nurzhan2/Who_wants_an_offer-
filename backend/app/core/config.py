@@ -338,6 +338,11 @@ class Settings(BaseSettings):
     #: on the corpus measured 13 Sep 2026, 70 lets 1129 of 1355 unfiltered
     #: vacancies through under the title formula and 78 lets 78.
     agent_queue_min_score: Annotated[int, Field(ge=0, le=100)] = 78
+    #: How long a confirmation given on the dashboard's vacancy card stays good.
+    #: A third of the first real queue (16 Sep 2026) was archived by the time
+    #: the agent reached it; a "yes" given days ago was given about a page that
+    #: may no longer exist, so it expires and the owner is asked again.
+    agent_confirmation_ttl_hours: Annotated[int, Field(ge=1, le=720)] = 72
 
     @field_validator("*", mode="before")
     @classmethod
