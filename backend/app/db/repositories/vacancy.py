@@ -29,6 +29,7 @@ from sqlalchemy import (
     cast as sql_cast,
 )
 from sqlalchemy import update as sa_update
+from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +39,7 @@ from app.db.base import uuid7
 from app.db.enums import MatchBucket
 from app.db.models import Application, Match, Vacancy, VacancySkill, VacancySource
 from app.db.repositories.cursor import Cursor, SortableColumn, keyset_order_by, keyset_where
+from app.db.seed_rows import fullest_first, seed_only
 from app.schemas.common import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -756,13 +758,27 @@ class VacancyRepository:
         return and_(Match.vacancy_id == Vacancy.id, Match.profile_id == profile_id)
 
     def _base_select(self, profile_id: UUID | None) -> Select[Any]:
-        """Exactly the columns the dashboard table renders, and nothing else."""
+        """Exactly the columns the dashboard table renders, and nothing else.
+
+        The sources come fullest first, so the first slug and ``source_url`` name
+        the same row: the one a person learns most from when they open it.
+        """
+        order = (*fullest_first(), VacancySource.created_at, VacancySource.id)
         source_slugs = (
-            select(func.array_agg(VacancySource.source_slug))
+            select(func.array_agg(aggregate_order_by(VacancySource.source_slug, *order)))
             .where(VacancySource.vacancy_id == Vacancy.id)
             .correlate(Vacancy)
             .scalar_subquery()
             .label("source_slugs")
+        )
+        source_url = (
+            select(VacancySource.url)
+            .where(VacancySource.vacancy_id == Vacancy.id)
+            .correlate(Vacancy)
+            .order_by(*order)
+            .limit(1)
+            .scalar_subquery()
+            .label("source_url")
         )
         is_applied = (
             select(1).where(Application.vacancy_id == Vacancy.id).correlate(Vacancy).exists()
@@ -773,6 +789,8 @@ class VacancyRepository:
                 Vacancy.title,
                 Vacancy.company,
                 source_slugs,
+                source_url,
+                seed_only(Vacancy.id).label("is_seed"),
                 Vacancy.city,
                 Vacancy.country,
                 Vacancy.remote,

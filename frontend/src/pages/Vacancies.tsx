@@ -281,23 +281,31 @@ function NumberField({
   )
 }
 
+/**
+ * One row. The whole row opens the card; the original posting is a second,
+ * separate link, so the row is a block with a stretched link rather than an
+ * anchor — an anchor inside an anchor is not valid HTML and browsers split it.
+ */
 function Row({ item }: { item: VacancyListItem }) {
   return (
-    <a
-      href={href('vacancies', item.id)}
-      className="grid grid-cols-1 items-baseline gap-2 border-b border-hairline py-5 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper sm:grid-cols-[1fr_auto]"
-    >
+    <div className="relative grid grid-cols-1 items-baseline gap-2 border-b border-hairline py-5 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper sm:grid-cols-[1fr_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-3">
-          <span className="font-semibold">{item.title}</span>
+          <a
+            href={href('vacancies', item.id)}
+            className="font-semibold after:absolute after:inset-0 after:content-['']"
+          >
+            {item.title}
+          </a>
           <span className="text-small text-muted">{item.company ?? 'без компании'}</span>
           {item.is_applied ? <Pill>в трекере</Pill> : null}
+          {item.is_seed ? <Pill>тестовая запись</Pill> : null}
         </div>
         <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 text-small text-muted">
           <span>{item.city ?? 'без города'}</span>
           <span>{REMOTE[item.remote]}</span>
           <span>{salary(item.salary_min, item.salary_max, item.currency)}</span>
-          <span>{item.source_slugs.join(' · ')}</span>
+          <SourceLink item={item} />
           <span>{item.published_at ? date(item.published_at) : 'без даты'}</span>
           {item.missing_required_count > 0 ? (
             <span>
@@ -310,6 +318,33 @@ function Row({ item }: { item: VacancyListItem }) {
         </div>
       </div>
       <Score value={item.score} bucket={item.bucket} />
-    </a>
+    </div>
+  )
+}
+
+/**
+ * Where the vacancy was found, and the way to its original page.
+ *
+ * The link is `source_url` exactly as stored — never an address rebuilt from an
+ * id — and it belongs to the first source listed, the one holding the most
+ * data. A seed row gets no link: its address is example.test.
+ */
+function SourceLink({ item }: { item: VacancyListItem }) {
+  const sources = item.source_slugs.join(' · ') || 'без источника'
+  if (item.source_url === null || item.is_seed) {
+    return <span>{sources}</span>
+  }
+  return (
+    <span>
+      {sources} ·{' '}
+      <a
+        href={item.source_url}
+        target="_blank"
+        rel="noreferrer"
+        className="relative z-10 underline underline-offset-4"
+      >
+        оригинал ↗
+      </a>
+    </span>
   )
 }

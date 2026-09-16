@@ -593,6 +593,7 @@ GET    /api/v1/documents/queue        вакансии, которым стои�
 POST   /api/v1/documents/letters      написать письмо и сохранить его
 
 GET    /api/v1/sources                список, статус, лимиты, причина неактивности
+GET    /api/v1/sources/plan           что следующий прогон спросит у каждого источника
 POST   /api/v1/pipeline/run           ставит краул в очередь, отдаёт job
 GET    /api/v1/pipeline/jobs[/{id}]   опрос запущенного краула
 GET    /api/v1/pipeline/runs[/{id}]   история прогонов

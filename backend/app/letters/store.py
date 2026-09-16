@@ -33,6 +33,7 @@ from app.db.models import (
     VacancySkill,
     VacancySource,
 )
+from app.db.seed_rows import seed_only
 from app.letters import channel
 from app.letters.channel import SourceScope
 from app.letters.context import (
@@ -208,6 +209,9 @@ async def queue(
         .where(Match.score >= threshold)
         .where(Match.bucket != MatchBucket.FILTERED)
         .where(~channel.skipped_by_agent(Match.vacancy_id))
+        # Seeded rows link to example.test: a letter for one is a model call
+        # spent on a job that does not exist. See app/db/seed_rows.py.
+        .where(~seed_only(Match.vacancy_id))
         .where(Vacancy.is_active.is_(True))
         .where(Vacancy.is_spam.is_(False))
         .order_by(via_agent.desc(), Match.score.desc(), Match.vacancy_id)

@@ -66,6 +66,7 @@ from app.db.repositories import (
     SourceStateRepository,
     VacancyRepository,
 )
+from app.db.seed_rows import SEED_URL_PREFIX
 from app.documents import rules as document_rules
 from app.schemas.ats import (
     ATSCoverage,
@@ -609,7 +610,7 @@ def _source_row(index: int, slug: str) -> tuple[str, str, str, dict[str, Any]]:
     return (
         slug,
         f"{slug}-{name}",
-        f"https://example.test/{slug}/{name}",
+        f"{SEED_URL_PREFIX}{slug}/{name}",
         {"seed": name, "source": slug},
     )
 

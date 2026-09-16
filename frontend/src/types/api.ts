@@ -125,7 +125,11 @@ export interface VacancyListItem {
   id: string
   title: string
   company: string | null
+  /** Fullest source first; `source_url` is that source's page. */
   source_slugs: string[]
+  source_url: string | null
+  /** Every source row was invented by scripts/seed.py. */
+  is_seed: boolean
   city: string | null
   country: string | null
   remote: Remote
@@ -232,7 +236,20 @@ export interface VacancyRead {
   period: string | null
   skills: { canonical_name: string; is_required: boolean; weight: string }[]
   /** Every posting this vacancy was deduplicated from, with the URL crawled. */
-  sources: { id: string; source_slug: string; external_id: string; url: string }[]
+  sources: VacancySource[]
+}
+
+export interface VacancySource {
+  id: string
+  source_slug: string
+  external_id: string
+  url: string
+  /** Who first published it, when this source republished it: jsearch → LinkedIn. */
+  publisher: string | null
+  /** The one holding the most data, listed first. */
+  is_primary: boolean
+  /** Invented by scripts/seed.py; the address leads nowhere. */
+  is_seed: boolean
 }
 
 export interface VacancyCard {
@@ -417,6 +434,7 @@ export interface Profile {
   total_years: string | null
   summary: string | null
   locations: string[]
+  target_titles: string[]
   relocation: boolean
   remote_pref: Remote | null
   salary_min: string | null

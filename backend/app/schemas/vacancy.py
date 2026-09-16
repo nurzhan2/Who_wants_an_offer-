@@ -41,6 +41,13 @@ class VacancySourceRead(ReadModel):
     source_slug: str
     external_id: str
     url: str
+    #: Who first published the posting, when this source republished it —
+    #: "LinkedIn" behind a jsearch row. None for a source that is the original.
+    publisher: str | None = None
+    #: The row the card links to first: the one holding the most data.
+    is_primary: bool = False
+    #: Invented by ``scripts/seed.py``; its address leads nowhere.
+    is_seed: bool = False
 
 
 class VacancySkillRead(ReadModel):
@@ -119,7 +126,14 @@ class VacancyListItem(BaseModel):
     id: UUID
     title: str
     company: str | None
+    #: Fullest source first; the first one is the one ``source_url`` points at.
     source_slugs: list[str] = Field(default_factory=list)
+    #: The original posting, on the source that holds the most data about it.
+    #: Taken from ``vacancy_source.url`` and never rebuilt from an id: sources
+    #: differ in domain, and hh in regional subdomain too.
+    source_url: str | None = None
+    #: Every source row was invented by ``scripts/seed.py``.
+    is_seed: bool = False
     city: str | None
     country: str | None
     remote: RemoteType

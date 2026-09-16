@@ -38,6 +38,7 @@ from app.db.models import (
     Vacancy,
     VacancySource,
 )
+from app.db.seed_rows import seed_only
 from app.documents.context import (
     EducationEntry,
     ExperienceEntry,
@@ -372,6 +373,8 @@ async def candidates(
             # A filtered vacancy is "do not apply"; a CV or a letter for it is
             # a model call spent on an application that must not go out.
             .where(Match.bucket != MatchBucket.FILTERED)
+            # Same for a seeded vacancy: its address is example.test.
+            .where(~seed_only(Match.vacancy_id))
             .where(Vacancy.is_active.is_(True))
             .where(Vacancy.is_spam.is_(False))
             .order_by(Match.score.desc(), Match.vacancy_id)

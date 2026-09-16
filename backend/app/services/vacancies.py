@@ -31,17 +31,20 @@ Kafka" off a row that says "you have RabbitMQ".
 """
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import ConfigurationError
 from app.core.logging import get_logger
-from app.db.models import CandidateProfile, Match
+from app.db.models import CandidateProfile, Match, VacancySource
 from app.db.repositories.application import ApplicationRepository
 from app.db.repositories.match import MatchRepository
 from app.db.repositories.profile import ProfileRepository
 from app.db.repositories.vacancy import VacancyRepository
+from app.db.seed_rows import is_seed_url, payload_size
 from app.resume.skills import SkillCanonicalizer, default_canonicalizer
 from app.schemas.common import CursorPage
 from app.schemas.dashboard import (
@@ -52,7 +55,8 @@ from app.schemas.dashboard import (
     VacancyCard,
 )
 from app.schemas.match import MatchComponentScores, MatchedSkill, MissingSkill
-from app.schemas.vacancy import VacancyFilter, VacancyListItem, VacancyRead
+from app.schemas.vacancy import VacancyFilter, VacancyListItem, VacancyRead, VacancySourceRead
+from app.sources.registry import get_source
 
 logger = get_logger(__name__)
 
@@ -129,11 +133,52 @@ async def card(session: AsyncSession, vacancy_id: UUID) -> VacancyCard | None:
         )
 
     return VacancyCard(
-        vacancy=VacancyRead.model_validate(vacancy),
+        vacancy=_with_sources(VacancyRead.model_validate(vacancy), vacancy.sources),
         match=_summary(match),
         requirements=requirements,
         letter=await ApplicationRepository(session).letter_brief(vacancy_id),
     )
+
+
+def _with_sources(read: VacancyRead, rows: Sequence[VacancySource]) -> VacancyRead:
+    """The card's source list, fullest first, each with its publisher and marks.
+
+    The order is the one the list uses (``app.db.seed_rows.fullest_first``),
+    computed here in Python over rows already loaded: real rows before seed
+    rows, then the larger payload, then the older row.
+    """
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            is_seed_url(row.url),
+            -payload_size(row.raw),
+            row.created_at,
+            str(row.id),
+        ),
+    )
+    sources = [
+        VacancySourceRead.model_validate(row).model_copy(
+            update={
+                "publisher": _publisher(row),
+                "is_primary": index == 0,
+                "is_seed": is_seed_url(row.url),
+            }
+        )
+        for index, row in enumerate(ordered)
+    ]
+    return read.model_copy(update={"sources": sources})
+
+
+def _publisher(row: VacancySource) -> str | None:
+    """Ask the row's own connector who published it; None for a slug nobody registers.
+
+    ``telegram`` is such a slug: seed rows carry it and no connector does.
+    """
+    try:
+        source = get_source(row.source_slug)
+    except ConfigurationError:
+        return None
+    return source.publisher_of(row.raw)
 
 
 def _summary(match: Match | None) -> MatchSummary | None:

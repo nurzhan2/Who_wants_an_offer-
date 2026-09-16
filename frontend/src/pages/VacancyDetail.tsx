@@ -5,7 +5,7 @@ import { useGenerateDocument } from '@/hooks/useDocuments'
 import { useVacancy, useWriteLetter } from '@/hooks/queries'
 import { count, date, dateTime, plural, salary, score } from '@/lib/format'
 import { EVIDENCE, outcomeLabel, REMOTE, REQUIREMENT_SOURCE, SKIPPED } from '@/lib/labels'
-import type { MatchSummary, RequirementStanding } from '@/types/api'
+import type { MatchSummary, RequirementStanding, VacancySource } from '@/types/api'
 import type { GeneratedDocument } from '@/types/documents'
 
 /**
@@ -56,17 +56,7 @@ export function VacancyDetail({ id }: { id: string }) {
             впервые увидели {date(vacancy.first_seen_at)} · опубликовано{' '}
             {vacancy.published_at ? date(vacancy.published_at) : 'без даты'}
           </p>
-          {/* One link per posting this vacancy was deduplicated from, named by
-              its source. Two unnamed "исходная страница" pills side by side are
-              indistinguishable, and for hh the address is a regional subdomain
-              that cannot be rebuilt from an id anyway. */}
-          <div className="mt-4 flex flex-wrap gap-3">
-            {vacancy.sources.map((source) => (
-              <a key={source.id} href={source.url} target="_blank" rel="noreferrer">
-                <Pill>{source.source_slug} ↗</Pill>
-              </a>
-            ))}
-          </div>
+          <Sources sources={vacancy.sources} />
         </div>
         <Score value={match?.score ?? null} bucket={match?.bucket ?? null} />
       </header>
@@ -253,6 +243,46 @@ function Explanation({ match }: { match: MatchSummary }) {
  * rule stopped it, and the reason is the whole message. A delivered one is a
  * link, because the file the server named is the thing the person wanted.
  */
+/** The one source the agent applies through; everywhere else a person does. */
+const AGENT_SOURCE = 'hh'
+
+/**
+ * One link per posting this vacancy was deduplicated from, named by its source
+ * and, for an aggregator, by who first published it: «jsearch → LinkedIn».
+ *
+ * Two unnamed "исходная страница" pills side by side are indistinguishable, and
+ * for hh the address is a regional subdomain that cannot be rebuilt from an id
+ * anyway. The first is the fullest; a seed row is named as one and not linked.
+ */
+function Sources({ sources }: { sources: VacancySource[] }) {
+  if (sources.length === 0) return null
+  const manual = !sources.some((source) => source.source_slug === AGENT_SOURCE && !source.is_seed)
+  return (
+    <div className="mt-4 flex flex-col gap-2">
+      <div className="flex flex-wrap gap-3">
+        {sources.map((source) => {
+          const label = source.publisher
+            ? `${source.source_slug} → ${source.publisher}`
+            : source.source_slug
+          return source.is_seed ? (
+            <Pill key={source.id}>{label} · тестовая запись</Pill>
+          ) : (
+            <a key={source.id} href={source.url} target="_blank" rel="noreferrer">
+              <Pill strong={source.is_primary}>{label} ↗</Pill>
+            </a>
+          )
+        })}
+      </div>
+      {manual ? (
+        <p className="text-small text-muted">
+          Автоотклик работает только для hh. Здесь откликаетесь сами: откройте оригинал и приложите
+          документы, собранные ниже.
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 function CvResult({ document }: { document: GeneratedDocument }) {
   if (!document.delivered || document.document_id === null) {
     return (
