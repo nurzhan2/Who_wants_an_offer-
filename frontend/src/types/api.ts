@@ -92,6 +92,8 @@ export interface Harvest {
 
 export interface ApplicationCounts {
   sent: number
+  /** Of `sent`, the ones hh itself confirmed. */
+  sent_confirmed: number
   queued: number
   needs_manual: number
   with_letter: number
@@ -263,6 +265,11 @@ export interface BoardCard {
   hh_negotiations_total: number | null
   hh_last_state: string | null
   hh_last_state_at: string | null
+  /** hh itself confirmed this send: a count of at least one, or a state. */
+  send_confirmed: boolean
+  vacancy_published_at: string | null
+  vacancy_last_seen_at: string | null
+  vacancy_active: boolean | null
 }
 
 export interface BoardColumn {

@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react'
 
-import { ApiError } from '@/api/client'
+import { explain } from '@/lib/errors'
 import { count, NOTHING, score as formatScore } from '@/lib/format'
 import { BUCKETS } from '@/lib/labels'
 import type { Bucket } from '@/types/api'
@@ -136,11 +136,12 @@ export function Empty({ children }: { children: ReactNode }) {
   return <p className="text-small text-muted">{children}</p>
 }
 
-export function Loading({ what }: { what: string }) {
+export function Loading({ what, lines = 4 }: { what: string; lines?: number }) {
   return (
-    <p className="text-small text-muted" role="status">
-      Загружаем {what}…
-    </p>
+    <div className="mb-section">
+      <p className="mb-6 text-small text-muted">Загружаем {what}…</p>
+      <Skeleton lines={lines} what={what} />
+    </div>
   )
 }
 
@@ -151,14 +152,28 @@ export function Loading({ what }: { what: string }) {
  * somebody to the network tab, and the backend already writes a sentence
  * explaining itself (see `app/core/exceptions.py`).
  */
-export function Failure({ error, what }: { error: unknown; what: string }) {
-  const known = error instanceof ApiError ? error : null
+export function Failure({
+  error,
+  what,
+  onRetry,
+}: {
+  error: unknown
+  what: string
+  onRetry?: () => void
+}) {
+  const { reason, remedy } = explain(error)
   return (
     <div className="border border-ink p-card" role="alert">
       <p className="font-semibold">Не удалось загрузить {what}.</p>
-      <p className="mt-2 text-small text-muted">
-        {known ? `${String(known.status)} · ${known.detail ?? known.message}` : 'Бэкенд недоступен.'}
-      </p>
+      <p className="mt-2 text-small">{reason}</p>
+      <p className="mt-1 text-small text-muted">{remedy}</p>
+      {onRetry ? (
+        <div className="mt-4">
+          <Button outline onClick={onRetry}>
+            Попробовать ещё раз
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -181,5 +196,85 @@ export function Ratio({ part, of }: { part: number | null; of: number | null }) 
     <span className="tnum">
       {count(part)} <span className="text-muted">из {count(of)}</span>
     </span>
+  )
+}
+
+/**
+ * The two buttons this system has: filled ink, and a hairline outline.
+ *
+ * Both are pills (75px) and both change state by colour inversion over the
+ * system's slow curve. A disabled button fades its ink rather than greying into
+ * a new colour, and says why through `title` when the caller knows.
+ */
+export function Button({
+  children,
+  onClick,
+  disabled = false,
+  outline = false,
+  title,
+  type = 'button',
+}: {
+  children: ReactNode
+  onClick?: () => void
+  disabled?: boolean
+  outline?: boolean
+  title?: string
+  type?: 'button' | 'submit'
+}) {
+  const shape =
+    'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-pill px-6 py-2 text-small ' +
+    'transition-[color,background-color,border-color,opacity] duration-800 ease-slow ' +
+    'disabled:cursor-not-allowed disabled:opacity-40'
+  const look = outline
+    ? 'border border-ink text-ink enabled:hover:bg-ink enabled:hover:text-paper'
+    : 'border border-ink bg-ink text-paper enabled:hover:bg-paper enabled:hover:text-ink'
+  return (
+    <button type={type} onClick={onClick} disabled={disabled} title={title} className={`${shape} ${look}`}>
+      {children}
+    </button>
+  )
+}
+
+/**
+ * A block of placeholder lines while something loads, so the page does not jump.
+ *
+ * Hairline bars at the height of the text they stand in for, pulsing through
+ * opacity only (0.4s steps are not motion, and reduced-motion stops them).
+ */
+export function Skeleton({ lines = 3, what }: { lines?: number; what: string }) {
+  return (
+    <div role="status" aria-label={`Загружаем ${what}`} className="space-y-3">
+      {Array.from({ length: lines }, (_, index) => (
+        <div
+          key={index}
+          className="skeleton h-4 bg-hairline"
+          style={{ width: `${String(100 - ((index * 17) % 45))}%` }}
+        />
+      ))}
+    </div>
+  )
+}
+
+/**
+ * An empty screen that says what to do next, with the button that does it.
+ *
+ * Every empty state in the product has a next step; a panel that only says
+ * "пусто" sends a person looking for it.
+ */
+export function NextStep({
+  title,
+  children,
+  action,
+}: {
+  title: string
+  children: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <div className="border border-hairline p-card">
+      <p className="font-semibold">{title}</p>
+      <div className="mt-2 max-w-2xl text-small text-muted">{children}</div>
+      {action ? <div className="mt-6 flex flex-wrap gap-3">{action}</div> : null}
+    </div>
   )
 }

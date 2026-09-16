@@ -1,7 +1,21 @@
 import type { UseQueryResult } from '@tanstack/react-query'
 
 import { href } from '@/app/routes'
-import { Card, Empty, Failure, Field, Loading, Pill, Ratio, Score, Section, Stat, Stats } from '@/components/ui'
+import { OperationsPanel } from '@/components/OperationsPanel'
+import {
+  Card,
+  Empty,
+  Failure,
+  Field,
+  Loading,
+  NextStep,
+  Pill,
+  Ratio,
+  Score,
+  Section,
+  Stat,
+  Stats,
+} from '@/components/ui'
 import { ago, count, date, dateTime, NOTHING, plural } from '@/lib/format'
 import { RUN_STATUS } from '@/lib/labels'
 import type { CrawlPosition, Overview as OverviewData, SourceRunState } from '@/types/api'
@@ -16,13 +30,25 @@ import type { CrawlPosition, Overview as OverviewData, SourceRunState } from '@/
  * on a corpus of thirteen thousand postings reads as a finished backfill.
  */
 export function Overview({ query }: { query: UseQueryResult<OverviewData> }) {
-  const { data, isPending, isError, error } = query
+  const { data, isPending, isError, error, refetch } = query
 
   if (isPending) return <Loading what="обзор" />
-  if (isError) return <Failure error={error} what="обзор" />
+  if (isError) {
+    return (
+      <Failure
+        error={error}
+        what="обзор"
+        onRetry={() => {
+          void refetch()
+        }}
+      />
+    )
+  }
 
   return (
     <div className="rise">
+      <FirstSteps data={data} />
+      <OperationsPanel />
       <Corpus data={data} />
       <Crawl data={data} />
       <Runs runs={data.runs} />
@@ -30,6 +56,46 @@ export function Overview({ query }: { query: UseQueryResult<OverviewData> }) {
       <Applications data={data} />
     </div>
   )
+}
+
+/**
+ * What to do first, when the database cannot answer anything yet.
+ *
+ * Shown only while something foundational is missing — no resume, or no
+ * vacancies — and gone as soon as it is not.
+ */
+function FirstSteps({ data }: { data: OverviewData }) {
+  if (data.profile === null) {
+    return (
+      <div className="mb-section">
+        <NextStep
+          title="Начните с резюме"
+          action={
+            <a
+              href={href('profile')}
+              className="rounded-pill border border-ink bg-ink px-6 py-2 text-small text-paper transition-colors duration-800 ease-slow hover:bg-paper hover:text-ink"
+            >
+              Загрузить резюме
+            </a>
+          }
+        >
+          Без резюме вакансии не с чем сравнивать. Загрузите PDF или DOCX на странице «Мои данные»
+          — разбор займёт около трёх минут, потом вернитесь сюда и нажмите «Собрать вакансии».
+        </NextStep>
+      </div>
+    )
+  }
+  if (data.vacancies.total === 0) {
+    return (
+      <div className="mb-section">
+        <NextStep title="В базе пока нет вакансий">
+          Нажмите «Собрать вакансии» ниже. Когда обход закончится, посчитайте эмбеддинги и
+          пересчитайте подбор — список появится на странице «Вакансии».
+        </NextStep>
+      </div>
+    )
+  }
+  return null
 }
 
 function Corpus({ data }: { data: OverviewData }) {
@@ -239,11 +305,19 @@ function Applications({ data }: { data: OverviewData }) {
   return (
     <Section
       title="Отклики"
-      note="«Отправлено» — это строки, по которым агент записал факт отправки. Строка, которую человек перетащил у себя на доске, сюда не попадает: только процесс, который печатал письмо, пишет дату отправки."
+      note="«Отправлено» — только отклики, которые подтвердил сам hh: его счётчик откликов на вакансии не ноль или он сообщил состояние переписки. Отправку, о которой отчитался агент, но hh её ещё не подтвердил, видно отдельно."
     >
       <Stats>
-        <Stat value={count(applications.sent)} label="отправлено" />
-        <Stat value={count(applications.queued)} label="в очереди" note="письмо есть, ждёт CLI" />
+        <Stat
+          value={count(applications.sent_confirmed)}
+          label="отправлено, hh подтвердил"
+          note={
+            applications.sent > applications.sent_confirmed
+              ? `ещё ${count(applications.sent - applications.sent_confirmed)} без подтверждения — нажмите «Обновить исходы откликов»`
+              : null
+          }
+        />
+        <Stat value={count(applications.queued)} label="в очереди" note="письмо есть, ждёт подтверждения" />
         <Stat
           value={count(applications.needs_manual)}
           label="needs_manual"

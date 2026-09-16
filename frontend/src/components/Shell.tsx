@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 
 import { href, ROUTES, type RouteName } from '@/app/routes'
+import { NoticeBanner } from '@/components/NoticeBanner'
 import { useHealth } from '@/hooks/useHealth'
 import { PARSE_STATUS } from '@/lib/labels'
 import type { ProfileBrief } from '@/types/api'
@@ -50,16 +51,18 @@ export function Shell({
           </ul>
         </nav>
       </header>
+      <NoticeBanner />
 
-      <main className="mx-auto max-w-shell px-6 py-section">
+      <main key={route} className="rise mx-auto max-w-shell px-6 py-section">
         <Owner profile={profile} />
         {children}
       </main>
 
       <footer className="mx-auto max-w-shell px-6 pb-section text-small text-muted">
         <p className="border-t border-hairline pt-6">
-          Дашборд только читает и запускает генерацию документов. Отклик отправляется командой{' '}
-          <code className="font-semibold">wwao apply --send</code>, где подтверждает человек.
+          Отклик уходит только после вашего подтверждения в карточке вакансии: письмо, ссылка и
+          оценка показываются целиком, и отправляет их агент на вашем компьютере — ровно то, что вы
+          подтвердили.
         </p>
       </footer>
     </div>

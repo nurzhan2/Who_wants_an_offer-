@@ -1,8 +1,10 @@
 import { useState } from 'react'
 
 import { href } from '@/app/routes'
-import { Card, Empty, Failure, Field, Loading, Pill, Section } from '@/components/ui'
+import { Freshness } from '@/components/Freshness'
+import { Button, Card, Empty, Failure, Field, Loading, NextStep, Pill, Section } from '@/components/ui'
 import { useBoard } from '@/hooks/queries'
+import { useOperations, useStartOperation } from '@/hooks/useOperations'
 import { count, date, plural, score } from '@/lib/format'
 import { APPLICATION_STATUS, OUTCOMES, outcomeLabel, STAGE_NOTES, STAGES } from '@/lib/labels'
 import type { BoardCard, BoardColumn } from '@/types/api'
@@ -22,10 +24,20 @@ import type { BoardCard, BoardColumn } from '@/types/api'
  * actually went out) is said in semibold.
  */
 export function Applications() {
-  const { data, isPending, isError, error } = useBoard()
+  const { data, isPending, isError, error, refetch } = useBoard()
 
   if (isPending) return <Loading what="отклики" />
-  if (isError) return <Failure error={error} what="отклики" />
+  if (isError) {
+    return (
+      <Failure
+        error={error}
+        what="отклики"
+        onRetry={() => {
+          void refetch()
+        }}
+      />
+    )
+  }
 
   const nothing =
     data.stages.every((column) => column.cards.length === 0) && data.other.cards.length === 0
@@ -34,12 +46,26 @@ export function Applications() {
     <div className="rise">
       <Section
         title="Отклики"
-        note="Слева направо — путь письма внутри проекта. Отправляет только CLI, где подтверждает человек; в дашборде такой кнопки нет."
+        note="Слева направо — путь письма внутри проекта. Отклик уходит только после вашего подтверждения в карточке вакансии; «отправлено» — только то, что подтвердил сам hh."
+        action={<RefreshOutcomes />}
       >
         {nothing ? (
-          <Empty>Трекер пуст: писем ещё не писали и откликов не отправляли.</Empty>
+          <NextStep
+            title="Трекер пуст"
+            action={
+              <a
+                href={href('overview')}
+                className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper"
+              >
+                К операциям
+              </a>
+            }
+          >
+            Писем ещё не писали и откликов не отправляли. На «Обзоре» нажмите «Написать письма» —
+            вакансии с письмами появятся здесь в колонке «в очереди».
+          </NextStep>
         ) : (
-          <div className="grid gap-6 lg:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
             {data.stages.map((column) => (
               <Column key={column.key} column={column} label={STAGES[column.key] ?? column.key} />
             ))}
@@ -62,7 +88,7 @@ export function Applications() {
             измерять нечего.
           </Empty>
         ) : (
-          <div className="grid gap-6 lg:grid-cols-4">
+          <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-4">
             {data.outcomes.map((column) => (
               <Column key={column.key} column={column} label={OUTCOMES[column.key] ?? column.key} />
             ))}
@@ -70,6 +96,25 @@ export function Applications() {
         )}
       </Section>
     </div>
+  )
+}
+
+/** The outcomes walk, from the screen where its result is read. */
+function RefreshOutcomes() {
+  const operations = useOperations()
+  const start = useStartOperation()
+  const busy = operations.data?.busy.includes('outcomes') ?? false
+  return (
+    <Button
+      outline
+      disabled={busy || start.isPending || operations.data === undefined}
+      title="Агент откроет ваши отправленные отклики на hh и прочитает ответ"
+      onClick={() => {
+        start.mutate('outcomes')
+      }}
+    >
+      {busy ? 'Исходы обновляются…' : 'Обновить исходы'}
+    </Button>
   )
 }
 
@@ -85,7 +130,8 @@ function Column({ column, label }: { column: BoardColumn; label: string }) {
       {STAGE_NOTES[column.key] ? (
         <p className="mb-4 text-small text-muted">{STAGE_NOTES[column.key]}</p>
       ) : null}
-      <div className="space-y-4">
+      <div className="rise-list space-y-4">
+        {column.cards.length === 0 ? <Empty>Пусто.</Empty> : null}
         {column.cards.map((card) => (
           <ApplicationCard key={`${column.key}-${card.id}`} card={card} />
         ))}
@@ -101,15 +147,26 @@ function ApplicationCard({ card }: { card: BoardCard }) {
   // application appears in a stage column and in an outcome column, and a card
   // that decided "was this sent" from its surroundings said different things
   // about one row in two places on the same screen.
-  const sent = card.sent_at !== null
+  const sent = card.sent_at !== null && card.send_confirmed
+  const unconfirmed = card.sent_at !== null && !card.send_confirmed
   const claimsSend = card.agent_status === 'sent' && card.sent_at === null
+  const archivedByAgent =
+    card.agent_status === 'skipped' && (card.agent_reason ?? '').toLowerCase().includes('архив')
 
   return (
-    <Card className="p-6">
+    <Card className="min-w-0 p-6">
       <a href={href('vacancies', card.vacancy_id)} className="block">
-        <div className={sent ? 'font-semibold' : ''}>{card.title}</div>
-        <div className="text-small text-muted">{card.company ?? 'без компании'}</div>
+        <div className={`break-anywhere ${sent ? 'font-semibold' : ''}`}>{card.title}</div>
+        <div className="break-anywhere text-small text-muted">{card.company ?? 'без компании'}</div>
       </a>
+      <div className="mt-3">
+        <Freshness
+          publishedAt={card.vacancy_published_at}
+          lastSeenAt={card.vacancy_last_seen_at}
+          active={card.vacancy_active}
+          archivedByAgent={archivedByAgent}
+        />
+      </div>
 
       <div className="mt-4 grid grid-cols-2 gap-4">
         {/* The snapshot the send took, and only for a row that has one: an
@@ -121,25 +178,25 @@ function ApplicationCard({ card }: { card: BoardCard }) {
             <span className="tnum">{score(card.match_score)}</span>
           </Field>
         ) : null}
-        <Field label={sent ? 'отправлено' : 'статус'}>
-          {sent ? date(card.sent_at) : APPLICATION_STATUS[card.status]}
+        <Field label={card.sent_at !== null ? 'отправлено' : 'статус'}>
+          {card.sent_at !== null ? date(card.sent_at) : APPLICATION_STATUS[card.status]}
         </Field>
       </div>
 
       {card.agent_reason ? (
-        <p className="mt-4 border-t border-hairline pt-4 text-small">
+        <p className="break-anywhere mt-4 border-t border-hairline pt-4 text-small">
           <span className="text-muted">причина: </span>
           {card.agent_reason}
         </p>
       ) : null}
 
       {card.hh_warning ? (
-        <p className="mt-4 text-small text-muted">
+        <p className="break-anywhere mt-4 text-small text-muted">
           hh при отправке: «{card.hh_warning}»
         </p>
       ) : null}
       {card.hh_blocking_warning ? (
-        <p className="mt-2 text-small text-muted">
+        <p className="break-anywhere mt-2 text-small text-muted">
           hh про аккаунт: «{card.hh_blocking_warning}»
         </p>
       ) : null}
@@ -152,7 +209,7 @@ function ApplicationCard({ card }: { card: BoardCard }) {
       ) : null}
 
       {card.vacancy_key_skills !== null ? (
-        <p className="mt-4 text-small text-muted">
+        <p className="break-anywhere mt-4 text-small text-muted">
           вакансия просила: {card.vacancy_key_skills.join(', ') || '— ничего не перечислила'}
         </p>
       ) : null}
@@ -172,7 +229,7 @@ function ApplicationCard({ card }: { card: BoardCard }) {
           </button>
           {open ? (
             <>
-              <p className="mt-3 whitespace-pre-wrap border-t border-hairline pt-4 text-small">
+              <p className="break-anywhere mt-3 max-h-96 overflow-y-auto whitespace-pre-wrap border-t border-hairline pt-4 text-small">
                 {letter}
               </p>
               {card.sent_letter !== null && card.cover_letter !== null &&
@@ -192,6 +249,17 @@ function ApplicationCard({ card }: { card: BoardCard }) {
       {card.hh_negotiations_total !== null ? (
         <p className="mt-4 text-small text-muted">
           hh насчитал откликов на вакансии: {count(card.hh_negotiations_total)}
+        </p>
+      ) : null}
+
+      {unconfirmed ? (
+        <p className="mt-4">
+          <Pill strong>hh не подтвердил</Pill>
+          <span className="mt-2 block text-small text-muted">
+            Агент отчитался об отправке {date(card.sent_at)}, но числа откликов от hh по этой
+            вакансии в базе нет. Нажмите «Обновить исходы» — агент перечитает страницу вакансии. Не
+            отправляйте повторно, пока hh не ответил.
+          </span>
         </p>
       ) : null}
 

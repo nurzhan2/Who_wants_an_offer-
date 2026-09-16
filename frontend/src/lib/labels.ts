@@ -54,14 +54,17 @@ export const APPLICATION_STATUS: Record<ApplicationStatus, string> = {
 export const STAGES: Record<string, string> = {
   queued: 'в очереди',
   needs_manual: 'нужен человек',
+  sent_unconfirmed: 'hh не подтвердил',
   sent: 'отправлено',
   other: 'вне очереди',
 }
 
 export const STAGE_NOTES: Record<string, string> = {
-  queued: 'Письмо написано, ждёт подтверждения в CLI.',
+  queued: 'Письмо написано. Откройте вакансию и подтвердите отклик — или отложите.',
   needs_manual: 'Агент остановился и оставил причину.',
-  sent: 'Агент записал отправку: есть дата и текст письма.',
+  sent_unconfirmed:
+    'Агент сообщил об отправке, но подтверждения от hh в базе нет. «Обновить исходы откликов» перечитает эти вакансии на hh.',
+  sent: 'hh подтвердил: его счётчик откликов не ноль или он сообщил состояние переписки.',
   other: 'Строки, заведённые руками: ни в очереди, ни отправленные.',
 }
 
