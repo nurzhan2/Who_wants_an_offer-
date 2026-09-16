@@ -6,6 +6,8 @@
     python -m wwao queue              что готово к отклику и почему остальное нет
     python -m wwao apply --send       отклики, по одному, с подтверждением
     python -m wwao outcomes           что hh отвечает на уже отправленное
+    python -m wwao watch              выполнять запросы дашборда, которым нужен агент
+    python -m wwao up                 поднять базу, сервер и дашборд, затем ждать запросов
 
 **Every subcommand is a child process, and that is the design rather than an
 implementation detail.** ``backend/`` and ``agent/`` must not meet: the crawler
@@ -76,6 +78,17 @@ type. It sends nothing, and it cannot: ``agent/outcomes.py`` mints no mandate,
 so ``agent/gate.py`` refuses every application-shaped request the browser
 makes.
 
+**``watch`` is how the dashboard reaches the agent without becoming it.**
+Added 2026-09-16, when the browser got buttons for reading outcomes and for
+sending what the owner confirmed there. The API records those requests and
+never acts on them; this loop, on the owner's machine, claims them over the
+token-guarded seam and starts ``agent.outcomes`` or ``agent.run --send
+--dashboard`` as children, exactly as ``outcomes`` and ``apply`` do. It takes
+``apply``'s terminal check, because a send can meet a captcha or an expired
+session that only a person at this window can deal with, and it has a closed
+flag set. What it sends is decided by the agent from the confirmations the
+owner gave card by card; the watcher only says "go".
+
 Everything else runs with no human and no account, which is what makes it
 runnable overnight.
 """
@@ -88,6 +101,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TextIO, final
 
+from wwao import up as stack
+from wwao import watch as watch_loop
 from wwao.console import encoding_of, harden, printable
 from wwao.queue_view import (
     QueueEntry,
@@ -308,6 +323,44 @@ def build_parser() -> argparse.ArgumentParser:
             "(http://localhost:8000). Локальный файл agent/probe/outcomes.json пишется всегда"
         ),
     )
+    watch = subparsers.add_parser(
+        "watch",
+        help="выполнять запросы дашборда, которым нужен агент (исходы, отправка подтверждённого)",
+        description=(
+            "Ждёт, пока на дашборде нажмут «Обновить исходы» или «Отправить "
+            "подтверждённые», и запускает агента на этом компьютере. Отправляется "
+            "только то, что человек подтвердил на дашборде карточка за карточкой. "
+            "Работает только в окне терминала: если hh покажет проверку на робота, "
+            "её проходит человек."
+        ),
+    )
+    watch.add_argument(
+        "--from",
+        dest="backend",
+        default=DEFAULT_BACKEND,
+        help="базовый адрес бэкенда. По умолчанию: %(default)s",
+    )
+    watch.add_argument(
+        "--interval",
+        type=float,
+        default=watch_loop.DEFAULT_INTERVAL,
+        help="как часто спрашивать бэкенд, секунд. По умолчанию: %(default)s",
+    )
+    up = subparsers.add_parser(
+        "up",
+        help="поднять базу, сервер и дашборд одной командой (то же делает start.cmd)",
+        description=(
+            "Проверяет Docker, базу, схему, сервер приложения и дашборд, запускает "
+            "недостающее и открывает дашборд в браузере. Потом остаётся в этом окне и "
+            "выполняет запросы дашборда, которым нужен агент. Закрыть окно — "
+            "остановить то, что оно запустило."
+        ),
+    )
+    up.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="не открывать дашборд в браузере",
+    )
     return parser
 
 
@@ -352,7 +405,52 @@ def main(
         return _show_queue(args, fetch=fetch, out=out, err=err)
     if args.command == "outcomes":
         return _outcomes(args, run=run, err=err)
+    if args.command == "watch":
+        if not _a_person_is_here(src, out):
+            print(NO_HUMAN_TO_WATCH, file=err)
+            return EXIT_NO_HUMAN
+        return watch_loop.watch(
+            str(args.backend),
+            post=watch_loop.post_over_http,
+            run_child=watch_loop.run_with_echo,
+            out=out,
+            interval=max(1.0, float(args.interval)),
+        )
+    if args.command == "up":
+        return _up(args, src=src, out=out, err=err)
     return _apply(args, run=run, src=src, out=out, err=err)
+
+
+def _up(
+    args: argparse.Namespace,
+    *,
+    src: TextIO,
+    out: TextIO,
+    err: TextIO,
+    machine: "stack.Machine | None" = None,
+) -> int:
+    """Bring the stack up, then stay as the watcher until the window closes.
+
+    The terminal check comes first for the watcher's reason: the agent it runs
+    may need a person at this window.
+    """
+    if not _a_person_is_here(src, out):
+        print(NO_HUMAN_TO_WATCH, file=err)
+        return EXIT_NO_HUMAN
+    box = machine if machine is not None else stack.real_machine()
+    try:
+        code = stack.up(box, out, open_browser=not args.no_browser)
+        if code != stack.EXIT_OK:
+            print("\nНе всё запустилось — сообщение выше говорит, что сделать.", file=out)
+            return code
+        return watch_loop.watch(
+            stack.API_URL,
+            post=watch_loop.post_over_http,
+            run_child=watch_loop.run_with_echo,
+            out=out,
+        )
+    finally:
+        stack.stop(box, out)
 
 
 def _run_wrapped(tool: Wrapped, extra: Sequence[str], *, run: Runner, err: TextIO) -> int:
@@ -436,6 +534,16 @@ NO_HUMAN: Final[str] = (
     "Флага, который это отключает, нет, и переменной окружения тоже нет.\n"
     "Ночью запускаются crawl, match, letters и queue — им не нужны ни человек,\n"
     "ни аккаунт. «python -m wwao queue» показывает, что накопилось к утру."
+)
+
+
+#: Printed when ``watch`` is started where no person can look at it.
+NO_HUMAN_TO_WATCH: Final[str] = (
+    "watch не запускается без окна терминала.\n"
+    "\n"
+    "Он запускает агента под вашим аккаунтом hh, и если hh покажет проверку на\n"
+    "робота или сессия истечёт, разбираться будет человек у этого окна. Запустите\n"
+    "его двойным щелчком по start.cmd или командой python -m wwao watch в терминале."
 )
 
 

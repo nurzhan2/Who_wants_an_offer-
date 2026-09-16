@@ -1,4 +1,6 @@
 * text=auto eol=lf
+# cmd.exe reads batch files line by line and needs CRLF to do it reliably.
+*.cmd text eol=crlf
 
 *.png binary
 *.jpg binary

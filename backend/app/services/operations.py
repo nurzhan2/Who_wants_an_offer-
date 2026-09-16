@@ -523,8 +523,8 @@ def _message(operation: _Operation) -> str:
         if _registry.agent_alive():
             return f"{title}: ждёт локального агента, он заберёт запрос в течение минуты."
         return (
-            f"{title}: ждёт локального агента, а он не запущен. Запустите ярлык "
-            f"«Who wants an offer» или команду {WATCH_COMMAND} на своём компьютере."
+            f"{title}: ждёт локального агента, а он не запущен. Запустите приложение "
+            f"двойным щелчком по start.cmd (или командой {WATCH_COMMAND}) на своём компьютере."
         )
     if status is OperationStatus.RUNNING:
         note = f" {operation.progress.note}." if operation.progress.note else ""
