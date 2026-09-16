@@ -743,29 +743,37 @@ async def test_generating_a_letter_without_a_profile_is_a_conflict(
 async def test_the_dashboard_has_no_way_to_send_an_application(async_client: AsyncClient) -> None:
     """The product rule, asserted rather than described.
 
-    An application goes out through ``wwao apply --send``, where a person at the
-    keyboard confirms that letter for that vacancy. A browser cannot make that
-    promise, so no route under the dashboard's own prefixes may write anything
-    but a document — and the three that do are the generators: a letter onto the
-    tracker row, and phase 10's CV and cover letter as downloadable versions.
-    The set is exact rather than a filter, so a fourth writing route fails here
-    whatever it is called.
+    No route under the dashboard's own prefixes sends anything: the API has no
+    browser and no hh session. The routes that write are an exact set, so a new
+    one fails here whatever it is called:
+
+    * the generators — a letter onto the tracker row, phase 10's CV and cover
+      letter as downloadable versions;
+    * since 2026-09-16, the owner's confirmation of one card (recorded bound to
+      the card's digest; the agent sends it later, on the owner's machine,
+      after re-reading the page — see ``app/services/confirmations.py``);
+    * the operations panel, which starts backend work and *records* the two
+      requests only the local agent can act on.
     """
     # Read off the published schema rather than off ``app.routes``: an included
     # router appears there as one opaque object with no path, so a scan of that
     # list finds nothing and passes whatever is behind it.
     spec = (await async_client.get("/openapi.json")).json()
     writing = {
-        path
+        (path, method)
         for path, operations in spec["paths"].items()
-        if path.startswith(("/api/v1/tracker", "/api/v1/documents"))
-        and set(operations) - {"get", "head", "options"}
+        if path.startswith(("/api/v1/tracker", "/api/v1/documents", "/api/v1/operations"))
+        for method in set(operations) - {"get", "head", "options"}
     }
 
     assert writing == {
-        "/api/v1/documents/letters",
-        "/api/v1/documents/cv/{vacancy_id}",
-        "/api/v1/documents/cover-letter/{vacancy_id}",
+        ("/api/v1/documents/letters", "post"),
+        ("/api/v1/documents/cv/{vacancy_id}", "post"),
+        ("/api/v1/documents/cover-letter/{vacancy_id}", "post"),
+        ("/api/v1/tracker/confirmations/{vacancy_id}", "post"),
+        ("/api/v1/tracker/confirmations/{vacancy_id}", "delete"),
+        ("/api/v1/operations", "post"),
+        ("/api/v1/operations/{operation_id}", "delete"),
     }
 
 
