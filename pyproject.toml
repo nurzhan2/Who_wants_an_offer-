@@ -205,6 +205,16 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/workshop/*.py" = ["RUF001", "RUF002", "RUF003"]
 "backend/tests/test_workshop.py" = ["RUF001", "RUF002", "RUF003"]
 "backend/tests/test_workshop_api.py" = ["RUF001", "RUF002", "RUF003"]
+# The dashboard's operation buttons, the browser confirmation and the notices
+# say what happened in Russian to the person who pressed the button, and quote
+# hh's own Russian sentences about the resume.
+"backend/app/services/operations.py" = ["RUF001", "RUF002"]
+"backend/app/services/confirmations.py" = ["RUF001", "RUF002"]
+"backend/app/services/notices.py" = ["RUF001", "RUF002"]
+"backend/app/matching/profile_vectors.py" = ["RUF001", "RUF002"]
+"backend/tests/test_operations.py" = ["RUF001", "RUF002"]
+"backend/tests/test_confirmations.py" = ["RUF001", "RUF002"]
+"backend/tests/test_notices.py" = ["RUF001", "RUF002"]
 
 # Every message this agent prints is read by the person whose account it is
 # about to act on, so all of them are Russian, and RUF001-003 fire on almost

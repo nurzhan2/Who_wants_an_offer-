@@ -43,7 +43,9 @@ from app.schemas.agent import (
     ResultsRequest,
     ResultsResponse,
 )
+from app.schemas.operations import AgentClaim, AgentProgress, OperationRead
 from app.services import agent_queue
+from app.services import operations as operations_service
 
 #: The only scheme accepted. One way in, so there is one thing to get right.
 BEARER_PREFIX = "Bearer "
@@ -142,3 +144,29 @@ async def results(
             ),
         )
     return await agent_queue.record_results(session, payload.results)
+
+
+@router.post(
+    "/operations/claim",
+    response_model=AgentClaim,
+    summary="The local watcher asks for the next thing only it can do",
+)
+async def claim_operation() -> AgentClaim:
+    """Hand the oldest waiting agent request to the watcher, or nothing.
+
+    Behind the token like everything under this prefix: the watcher is the
+    owner's own process, and what it is handed decides whether a browser opens
+    under their hh login. Asking is also how the dashboard learns a watcher is
+    alive, so an empty answer is still a useful call.
+    """
+    return AgentClaim(operation=operations_service.claim_for_agent())
+
+
+@router.post(
+    "/operations/{operation_id}",
+    response_model=OperationRead,
+    summary="The local watcher reports on an operation it claimed",
+)
+async def report_operation(operation_id: UUID, payload: AgentProgress) -> OperationRead:
+    """Record progress or the end of an agent operation."""
+    return operations_service.report_from_agent(operation_id, payload)

@@ -14,6 +14,7 @@ from fastapi import APIRouter
 from app.api.v1 import (
     applications,
     documents,
+    operations,
     overview,
     pipeline,
     profile,
@@ -31,6 +32,7 @@ router.include_router(sources.router)
 router.include_router(pipeline.router)
 router.include_router(applications.router)
 router.include_router(overview.router)
+router.include_router(operations.router)
 router.include_router(vacancies.router)
 router.include_router(tracker.router)
 router.include_router(documents.router)

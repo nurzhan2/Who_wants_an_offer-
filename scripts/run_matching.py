@@ -26,14 +26,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.core.logging import configure_logging
-from app.db.models import CandidateProfile, ProfileSkill
-from app.db.repositories.profile import ProfileRepository
 from app.db.session import session_factory
-from app.matching.embeddings import EmbeddingError, encode_profile, encode_texts
+from app.matching import profile_vectors
 from app.matching.rules import DEFAULT_FORMULA, DEFAULT_UNSTATED, Formula, UnstatedRequirement
 from app.matching.scorer import ProfileNotReadyError, ScoringOutcome, score_corpus
 
@@ -83,67 +78,11 @@ def parse_args() -> argparse.Namespace:
 async def ensure_profile_embedding(*, allowed: bool) -> str | None:
     """Embed the active profile if it has no vector. Returns a line for the report.
 
-    Not the raw resume: ``encode_profile`` embeds the extracted competencies,
-    because a vector built from the document describes its formatting, which
-    every resume shares.
+    The work lives in :mod:`app.matching.profile_vectors`, where the dashboard's
+    rescoring button reaches it too.
     """
     async with session_factory() as session:
-        profile = (
-            await session.execute(select(CandidateProfile).where(CandidateProfile.is_active))
-        ).scalar_one_or_none()
-        if profile is None:
-            return None
-        notes = [await _ensure_headline_embedding(session, profile, allowed=allowed)]
-        notes.append(await _ensure_resume_embedding(session, profile, allowed=allowed))
-        written = [note for note in notes if note]
-        return "; ".join(written) if written else None
-
-
-async def _ensure_headline_embedding(
-    session: AsyncSession, profile: CandidateProfile, *, allowed: bool
-) -> str | None:
-    """Embed the headline alone, the profile's side of title similarity."""
-    if profile.headline_embedding is not None:
-        return None
-    headline = (profile.headline or "").strip()
-    if not headline:
-        return "у профиля нет заголовка, название вакансии сравнивать не с чем"
-    if not allowed:
-        return "у заголовка профиля нет эмбеддинга, название не сравнивается (--no-embed-profile)"
-    try:
-        vector = (await encode_texts([headline]))[0]
-    except EmbeddingError as error:
-        return f"эмбеддинг заголовка не посчитан: {error}"
-    await ProfileRepository(session).set_headline_embedding(profile.id, vector)
-    await session.commit()
-    return "эмбеддинг заголовка посчитан впервые"
-
-
-async def _ensure_resume_embedding(
-    session: AsyncSession, profile: CandidateProfile, *, allowed: bool
-) -> str | None:
-    """Embed the extracted competencies, the profile's side of description similarity."""
-    if profile.embedding is not None:
-        return None
-    if not allowed:
-        return "у профиля нет эмбеддинга, семантика не считается (--no-embed-profile)"
-    names = (
-        await session.execute(
-            select(ProfileSkill.canonical_name).where(ProfileSkill.profile_id == profile.id)
-        )
-    ).all()
-    try:
-        vector = await encode_profile(
-            headline=profile.headline,
-            skills=[row[0] for row in names],
-            titles=[],
-            domains=[],
-        )
-    except EmbeddingError as error:
-        return f"эмбеддинг профиля не посчитан: {error}"
-    await ProfileRepository(session).set_embedding(profile.id, vector)
-    await session.commit()
-    return "эмбеддинг профиля посчитан впервые"
+        return await profile_vectors.ensure_profile_embedding(session, allowed=allowed)
 
 
 async def run(
