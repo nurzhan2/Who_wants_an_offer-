@@ -1,7 +1,8 @@
 import { useState } from 'react'
 
 import { href } from '@/app/routes'
-import { Card, Empty, Failure, Field, Loading, Pill, Section } from '@/components/ui'
+import { ResumeUpload } from '@/components/ResumeUpload'
+import { Card, Failure, Field, Loading, NextStep, Pill, Section } from '@/components/ui'
 import { useDocuments } from '@/hooks/queries'
 import { bytes, count, date, plural, score } from '@/lib/format'
 import { ATS_OVERALL, ATS_SEVERITY, outcomeLabel, PARSE_STATUS } from '@/lib/labels'
@@ -15,13 +16,27 @@ import type { LetterDocument, ResumeDocument } from '@/types/api'
  * is shown for one is the file and the readability audit taken when it landed.
  * Letters are generated, and each carries the three dates the feedback loop is
  * made of: written, sent, answered. A letter written and never sent is work
- * waiting for a person at a keyboard, because nothing else can send it.
+ * waiting for the owner's confirmation on the vacancy card.
+ *
+ * A parse the server abandoned — it runs inside the API process, which can be
+ * stopped mid-way — reads as «не разобрано» with its reason, never as a parse
+ * still going: the API marks such rows when it starts.
  */
 export function Documents() {
-  const { data, isPending, isError, error } = useDocuments()
+  const { data, isPending, isError, error, refetch } = useDocuments()
 
   if (isPending) return <Loading what="документы" />
-  if (isError) return <Failure error={error} what="документы" />
+  if (isError) {
+    return (
+      <Failure
+        error={error}
+        what="документы"
+        onRetry={() => {
+          void refetch()
+        }}
+      />
+    )
+  }
 
   return (
     <div className="rise">
@@ -29,10 +44,11 @@ export function Documents() {
         title="Резюме"
         note="Файл и то, что из него вычитает парсер работодателя. Генератора CV в проекте нет — это то, что было загружено, и аудит читаемости."
       >
-        {data.resumes.length === 0 ? (
-          <Empty>Резюме ещё не загружали.</Empty>
-        ) : (
-          <div className="grid gap-6 lg:grid-cols-2">
+        <div className="mb-6">
+          <ResumeUpload />
+        </div>
+        {data.resumes.length === 0 ? null : (
+          <div className="rise-list grid gap-6 lg:grid-cols-2">
             {data.resumes.map((resume) => (
               <Resume key={resume.profile_id} resume={resume} />
             ))}
@@ -45,11 +61,22 @@ export function Documents() {
         note={`Правила проверки сейчас — версия ${String(data.current_rules_version)}. Если письмо писала другая версия, это видно в строке: правила меняются, а письмо остаётся.`}
       >
         {data.letters.length === 0 ? (
-          <Empty>
-            Ни одного письма не сгенерировано. Мастерская пишет их по одной вакансии за раз.
-          </Empty>
+          <NextStep
+            title="Писем пока нет"
+            action={
+              <a
+                href={href('overview')}
+                className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper"
+              >
+                К операциям
+              </a>
+            }
+          >
+            На «Обзоре» нажмите «Написать письма» — пять писем для лучших вакансий. Письмо для
+            одной вакансии пишется в её карточке.
+          </NextStep>
         ) : (
-          <div className="space-y-4">
+          <div className="rise-list space-y-4">
             {data.letters.map((letter) => (
               <Letter key={letter.application_id} letter={letter} current={data.current_rules_version} />
             ))}
@@ -65,7 +92,9 @@ function Resume({ resume }: { resume: ResumeDocument }) {
   return (
     <Card inverted={resume.is_active}>
       <div className="flex items-baseline justify-between gap-4">
-        <span className="font-semibold">{resume.filename ?? 'файл не записан'}</span>
+        <span className="break-anywhere min-w-0 font-semibold">
+          {resume.filename ?? 'файл не записан'}
+        </span>
         {resume.is_active ? <Pill strong>активное</Pill> : <Pill>прошлое</Pill>}
       </div>
       <div className="mt-6 grid grid-cols-2 gap-4">
@@ -74,7 +103,9 @@ function Resume({ resume }: { resume: ResumeDocument }) {
         <Field label="формат">{resume.source_format ?? '—'}</Field>
         <Field label="размер">{bytes(resume.size_bytes)}</Field>
       </div>
-      {resume.parse_error ? <p className="mt-4 text-small">{resume.parse_error}</p> : null}
+      {resume.parse_error ? (
+        <p className="break-anywhere mt-4 text-small font-semibold">{resume.parse_error}</p>
+      ) : null}
 
       {ats === null ? (
         <p className="mt-6 border-t border-hairline pt-4 text-small">
@@ -120,7 +151,7 @@ function Letter({ letter, current }: { letter: LetterDocument; current: number }
   return (
     <Card>
       <div className="flex flex-wrap items-baseline justify-between gap-4">
-        <a href={href('vacancies', letter.vacancy_id)} className="min-w-0">
+        <a href={href('vacancies', letter.vacancy_id)} className="break-anywhere min-w-0">
           <span className="font-semibold">{letter.title}</span>
           <span className="text-small text-muted"> · {letter.company ?? 'без компании'}</span>
         </a>
@@ -177,7 +208,7 @@ function Letter({ letter, current }: { letter: LetterDocument; current: number }
           : `текст письма (${count(letter.characters)} ${plural(letter.characters, 'знак', 'знака', 'знаков')})`}
       </button>
       {open ? (
-        <p className="mt-3 whitespace-pre-wrap border-t border-hairline pt-4 text-small">
+        <p className="break-anywhere mt-3 max-h-96 overflow-y-auto whitespace-pre-wrap border-t border-hairline pt-4 text-small">
           {letter.text}
         </p>
       ) : null}

@@ -6,8 +6,10 @@ import {
   useOperations,
   useStartOperation,
 } from '@/hooks/useOperations'
+import { useConfirmedList } from '@/hooks/useConfirmations'
 import { explain } from '@/lib/errors'
 import { ago, count, dateTime } from '@/lib/format'
+import type { ConfirmedList } from '@/types/confirmations'
 import type { Operation, OperationKind, OperationsState } from '@/types/operations'
 
 /**
@@ -125,6 +127,8 @@ function StepRow({
   const busy = state?.busy.includes(step.kind) ?? false
   const last = state?.operations.find((operation) => operation.kind === step.kind) ?? null
   const agentAlive = watcherAlive(state)
+  const confirmed = useConfirmedList()
+  const nothingToSend = step.kind === 'send' && (confirmed.data?.items.length ?? 0) === 0
 
   return (
     <div className="grid gap-4 border-b border-hairline py-6 md:grid-cols-[minmax(0,1fr)_auto]">
@@ -138,10 +142,15 @@ function StepRow({
               : 'Локальный агент не запущен: запустите приложение через start.cmd — он поднимется вместе с ним.'}
           </p>
         ) : null}
+        {step.kind === 'send' ? <ConfirmedSummary list={confirmed.data} /> : null}
         {last ? <LastRun operation={last} /> : null}
       </div>
       <div className="flex items-start md:justify-end">
-        <Button onClick={onStart} disabled={busy || starting || state === undefined}>
+        <Button
+          onClick={onStart}
+          disabled={busy || starting || state === undefined || nothingToSend}
+          title={nothingToSend ? 'Нет подтверждённых откликов: подтвердите их в карточках вакансий' : undefined}
+        >
           {busy ? statusWord(last) : starting ? 'Запускаем…' : step.label}
         </Button>
       </div>
@@ -192,6 +201,35 @@ function LastRun({ operation }: { operation: Operation }) {
           </Button>
         </div>
       ) : null}
+    </div>
+  )
+}
+
+function ConfirmedSummary({ list }: { list: ConfirmedList | undefined }) {
+  if (!list) return null
+  if (list.items.length === 0) {
+    return (
+      <p className="mt-2 text-small text-muted">
+        Подтверждённых откликов нет. Откройте вакансию и нажмите «Откликнуться…».
+        {list.no_longer_valid > 0
+          ? ` Устаревших подтверждений: ${String(list.no_longer_valid)} — их нужно дать заново.`
+          : ''}
+      </p>
+    )
+  }
+  return (
+    <div className="mt-2 text-small">
+      <p className="font-semibold">
+        Подтверждено к отправке: {list.items.length}
+        {list.no_longer_valid > 0 ? ` · устарело: ${String(list.no_longer_valid)}` : ''}
+      </p>
+      <ul className="mt-1 space-y-1">
+        {list.items.map((item) => (
+          <li key={item.external_id} className="break-anywhere text-muted">
+            {item.title} — {item.company ?? 'без компании'} · подтверждено {ago(item.confirmed_at)}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

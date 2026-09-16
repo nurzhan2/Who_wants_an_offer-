@@ -1,6 +1,7 @@
 import { useState } from 'react'
 
 import { href } from '@/app/routes'
+import { ApplyConfirm } from '@/components/ApplyConfirm'
 import { Freshness } from '@/components/Freshness'
 import { Button, Card, Empty, Failure, Field, Loading, NextStep, Pill, Section } from '@/components/ui'
 import { useBoard } from '@/hooks/queries'
@@ -261,6 +262,12 @@ function ApplicationCard({ card }: { card: BoardCard }) {
             отправляйте повторно, пока hh не ответил.
           </span>
         </p>
+      ) : null}
+
+      {card.sent_at === null && card.agent_status !== 'skipped' && letter ? (
+        <div className="mt-4">
+          <ApplyConfirm vacancyId={card.vacancy_id} />
+        </div>
       ) : null}
 
       {claimsSend ? (

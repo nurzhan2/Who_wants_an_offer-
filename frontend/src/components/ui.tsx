@@ -218,7 +218,7 @@ export function Button({
   onClick?: () => void
   disabled?: boolean
   outline?: boolean
-  title?: string
+  title?: string | undefined
   type?: 'button' | 'submit'
 }) {
   const shape =
