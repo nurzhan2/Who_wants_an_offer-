@@ -287,6 +287,31 @@ class ProfileRepository:
             .values(is_active=True, updated_at=func.now())
         )
 
+    async def inherit_target_titles(self, profile_id: UUID) -> list[str]:
+        """Give a new profile the job titles the live one was searching for.
+
+        Called before ``deactivate_others``, while the previous profile is still
+        the active one. The titles are the owner's intent, typed by hand, and a
+        new resume file does not change what they want to be hired as; losing
+        the list on every upload would quietly return the search to skill
+        keywords. A profile that already holds titles keeps its own.
+        """
+        instance = await self.get(profile_id)
+        if instance is None or instance.target_titles:
+            return list(instance.target_titles) if instance is not None else []
+        stmt = (
+            select(CandidateProfile.target_titles)
+            .where(CandidateProfile.id != profile_id, CandidateProfile.is_active.is_(True))
+            .order_by(CandidateProfile.updated_at.desc())
+            .limit(1)
+        )
+        previous = (await self.session.execute(stmt)).scalar_one_or_none()
+        if not previous:
+            return []
+        instance.target_titles = list(previous)
+        await self.session.flush()
+        return list(previous)
+
     async def deactivate_others(self, keep_id: UUID) -> int:
         """Retire every other profile so exactly one is live.
 

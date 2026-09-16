@@ -261,6 +261,7 @@ async def build_profile(
         # created inactive so a half-parsed profile could never be scored
         # against, and this is the only place that undoes that.
         await profiles.activate(profile_id)
+        await profiles.inherit_target_titles(profile_id)
         await profiles.deactivate_others(profile_id)
         await profiles.set_parse_status(profile_id, ParseStatus.READY)
 

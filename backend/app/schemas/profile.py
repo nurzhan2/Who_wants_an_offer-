@@ -5,12 +5,46 @@ from decimal import Decimal
 from typing import Annotated, Any, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
 from app.db.enums import ParseStatus, RemoteType, Seniority, SkillEvidence, SkillLevel
 from app.schemas.common import CurrencyCode, ReadModel
 
 Years = Annotated[Decimal, Field(ge=0, le=60, decimal_places=1)]
+
+#: Longest job title the owner may type. A title, not a paragraph: the value is
+#: sent verbatim as a search query, and a sentence matches nothing.
+MAX_TARGET_TITLE_CHARS = 100
+#: Most titles one profile may hold. Each one becomes at least one query per
+#: run, and the run's query budget is eight.
+MAX_TARGET_TITLES = 12
+
+
+def clean_target_titles(titles: list[str]) -> list[str]:
+    """Collapse whitespace, drop blanks and repeats, keep the owner's order.
+
+    Repeats are compared case-insensitively — «Python Developer» and «python
+    developer» are one search — and the first spelling wins, since that is the
+    one the owner typed first.
+    """
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for title in titles:
+        text = " ".join(title.split())
+        if not text or text.casefold() in seen:
+            continue
+        if len(text) > MAX_TARGET_TITLE_CHARS:
+            raise ValueError(
+                f"job title longer than {MAX_TARGET_TITLE_CHARS} characters: {text[:40]}..."
+            )
+        seen.add(text.casefold())
+        cleaned.append(text)
+    if len(cleaned) > MAX_TARGET_TITLES:
+        raise ValueError(f"at most {MAX_TARGET_TITLES} job titles")
+    return cleaned
+
+
+TargetTitles = Annotated[list[str], AfterValidator(clean_target_titles)]
 
 
 def reject_duplicate_skills(skills: list["SkillCreate"] | None) -> None:
@@ -131,6 +165,9 @@ class CandidateProfileUpdate(BaseModel):
     salary_min: Decimal | None = Field(default=None, ge=0)
     salary_currency: CurrencyCode | None = None
     languages: list[dict[str, Any]] | None = None
+    #: What the owner wants to be hired as. Replaces the whole list when present;
+    #: an empty list returns the search to skill keywords.
+    target_titles: TargetTitles | None = None
     is_active: bool | None = None
     #: Replaces the whole skill set when present. The extractor is wrong often
     #: enough that hand-correcting skills is a first-class operation, not an
@@ -161,6 +198,7 @@ class CandidateProfileRead(ReadModel):
     total_years: Decimal | None
     summary: str | None
     locations: list[str]
+    target_titles: list[str] = Field(default_factory=list)
     relocation: bool
     remote_pref: RemoteType | None
     salary_min: Decimal | None

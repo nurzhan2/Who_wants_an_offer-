@@ -83,6 +83,12 @@ class CandidateProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text)
 
     locations: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    #: Job titles the owner is looking for, typed by them rather than extracted.
+    #: Drives what the sources are asked for; empty means "search by skills".
+    #: Carried over to a new resume, since the intent outlives the file.
+    target_titles: Mapped[list[str]] = mapped_column(
+        JSONB, default=list, server_default="[]", nullable=False
+    )
     relocation: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     remote_pref: Mapped[RemoteType | None] = mapped_column(pg_enum(RemoteType, "remote_type"))
 
