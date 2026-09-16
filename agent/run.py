@@ -834,7 +834,7 @@ def _apply_each(
             # "reached and something happened".
             attempted.add(mandate.vacancy_id)
             try:
-                warnings = submit(page, mandate, gate)
+                sent = submit(page, mandate, gate)
             except (
                 AlreadyAppliedError,
                 IdempotencyUnknownError,
@@ -890,7 +890,7 @@ def _apply_each(
             # send and is now advice about the resume — so it is true of every
             # application in this batch, not only of this one, and the owner has
             # to be able to see that.
-            said = "\n".join(warnings.said)
+            said = "\n".join(sent.said)
             books.remember(
                 Entry(
                     mandate.vacancy_id,
@@ -900,8 +900,24 @@ def _apply_each(
                 ),
                 actor=Actor.AGENT,
             )
-            results.append(Result(mandate.vacancy_id, Status.SENT.value, hh_warning=said or None))
-            for line in warnings.said:
+            # The evidence behind "sent", and the letter it went with. Until
+            # 2026-09-16 neither reached the result: the first real run reported
+            # four applications with ``negotiations_total`` empty, so the tracker
+            # could not tell a confirmed send from a report of one. The count is
+            # the one ``submit`` re-read off hh after the click, and the letter is
+            # the mandate's — the text the person confirmed and the only string
+            # ``submit`` had in scope to type.
+            results.append(
+                Result(
+                    mandate.vacancy_id,
+                    Status.SENT.value,
+                    hh_warning=said or None,
+                    sent_letter=mandate.letter,
+                    negotiations_total=sent.confirmed.total,
+                    last_state=sent.last_state,
+                )
+            )
+            for line in sent.said:
                 print(f"  {mandate.vacancy_id}: hh предупреждает — {line}")
             consecutive_failures = 0
 

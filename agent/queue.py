@@ -273,14 +273,10 @@ class Result:
     #: being taken and this result arriving replaces the evidence with text no
     #: employer saw. Only the process that did the typing knows what went out.
     #:
-    #: **Nothing in this package sets it yet**, so it is ``None`` on every result
-    #: today and ``application.sent_letter`` stays NULL — honest, and visibly
-    #: empty. It is declared here because this is the only file it can be
-    #: declared in: the backend has accepted the field since 2026-09-07 and the
-    #: module that types the letter cannot add it to this dataclass. Whoever
-    #: fills it must pass ``mandate.letter`` unmodified — that is the text the
-    #: human confirmed and the text ``agent/submit.py`` types — and must not
-    #: reconstruct it from anywhere else.
+    #: ``agent/run.py`` fills it on every ``sent`` result since 2026-09-16 with
+    #: ``mandate.letter``, unmodified — the text the human confirmed and the text
+    #: ``agent/submit.py`` types. It must never be reconstructed from anywhere
+    #: else.
     #:
     #: ``None`` means "not reported"; ``""`` would mean "reported that nothing
     #: was typed", which hh permits on some vacancies. The two are different

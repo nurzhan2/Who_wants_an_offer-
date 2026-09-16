@@ -808,20 +808,24 @@ def test_a_sent_application_is_recorded_rather_than_crashing(
     assert entry is not None
     assert entry.status is Status.SENT
     results = json.loads((tmp_path / "queue-results.json").read_text(encoding="utf-8"))
-    # Every key of the contract, including the four this run has nothing to put
-    # in: the letter it typed (nothing reports that yet), and hh's outcome
-    # fields, which are filled by ``python -m agent.outcomes`` days later.
-    assert results["results"] == [
-        {
-            "vacancy_id": VACANCY,
-            "status": "sent",
-            "reason": None,
-            "sent_letter": None,
-            "hh_warning": None,
-            "negotiations_total": None,
-            "last_state": None,
-        }
-    ]
+    # Every key of the contract. Since 2026-09-16 a ``sent`` result carries the
+    # evidence behind it: hh's own count, read off the page re-opened after the
+    # click, and hh's word for the application it lists. The first real run
+    # reported four sends with both empty, and a dashboard cannot tell such a row
+    # from a send that never happened.
+    [sent] = results["results"]
+    assert sent == {
+        "vacancy_id": VACANCY,
+        "status": "sent",
+        "reason": None,
+        "sent_letter": sent["sent_letter"],
+        "hh_warning": None,
+        "negotiations_total": 1,
+        "last_state": "DISCARD",
+    }
+    # The letter the mandate carried, which is the letter the person confirmed
+    # and the only one ``submit`` could type.
+    assert sent["sent_letter"] == page.filled[selectors.LETTER_FIELD.query]
     assert "Отправлено: 1" in capsys.readouterr().out
 
 

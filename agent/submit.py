@@ -119,6 +119,7 @@ page.** That correction is the reason this module was rewritten; see
 window comes forward and a person deals with it.
 """
 
+from dataclasses import dataclass
 from typing import Any, Final, final
 from urllib.parse import urlsplit
 
@@ -127,7 +128,60 @@ from agent.gate import SubmitGate, vacancy_ids_in
 from agent.hosts import NavigatedElsewhereError, open_hh_page
 from agent.mandate import SendMandate
 from agent.prefilter import Verdict
-from agent.state_page import FormWarnings, read_form_warnings, read_negotiations, read_state
+from agent.state_page import (
+    FormWarnings,
+    Negotiations,
+    read_form_warnings,
+    read_negotiations,
+    read_state,
+)
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Sent:
+    """What :func:`submit` knows once hh has confirmed an application exists.
+
+    **Added 2026-09-16, after the first real ``--send``.** Four applications went
+    out and every one of them came back with ``negotiations_total`` empty: the
+    confirmation below re-opened each page and read hh's count, decided from it
+    that the application was there, and then dropped the number. So the tracker
+    held four rows saying "sent" with nothing to show for it but the absence of
+    an exception — which is exactly the kind of claim the dashboard must not
+    present as a fact. The count that made the decision now travels with it.
+
+    The warnings are delegated rather than nested behind a second name, so the
+    callers that only ever wanted hh's sentences read them as before.
+    """
+
+    #: Everything hh said while the form was open. See :class:`FormWarnings`.
+    warnings: FormWarnings
+    #: hh's own answer, read off the page re-opened after the click. The reason
+    #: this object exists at all: it is the evidence behind "sent".
+    confirmed: Negotiations
+
+    @property
+    def visibility(self) -> str | None:
+        """hh's resume-visibility sentence, if the form carried one."""
+        return self.warnings.visibility
+
+    @property
+    def likely_rejection(self) -> str | None:
+        """hh's «может получить отказ» line, if the form carried one."""
+        return self.warnings.likely_rejection
+
+    @property
+    def said(self) -> tuple[str, ...]:
+        """Everything hh said, in the order the card had it."""
+        return self.warnings.said
+
+    @property
+    def last_state(self) -> str | None:
+        """hh's word for the newest application it lists on this vacancy."""
+        for application in self.confirmed.applications:
+            if application.last_state:
+                return application.last_state
+        return None
 
 
 @final
@@ -290,15 +344,16 @@ def looks_like_a_challenge(url: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in CHALLENGE_PATHS)
 
 
-def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
+def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> Sent:
     """Send exactly the application this mandate authorises, or raise.
 
     ``Any`` for the page because typing it would mean importing playwright at
     module scope, and the rest of this package is deliberately importable — and
     testable — on a machine with no browser.
 
-    Returns everything hh said while the form was open, so the caller can
-    persist it and show it to a person — both readings of the card merged, since
+    Returns hh's confirmed count together with everything hh said while the
+    form was open, so the caller can record the evidence behind "sent" and show
+    hh's advice to a person — both readings of the card merged, since
     the letter is typed between them. Nothing in it is a refusal any more, and
     both families are worth carrying for different reasons. «Такой отклик может
     получить отказ» names a specific unmet requirement — the measured one is an
@@ -377,8 +432,7 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
         page.wait_for_timeout(SEND_SETTLE_MS)
         gate.note_submit_click(mandate, since=mark)
 
-    _confirm_the_application_exists(page, mandate)
-    return warnings
+    return Sent(warnings=warnings, confirmed=_confirm_the_application_exists(page, mandate))
 
 
 def _type_the_letter(page: Any, letter: str) -> None:
@@ -541,7 +595,7 @@ def _everything_hh_said(before: FormWarnings, after: FormWarnings) -> FormWarnin
     )
 
 
-def _confirm_the_application_exists(page: Any, mandate: SendMandate) -> None:
+def _confirm_the_application_exists(page: Any, mandate: SendMandate) -> Negotiations:
     """Re-open the vacancy and require hh's own count to say an application is there.
 
     Re-opening rather than re-reading is the point: the boot state is baked into
@@ -567,3 +621,4 @@ def _confirm_the_application_exists(page: Any, mandate: SendMandate) -> None:
     negotiations = None if state is None else read_negotiations(state, mandate.vacancy_id)
     if negotiations is None or not negotiations.exists:
         raise IdempotencyUnknownError(UNCONFIRMED)
+    return negotiations
