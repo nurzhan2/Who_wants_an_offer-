@@ -217,11 +217,17 @@ class Selector:
         return None if self.evidence is None else EVIDENCE_DIR / f"{self.evidence}.json"
 
 
-#: The two evidence files in this repository. Both are redactions of real
-#: measurements taken on 2026-09-06 on the owner's logged-in profile; each says
-#: inside itself which artefact it came from and which script produced it.
+#: The evidence files the selectors below name. Each is a redaction of a real
+#: measurement on the owner's logged-in profile and says inside itself which
+#: script produced it.
 OPEN_FORM_EVIDENCE: Final[str] = "20260906-open-form-modal"
 ALREADY_APPLIED_EVIDENCE: Final[str] = "20260906-inspect-already-applied"
+#: ``--stage open-form`` on 2026-09-16, the run that also clicked «Добавить
+#: сопроводительное»: ``vacancy-response-popup-form-letter-input`` is absent
+#: before that click and present after it, and ``add-cover-letter`` is the
+#: other way round (``data_qa_after_click`` against
+#: ``data_qa_after_letter_click`` in the full report, which stays local).
+LETTER_FIELD_EVIDENCE: Final[str] = "20260916-125039"
 
 #: Stages at which a control on the vacancy page itself can be recorded.
 ON_THE_PAGE: Final[frozenset[str]] = frozenset({"inspect", "open-form"})
@@ -398,17 +404,25 @@ HIDDEN_RESUME_WARNING = Selector(
 
 # ── what nobody has seen yet ──────────────────────────────────────────
 
-#: NOT MEASURED, and deliberately left empty. ``add-cover-letter`` is the button
-#: that reveals the letter field; nobody clicked it during the 2026-09-06
-#: measurement, so no textarea appears anywhere in the dump and its selector is
-#: genuinely unknown. Guessing it is the exact failure this package exists to
-#: prevent. An application WITHOUT a letter is fully measured and works, so this
-#: is not in :data:`REQUIRED_FOR_APPLYING`: it blocks letters, not applying.
+#: The cover-letter ``<textarea>``. Not on the form until ``add_cover_letter``
+#: is clicked, and that button is gone once it has been: the two swap places.
+#: Measured 2026-09-16 on the run in :data:`LETTER_FIELD_EVIDENCE`, which waited
+#: for the field and recorded «textarea appeared».
+#:
+#: **Present is not the same as ready.** That run's form dump reported
+#: ``editable: false`` for this textarea — but the probe computed the flag as
+#: ``isContentEditable``, which is false for every textarea by definition, so
+#: the number says nothing about the modal. ``agent/submit.py`` waits for the
+#: field to accept input anyway and checks what landed in it before sending:
+#: the modal renders in stages, and typing into a field that is not ready yet is
+#: a letter that silently does not arrive.
 LETTER_FIELD = Selector(
     name="letter_field",
-    query="",
-    scope=Scope.UNVERIFIED,
-    note="The cover-letter textarea, revealed by add_cover_letter. Never seen.",
+    query='[data-qa="vacancy-response-popup-form-letter-input"]',
+    scope=Scope.AUTHENTICATED,
+    evidence=LETTER_FIELD_EVIDENCE,
+    checked_on=date(2026, 9, 16),
+    note="The cover-letter textarea, revealed by add_cover_letter.",
 )
 
 #: Employer test questions, to READ and show a human. Never answered here, and
@@ -447,10 +461,10 @@ REQUIRED_FOR_APPLYING: Final[tuple[Selector, ...]] = (
 )
 
 #: What a cover letter additionally needs. Split from the tuple above because
-#: the two cases have different evidence: sending without a letter was measured
-#: on 2026-09-06 and sending with one was not. Keeping them in one list would
-#: mean either blocking the measured case or claiming the unmeasured one, and
-#: both of those are worse than a vacancy that goes to the owner.
+#: the two cases have different evidence: the form without a letter was measured
+#: on 2026-09-06, the letter field on 2026-09-16. Kept apart so that losing the
+#: second measurement — a redesign, a deleted file — routes letter vacancies to
+#: the owner instead of stopping applications that need no letter.
 REQUIRED_FOR_A_LETTER: Final[tuple[Selector, ...]] = (
     ADD_COVER_LETTER,
     LETTER_FIELD,

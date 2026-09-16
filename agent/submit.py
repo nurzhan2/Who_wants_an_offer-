@@ -151,6 +151,17 @@ class WrongVacancyError(Exception):
 
 
 @final
+class LetterNotTypedError(Exception):
+    """The letter field never took the letter, so nothing was sent.
+
+    A conclusion about one vacancy, like the errors above it: the form is open,
+    the submit button has not been touched, and a person can send this one by
+    hand. Raised when the field appeared but never became editable, or when what
+    it holds after typing is not the letter the owner confirmed.
+    """
+
+
+@final
 class FormUnreadableError(Exception):
     """The response modal opened and its card could not be read. Nothing is sent.
 
@@ -206,6 +217,10 @@ FORM_TIMEOUT_MS: Final[int] = 15_000
 #: into after a successful send has never been measured, and waiting on a
 #: guessed success marker would be the failure this package exists to prevent.
 SEND_SETTLE_MS: Final[int] = 2_000
+
+#: How often the letter field is asked whether it takes input yet. Its deadline
+#: is :data:`FORM_TIMEOUT_MS`, the same as every other wait on the modal.
+EDITABLE_POLL_MS: Final[int] = 100
 
 #: Said when the application may well have gone out and hh would not confirm it.
 #: Deliberately not «отклик не отправлен»: the request left the browser, and
@@ -342,13 +357,7 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
     with gate.armed(mandate):
         warnings = _open_the_form(page, mandate)
         if mandate.letter is not None:
-            # The letter field is revealed by a button, so it is two steps. This
-            # branch is unreachable while that field has no measurement — the
-            # refusal above fires first — and it is written out so that filling
-            # the selector in turns it on without anyone re-designing it.
-            page.click(selectors.ADD_COVER_LETTER.query)
-            page.wait_for_selector(selectors.LETTER_FIELD.query, timeout=FORM_TIMEOUT_MS)
-            page.fill(selectors.LETTER_FIELD.query, mandate.letter)
+            _type_the_letter(page, mandate.letter)
             # The card was read before any of that happened, and hh answers what
             # is typed. See :func:`_everything_hh_said` for why both readings are
             # kept rather than the later one replacing the earlier.
@@ -370,6 +379,41 @@ def submit(page: Any, mandate: SendMandate, gate: SubmitGate) -> FormWarnings:
 
     _confirm_the_application_exists(page, mandate)
     return warnings
+
+
+def _type_the_letter(page: Any, letter: str) -> None:
+    """Reveal the letter field, wait until it takes input, type, and check it took.
+
+    Three waits, because the field arrives in stages. It is not on the form until
+    «Добавить сопроводительное» is clicked (measured 2026-09-16, see
+    ``selectors.LETTER_FIELD``); once present it can still be part of a modal
+    that is finishing its render, and typing into it then is a letter that
+    silently does not arrive. So presence is waited for first, then
+    editability, and after typing the field is read back: an application sent
+    with a half-typed or empty letter is still an application, and it cannot be
+    taken back.
+
+    ``Any`` for the page, as everywhere in this module.
+    """
+    query = selectors.LETTER_FIELD.query
+    page.click(selectors.ADD_COVER_LETTER.query)
+    page.wait_for_selector(query, state="visible", timeout=FORM_TIMEOUT_MS)
+    waited = 0
+    while not page.is_editable(query):
+        if waited >= FORM_TIMEOUT_MS:
+            raise LetterNotTypedError(
+                f"поле письма появилось, но за {FORM_TIMEOUT_MS // 1000} с так и не "
+                "стало доступно для ввода — отклик не отправлен, отправьте его руками"
+            )
+        page.wait_for_timeout(EDITABLE_POLL_MS)
+        waited += EDITABLE_POLL_MS
+    page.fill(query, letter)
+    typed = page.input_value(query)
+    if typed != letter:
+        raise LetterNotTypedError(
+            f"в поле письма оказалось {len(typed)} знаков вместо {len(letter)} — "
+            "отклик не отправлен, отправьте его руками"
+        )
 
 
 def _open_the_vacancy(page: Any, mandate: SendMandate) -> dict[str, Any]:

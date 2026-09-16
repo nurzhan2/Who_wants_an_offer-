@@ -60,29 +60,32 @@ application request repeats inside a window, and what each submit click put on
 the wire is written down.** How many requests one application takes is hh's
 business; whose application it is, is ours.
 
-**It refuses more than it counts, and the gap between the two is a
-measurement.** Corrected 2026-09-07. :func:`looks_like_an_application` was
-written deliberately broad — "a telemetry beacon that happens to carry a vacancy
-id is refused too, and that costs nothing" — and the first half of that is true
-while the second half is measured false. Twenty-one requests are recorded in
-``agent/probe/20260906-181519/probe.json`` — one vacancy page, opened, apply
-control clicked, stopped before submitting — and *twenty of them* carry
-``vacancyId`` in the query without being an application: hh's beacon seventeen
-times, its blacklist check, its feedback survey, its employer-reviews widget.
-The twenty-first is the response form's own card. Refusing the other twenty
-outside an armed window really is free, and that is left
-exactly as it was. Inside one it was not free at all, and in three ways: hh's
-beacons filled up the window, a repeat of the same beacon was aborted as "a
-second application" in the middle of a real apply flow, and the count that was
-supposed to say whether the submit click sent anything could be satisfied by a
-beacon that had nothing to do with it.
+**An application is recognised by its path, not by a parameter.** Corrected
+twice. On 2026-09-07 the broad rule — "a URL carrying ``vacancyId`` in its query
+could be an application" — was measured refusing hh's own furniture: of
+twenty-one requests on a page where nothing was sent
+(``agent/probe/20260906-181519/probe.json``), twenty carried ``vacancyId`` and
+were not applications — the ``/anatskytics`` beacon seventeen times, a blacklist
+check, a feedback survey, an employer-reviews widget. That fix kept the broad
+rule for refusals and only narrowed what the window counted.
 
-So there are now two questions with two different answers. *Could this be an
-application?* — :func:`looks_like_an_application`, unchanged, broad, and the
-only thing a refusal is ever decided by. *Is this the application?* —
-:func:`is_the_application_itself`, which subtracts the four paths measured
-carrying a vacancy id on a page where nothing was being sent, and which decides
-only what the window counts. Nothing that used to be refused now proceeds.
+On 2026-09-16 it was measured failing a whole run
+(``agent/probe/20260916-124948`` and ``-125039``). hh sends ``/anatskytics`` as
+POSTs that carry ``vacancyId`` in the query; the page-level recorder called
+every one of them an application, and :meth:`SubmitGate.assert_no_escapes`
+raised on fifteen and twenty of them. A parameter every analytics call on a
+vacancy page carries says nothing about what the call does. What was measured
+to be applying is the path: the apply control is
+``/applicant/vacancy_response?vacancyId=…`` and the modal's card is
+``/applicant/vacancy_response/popup?vacancyId=…``. So :data:`RESPONSE_PATH` is
+the rule, for refusals and for the count alike, and a request under it is still
+refused when anything in its URL *or body* names a different vacancy.
+
+What this does not cover, said plainly: nobody has recorded the request hh's
+«Откликнуться» itself emits (see below). If it leaves on a path outside
+:data:`RESPONSE_PATH`, this gate does not see it. The click that emits it
+happens only inside :func:`agent.submit.submit`, under an armed mandate, and
+:meth:`SubmitGate.note_submit_click` is there to record what it was.
 
 **It cannot tell you that an application was sent, and it no longer pretends
 to.** Also 2026-09-07; see the note where ``require_progress`` used to be. The
@@ -117,44 +120,15 @@ import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Final, Protocol, final, runtime_checkable
+from typing import Protocol, final, runtime_checkable
 from urllib.parse import unquote, urlsplit
 
 from agent.mandate import SendMandate, verify
 
-#: What an application request looks like, measured on a live page: the response
-#: flow lives under this path, and carries the vacancy id as a parameter. Either
-#: is enough to refuse — a URL only has to *look* like an application for the
-#: answer to be no.
+#: Where applying happens, measured on a live page: the apply control and the
+#: response form's card are both under this path. The whole rule — see "An
+#: application is recognised by its path" in the module docstring.
 RESPONSE_PATH = "/applicant/vacancy_response"
-VACANCY_PARAM = "vacancyId"
-
-#: Paths measured carrying ``vacancyId`` while no application was being sent.
-#: Every one of them is in ``requests_allowed`` of
-#: ``agent/probe/20260906-181519/probe.json``, recorded on vacancy 133542745 at
-#: ``stage: open-form`` — the response form was opened and the run stopped
-#: before submitting, so nothing here can be the request that sends.
-#: ``/anatskytics`` is hh's own beacon and accounts for seventeen of that run's
-#: twenty-one requests; the other three are a blacklist check, a feedback survey
-#: and the widget behind the employer-reviews button. The one request in that
-#: run that *is* part of applying — the form's own card, on
-#: ``/applicant/vacancy_response/popup`` — is not here and is matched by path.
-#:
-#: **Read what this list does and does not do.** It never makes a request
-#: allowed: :meth:`SubmitGate.handle` decides refusals from
-#: :func:`looks_like_an_application`, which does not consult it, so a beacon
-#: outside an armed window is aborted today exactly as it was yesterday. All it
-#: does is keep hh's furniture out of the *count* — out of the window, out of
-#: the repeat rule, out of what a submit click is credited with. Matched by
-#: exact path, not by prefix: ``/anatskytics/something`` has never been seen and
-#: a guess in the widening direction is a guess about the one thing this module
-#: is for.
-NOT_THE_APPLICATION: Final[tuple[str, ...]] = (
-    "/anatskytics",
-    "/applicant/blacklist/state",
-    "/shards/vacancies/feedback/roulette",
-    "/employer_reviews/proxy_components/complain_button",
-)
 
 #: ``vacancyId=123``, ``vacancy_id: "123"``, ``"vacancyId":123`` — the spellings
 #: a query string, a form body and a JSON body use for the same thing.
@@ -218,54 +192,24 @@ class InterceptionEscapedError(Exception):
 
 
 def looks_like_an_application(url: str) -> bool:
-    """Whether this URL *could* be the shape hh sends applications through.
+    """Whether this request is on the path hh applies through.
 
-    Deliberately broad, and the only question a refusal is ever decided by. A
-    telemetry beacon that happens to carry a vacancy id is refused too; outside
-    an armed window that costs nothing, and the opposite mistake costs somebody
-    an application they did not agree to send.
-
-    Left exactly as it was on 2026-09-07 when the over-matching it does was
-    measured, because the over-matching is not the part that was wrong. What was
-    wrong was using this answer for a second question it cannot answer; that
-    question now has :func:`is_the_application_itself`.
+    The path, never a query parameter: ``vacancyId`` rides on every beacon and
+    widget of a vacancy page, and treating it as a sign of applying failed every
+    run on 2026-09-16. See the module docstring.
     """
-    parts = urlsplit(url)
-    if parts.path.startswith(RESPONSE_PATH):
-        return True
-    return f"{VACANCY_PARAM}=" in parts.query
+    return urlsplit(url).path.startswith(RESPONSE_PATH)
 
 
 def is_the_application_itself(url: str) -> bool:
-    """Whether this request is part of *sending* one, as far as anyone has measured.
+    """Whether the armed window counts this request.
 
-    The narrow half of the pair. It decides nothing about whether a request
-    leaves — see :func:`looks_like_an_application` for that — only whether the
-    armed window counts it, which is what the no-repeats rule and every number
-    this module reports are built out of.
-
-    Two clauses, one measured each way. A path under :data:`RESPONSE_PATH` is an
-    application: the apply control measured on 2026-09-06 is
-    ``<a href="/applicant/vacancy_response?vacancyId=…">`` and the card inside
-    the modal arrives on ``GET /applicant/vacancy_response/popup?vacancyId=…``
-    (``agent/probe/form_136131345.json``). Anything else naming a vacancy is
-    treated as an application too — because the request the submit button emits
-    has never been recorded and might be any shape at all — *unless* its path is
-    one of the four in :data:`NOT_THE_APPLICATION`, which were measured carrying
-    a vacancy id on a page where nothing was sent.
-
-    The asymmetry is the point. Being wrong here in the "yes" direction costs a
-    beacon a slot in a report nobody's application depends on. Being wrong in
-    the "no" direction would mean a real second application not being recognised
-    as a repeat, so the exemptions are four exact paths from one recorded run
-    and not a pattern.
+    The same answer as :func:`looks_like_an_application` since both became a
+    question about the path. Kept as its own name because the two questions
+    are different — "may this leave" and "does this count as applying" — and a
+    later measurement may separate them again.
     """
-    parts = urlsplit(url)
-    if parts.path.startswith(RESPONSE_PATH):
-        return True
-    if f"{VACANCY_PARAM}=" not in parts.query:
-        return False
-    return parts.path not in NOT_THE_APPLICATION
+    return looks_like_an_application(url)
 
 
 def post_body(request: Request) -> str | None:

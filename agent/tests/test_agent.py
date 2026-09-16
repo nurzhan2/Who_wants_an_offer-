@@ -23,7 +23,7 @@ import pytest
 
 from agent import selectors, submit
 from agent.gate import (
-    NOT_THE_APPLICATION,
+    InterceptionEscapedError,
     SubmitGate,
     is_the_application_itself,
     looks_like_an_application,
@@ -515,22 +515,59 @@ def test_a_refusal_during_the_send_is_recorded_with_the_click_that_caused_it() -
     assert SEND_URL in click.refused[0]
 
 
-def test_hhs_own_furniture_is_still_refused_when_nothing_is_armed() -> None:
-    """The guarantee that must survive the 2026-09-07 narrowing, asserted first.
+#: hh's analytics call as it left the page on 2026-09-16
+#: (``agent/probe/20260916-125039``): a POST with the vacancy id in its query.
+#: Fifteen of these were reported as escaped applications on that run.
+BEACON_20260916 = (
+    "https://almaty.hh.kz/anatskytics?active=true&activeTab=main&archived=false"
+    "&disabled=false&hhtmSource=vacancy&vacancyId=136717950&waiting=false"
+    "&event=button_click&buttonName=vacancy_response_letter_toggle"
+)
 
-    Splitting the predicate loosened nothing about refusals: outside an armed
-    window every request that *could* be an application is still aborted, hh's
-    beacons included. That is the direction the whole module is written in —
-    refusing a beacon is free, letting an application out is not.
+
+def test_hhs_own_furniture_is_not_an_application_armed_or_not() -> None:
+    """A vacancy id in the query is not applying; the path is.
+
+    Until 2026-09-16 these were refused outside an armed window on the grounds
+    that they carry ``vacancyId``. The same rule made the page recorder report
+    every analytics POST as an escaped application and failed each run. The
+    apply link itself is still refused with nothing armed.
     """
     gate = SubmitGate()
 
-    routes = [FakeRoute(url) for url in hh_furniture("136773120")]
+    routes = [FakeRoute(url) for url in (*hh_furniture("136773120"), BEACON_20260916)]
     for route in routes:
         gate.handle(route)
+    apply_link = FakeRoute(APPLY_URL)
+    gate.handle(apply_link)
 
-    assert [route.action for route in routes] == ["abort"] * 4
-    assert len(gate.blocked) == 4
+    assert [route.action for route in routes] == ["continue"] * 5
+    assert apply_link.action == "abort"
+    assert gate.blocked == [APPLY_URL]
+
+
+def test_an_analytics_call_the_router_never_saw_is_not_an_escape() -> None:
+    """The failure measured on 2026-09-16, reproduced.
+
+    The probe aborted hh's analytics POSTs in its own non-GET guard, the page
+    recorder still saw them, and each one read as an application that got past
+    the interceptor. They are not applications, so there is nothing to escape.
+    """
+    gate = SubmitGate()
+
+    gate.observe(FakeRequest(BEACON_20260916))
+
+    gate.assert_no_escapes()
+
+
+def test_an_application_the_router_never_saw_is_still_an_escape() -> None:
+    """The check itself must survive the narrowing."""
+    gate = SubmitGate()
+
+    gate.observe(FakeRequest(POPUP_URL))
+
+    with pytest.raises(InterceptionEscapedError):
+        gate.assert_no_escapes()
 
 
 def test_hhs_own_furniture_does_not_fill_the_window_or_count_as_a_repeat() -> None:
@@ -563,30 +600,33 @@ def test_the_popup_and_the_apply_link_are_both_the_application_itself() -> None:
     assert is_the_application_itself(SEND_URL)
 
 
-@pytest.mark.parametrize("url", hh_furniture("136773120"))
-def test_the_two_questions_disagree_exactly_where_it_was_measured(url: str) -> None:
-    """Broad enough to refuse, narrow enough not to be mistaken for a send."""
-    assert looks_like_an_application(url)
+@pytest.mark.parametrize("url", [*hh_furniture("136773120"), BEACON_20260916])
+def test_a_vacancy_id_in_the_query_does_not_make_a_request_an_application(url: str) -> None:
+    """Neither question is answered by a parameter every beacon carries."""
+    assert not looks_like_an_application(url)
     assert not is_the_application_itself(url)
 
 
-def test_an_hh_endpoint_nobody_measured_still_counts_as_an_application() -> None:
-    """The exemptions are four measured paths, not a rule about telemetry.
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/applicant/vacancy_response", True),
+        ("/applicant/vacancy_response/popup", True),
+        ("/applicant/vacancy_response/send", True),
+        ("/shards/applicant/negotiations", False),
+        ("/vacancy/136773120", False),
+    ],
+)
+def test_everything_under_the_response_path_is_an_application(path: str, expected: bool) -> None:
+    """Measured as the apply link and the form's card; anything below it counts too.
 
-    hh's submit request has never been recorded, so any unfamiliar path naming a
-    vacancy has to be treated as one — the alternative is a second application
-    that the repeat rule does not recognise.
+    hh's own submit request has never been recorded. If it lives under this
+    path, it is refused without a mandate and counted inside one.
     """
-    unmeasured = "https://almaty.hh.kz/shards/applicant/negotiations?vacancyId=136773120"
+    url = f"https://almaty.hh.kz{path}?vacancyId=136773120"
 
-    assert is_the_application_itself(unmeasured)
-
-
-@pytest.mark.parametrize("exempt", NOT_THE_APPLICATION)
-def test_an_exemption_covers_its_own_path_and_nothing_below_it(exempt: str) -> None:
-    """Matched exactly. ``/anatskytics/send`` has never been seen and is not exempt."""
-    assert not is_the_application_itself(f"https://almaty.hh.kz{exempt}?vacancyId=136773120")
-    assert is_the_application_itself(f"https://almaty.hh.kz{exempt}/send?vacancyId=136773120")
+    assert looks_like_an_application(url) is expected
+    assert is_the_application_itself(url) is expected
 
 
 def test_the_vacancy_is_read_out_of_the_url_however_it_is_written() -> None:

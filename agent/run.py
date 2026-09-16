@@ -123,6 +123,7 @@ from agent.submit import (
     AlreadyAppliedError,
     CaptchaPresentedError,
     IdempotencyUnknownError,
+    LetterNotTypedError,
     WrongVacancyError,
     looks_like_a_challenge,
     submit,
@@ -839,9 +840,9 @@ def _apply_each(
                 IdempotencyUnknownError,
                 CaptchaPresentedError,
                 WrongVacancyError,
-                # The letter has to go into a field nobody has measured. Not a
-                # breakage: a vacancy for a person, with a sentence saying what
-                # would change the answer.
+                # The letter has to go into a field nobody has measured, or the
+                # field never took it. Not a breakage: a vacancy for a person,
+                # with a sentence saying what would change the answer.
                 #
                 # ``RefusedByHHError`` was on this list until 2026-09-07 and is
                 # gone with the class. Nothing hh writes in the response form
@@ -850,6 +851,7 @@ def _apply_each(
                 # conclusion and is written as such. hh's words now leave through
                 # the success path, which is where hh puts them.
                 LetterFieldUnknownError,
+                LetterNotTypedError,
             ) as exc:
                 status = (
                     Status.SKIPPED if isinstance(exc, AlreadyAppliedError) else Status.NEEDS_MANUAL

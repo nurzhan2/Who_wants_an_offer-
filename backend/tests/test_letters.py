@@ -1136,6 +1136,23 @@ async def test_a_batch_says_which_side_each_letter_was_for(
 
 
 @pytest.mark.db
+async def test_no_letter_is_written_for_a_vacancy_the_agent_skipped(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """Archived, closed or already applied, by hh's own word: nothing to write for."""
+    profile = await profiles.create(make_profile())
+    skipped = await _listed(vacancies, "letters-skipped", settings.agent_source_slug)
+    await matches.bulk_upsert([make_match(profile.id, skipped, Decimal("90"))])
+    db_session.add(Application(id=uuid7(), vacancy_id=skipped, agent_status="skipped"))
+    await db_session.flush()
+
+    assert await store.queue(db_session, profile_id=profile.id, include_written=True) == []
+
+
+@pytest.mark.db
 async def test_the_letter_queue_starts_at_the_agent_queue_floor(
     db_session: AsyncSession,
     vacancies: VacancyRepository,

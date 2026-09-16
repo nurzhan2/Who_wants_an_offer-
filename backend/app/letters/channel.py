@@ -21,7 +21,8 @@ from sqlalchemy import ColumnElement, ScalarSelect, case, select
 from sqlalchemy.orm import QueryableAttribute
 
 from app.core.config import settings
-from app.db.models import VacancySource
+from app.db.models import Application, VacancySource
+from app.schemas.agent import AgentStatus
 
 #: A vacancy id as a query sees it: a mapped attribute or any column expression.
 type VacancyIdColumn = ColumnElement[UUID] | QueryableAttribute[UUID]
@@ -44,6 +45,24 @@ def on_agent_source(vacancy_id: VacancyIdColumn) -> ColumnElement[bool]:
         select(VacancySource.id)
         .where(VacancySource.vacancy_id == vacancy_id)
         .where(VacancySource.source_slug == settings.agent_source_slug)
+        .exists()
+    )
+
+
+def skipped_by_agent(vacancy_id: VacancyIdColumn) -> ColumnElement[bool]:
+    """Whether the agent opened this vacancy and hh said there is nothing to do.
+
+    ``skipped`` is the agent's verdict after reading the live page: archived,
+    closed for applicants, or already applied to. The database learns of it
+    only through that report — a vacancy archived after the crawl still reads
+    as live here, and was measured on 2026-09-16 sitting in apply_now with a
+    letter written for it (136105998). Once the agent has said so, neither
+    queue offers it again: not for another letter, not for another page load.
+    """
+    return (
+        select(Application.id)
+        .where(Application.vacancy_id == vacancy_id)
+        .where(Application.agent_status == AgentStatus.SKIPPED.value)
         .exists()
     )
 

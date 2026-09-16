@@ -681,6 +681,41 @@ async def test_a_filtered_vacancy_is_never_offered_whatever_its_score(
 
 
 @pytest.mark.db
+async def test_a_vacancy_the_agent_found_archived_is_not_offered_again(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """The database learns that hh archived a vacancy only from the agent.
+
+    Measured 2026-09-16: 136105998 was archived after the crawl, still sat in
+    apply_now with a letter, and was served again. Once the agent has reported
+    ``skipped`` for it, it is not.
+    """
+    profile = await profiles.create(make_profile())
+    vacancy_id = await _posting(vacancies, seed="queue-archived", external_id=HH_ID, url=HH_URL)
+    await matches.bulk_upsert([make_match(profile.id, vacancy_id, Decimal("90"))])
+    _letter(db_session, vacancy_id)
+    await db_session.flush()
+
+    before = await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)
+    await agent_queue.record_results(
+        db_session,
+        [
+            ApplicationResult(
+                vacancy_id=HH_ID, status=AgentStatus.SKIPPED, reason="вакансия в архиве"
+            )
+        ],
+    )
+    await db_session.flush()
+    after = await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)
+
+    assert [item.vacancy_id for item in before.items] == [HH_ID]
+    assert after.items == []
+
+
+@pytest.mark.db
 async def test_the_same_result_posted_twice_leaves_one_row(
     db_session: AsyncSession, vacancies: VacancyRepository
 ) -> None:

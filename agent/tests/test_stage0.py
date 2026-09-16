@@ -885,13 +885,20 @@ def test_the_probe_writes_both_halves_of_a_run(
 # ── the console this actually runs on ─────────────────────────────────
 
 
-def test_every_refusal_this_stage_prints_survives_a_cp1251_console() -> None:
+def test_every_refusal_this_stage_prints_survives_a_cp1251_console(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A Russian Windows console encodes cp1251 and a stray glyph kills the run.
 
     These messages are printed at exactly the moment something has gone wrong,
     which is the worst moment to replace the explanation with a traceback about
-    an encoding.
+    an encoding. The letter field is measured now, so its refusal is produced
+    by taking that measurement away.
     """
+    unmeasured = selectors.Selector(name="letter_field", query="", scope=selectors.Scope.UNVERIFIED)
+    monkeypatch.setattr(
+        selectors, "REQUIRED_FOR_A_LETTER", (selectors.ADD_COVER_LETTER, unmeasured)
+    )
     with pytest.raises(selectors.LetterFieldUnknownError) as letter:
         selectors.assert_letter_field_known()
     str(letter.value).encode("cp1251")

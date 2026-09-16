@@ -351,23 +351,24 @@ def test_an_application_shaped_request_is_aborted_because_nothing_was_armed() ->
     gate.assert_no_escapes()
 
 
-def test_hhs_own_beacons_are_refused_too_and_that_is_the_normal_case() -> None:
-    """Measured shapes: seventeen beacons and three widgets on one vacancy page.
+def test_the_unarmed_walk_lets_hhs_beacons_by_and_refuses_the_response_form() -> None:
+    """Measured shapes: beacons and widgets carry a vacancy id and are not applying.
 
-    All of them carry a vacancy id, so all of them are application-shaped to a
-    gate deciding whether consent exists. Refusing them costs nothing here and
-    is the visible sign that the walk is running unarmed.
+    Since 2026-09-16 the gate decides by path, so hh's furniture proceeds and
+    only a request under the response path is refused — which is the visible
+    sign that the walk is running unarmed.
     """
     furniture = (
         f"https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId={VACANCY}",
         f"https://almaty.hh.kz/applicant/blacklist/state?vacancyId={VACANCY}",
     )
+    form = f"https://almaty.hh.kz/applicant/vacancy_response/popup?vacancyId={VACANCY}"
     gate = SubmitGate()
-    page = a_page(gate=gate, fires=furniture)
+    page = a_page(gate=gate, fires=(*furniture, form))
 
     walk(page, [an_entry()], limits=unpaced(), rng=random.Random(1), sleep=_no_wait)
 
-    assert sorted(page.aborted) == sorted(furniture)
+    assert page.aborted == [form]
 
 
 def test_the_walk_never_reaches_for_consent_or_for_the_sender() -> None:

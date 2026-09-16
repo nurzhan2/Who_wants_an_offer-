@@ -207,6 +207,7 @@ async def queue(
         .where(Match.profile_id == profile_id)
         .where(Match.score >= threshold)
         .where(Match.bucket != MatchBucket.FILTERED)
+        .where(~channel.skipped_by_agent(Match.vacancy_id))
         .where(Vacancy.is_active.is_(True))
         .where(Vacancy.is_spam.is_(False))
         .order_by(via_agent.desc(), Match.score.desc(), Match.vacancy_id)

@@ -1,0 +1,40 @@
+{
+ "schema": "hh-agent-selector-evidence/1",
+ "stage": "open-form",
+ "authenticated": true,
+ "data_qa_seen": [
+  "add-cover-letter",
+  "hidden-resume-warning",
+  "mainmenu_createResume",
+  "mainmenu_profileAndResumes",
+  "mainmenu_vacancyResponses",
+  "modal-content-scroll-container",
+  "modal-footer",
+  "modal-header",
+  "modal-header-image",
+  "modal-overlay",
+  "profileAndResumes-badge",
+  "profileAndResumes-button",
+  "profileAndResumes-button-text",
+  "response-popup-close",
+  "response-popup-close-svg",
+  "resume-detail",
+  "resume-title",
+  "vacancy-response-link-top",
+  "vacancy-response-popup-form-letter-input",
+  "vacancy-response-submit-popup",
+  "vacancyResponses-button",
+  "vacancyResponses-button-text"
+ ],
+ "decoys_seen": [
+  "vacancy-response-question",
+  "vacancy-response-question_employment_and_work_mode",
+  "vacancy-response-question_how_to_contact",
+  "vacancy-response-question_is_vacancy_open",
+  "vacancy-response-question_other",
+  "vacancy-response-question_salary_options",
+  "vacancy-response-question_work_place_location"
+ ],
+ "produced_by": "agent/probe_apply.py",
+ "contains": "Только имена data-qa, этап прогона и измеренный признак авторизации. Ни id вакансии, ни ссылок, ни откликов, ни данных владельца аккаунта."
+}

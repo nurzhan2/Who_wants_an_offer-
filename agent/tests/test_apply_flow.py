@@ -84,6 +84,7 @@ from agent.submit import (
     AlreadyAppliedError,
     CaptchaPresentedError,
     IdempotencyUnknownError,
+    LetterNotTypedError,
 )
 
 pytestmark = pytest.mark.unit
@@ -334,6 +335,12 @@ class FakePage:
     #: Clicks that reached a control, in order.
     clicks: list[str] = field(default_factory=list)
     filled: dict[str, str] = field(default_factory=dict)
+    #: How many times the letter field answers "not editable" before it does.
+    #: ``None`` means it never does.
+    editable_after: int | None = 0
+    #: What the letter field holds after typing, when that is not what was typed.
+    typed_instead: str | None = None
+    editability_checks: int = 0
     #: URLs the gate refused, so a test can tell a block from a miss.
     aborted: list[str] = field(default_factory=list)
     sent: bool = False
@@ -406,7 +413,7 @@ class FakePage:
         matched = [name for name in self.controls if f'"{name}"' in query]
         return FakeLocator(self, query, matched[0] if matched else None)
 
-    def wait_for_selector(self, query: str, timeout: int = 0) -> None:
+    def wait_for_selector(self, query: str, state: str = "visible", timeout: int = 0) -> None:
         """Present only once whatever reveals it has actually happened."""
         self.waited.append(query)
         if not any(f'"{name}"' in query for name in self.visible):
@@ -414,7 +421,22 @@ class FakePage:
 
     def fill(self, query: str, text: str) -> None:
         """Typing the letter into the form."""
+        if not self.is_editable(query):
+            raise RuntimeError(f"{query} не принимает ввод")
         self.filled[query] = text
+
+    def is_editable(self, query: str) -> bool:
+        """The letter field takes input only after ``editable_after`` checks."""
+        self.editability_checks += 1
+        if self.editable_after is None:
+            return False
+        return self.editability_checks > self.editable_after
+
+    def input_value(self, query: str) -> str:
+        """What the field holds now."""
+        if self.typed_instead is not None:
+            return self.typed_instead
+        return self.filled.get(query, "")
 
     def click(self, query: str) -> None:
         """The two buttons inside the modal."""
@@ -602,15 +624,78 @@ def test_hh_saying_nothing_arrived_is_still_the_thing_that_stops_a_send(ready: N
     assert str(raised.value) == submit.UNCONFIRMED
 
 
+def test_the_letter_waits_for_the_field_to_take_input(ready: None) -> None:
+    """Present is not ready: the modal renders in stages."""
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), state_after_send=a_state(applied=True), editable_after=3)
+
+    submit.submit(page, a_mandate(), gate)
+
+    assert page.filled == {selectors.LETTER_FIELD.query: "Здравствуйте!"}
+    assert page.editability_checks > 3
+    assert page.clicks[-1] == selectors.SUBMIT_BUTTON.query
+
+
+def test_a_field_that_never_takes_input_sends_nothing(ready: None) -> None:
+    """The form stays open, the submit button untouched, a person decides."""
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), editable_after=None)
+
+    with pytest.raises(LetterNotTypedError) as raised:
+        submit.submit(page, a_mandate(), gate)
+
+    assert page.clicks == [selectors.ADD_COVER_LETTER.query]
+    assert page.sent is False
+    assert "не отправлен" in str(raised.value)
+
+
+def test_a_letter_that_did_not_land_whole_sends_nothing(ready: None) -> None:
+    """A half-typed letter is still an application, and it cannot be taken back."""
+    gate = SubmitGate()
+    page = FakePage(gate, a_state(), typed_instead="Здравс")
+
+    with pytest.raises(LetterNotTypedError):
+        submit.submit(page, a_mandate(), gate)
+
+    assert selectors.SUBMIT_BUTTON.query not in page.clicks
+    assert page.sent is False
+
+
+def test_a_vacancy_archived_after_the_crawl_is_skipped_before_anything_is_clicked(
+    ready: None,
+) -> None:
+    """The database is older than the page; the page decides.
+
+    Measured 2026-09-16: 136105998 sat in apply_now with a letter while hh's own
+    analytics reported ``active=false&archived=true&disabled=false`` for it and
+    the page carried no apply control. Those are the three flags hh keeps in
+    ``vacancyView.status``, the shape ``app/sources/hh.py`` reads when crawling.
+    """
+    gate = SubmitGate()
+    state = a_state()
+    state["vacancyView"] = {
+        "closedForApplicants": False,
+        "status": {"active": False, "archived": True, "disabled": False},
+    }
+    page = FakePage(gate, state)
+
+    with pytest.raises(AlreadyAppliedError) as raised:
+        submit.submit(page, a_mandate(), gate)
+
+    assert "архив" in str(raised.value)
+    assert page.clicks == []
+    assert page.used_control is None
+    assert gate.allowed == []
+
+
 def test_hhs_own_beacons_do_not_interfere_with_the_flow_they_arrive_in(ready: None) -> None:
     """Measured over-match, driven through the real flow.
 
-    ``looks_like_an_application`` answers True for hh's beacon, its blacklist
-    check and its feedback survey, because each carries ``vacancyId``. Inside the
-    armed window that used to mean the first of them consumed a slot, a repeat
-    was aborted as «a second application» in the middle of a real apply flow, and
-    the count that was supposed to say whether the submit click sent anything
-    could be satisfied by a beacon.
+    hh's beacon, its blacklist check and its feedback survey each carry
+    ``vacancyId``. Inside the armed window that used to mean the first of them
+    consumed a slot and a repeat was aborted as «a second application»; since
+    2026-09-16 none of them is application-shaped at all, because the rule is
+    the path.
     """
     gate = SubmitGate()
     page = FakePage(gate, a_state(), state_after_send=a_state(applied=True), beacons=FURNITURE)
@@ -618,22 +703,25 @@ def test_hhs_own_beacons_do_not_interfere_with_the_flow_they_arrive_in(ready: No
     submit.submit(page, a_mandate(), gate)
 
     assert page.aborted == [], f"the gate refused hh's own page: {gate.refused_because}"
-    # Two application requests — the form and the send — and hh's four beacons
-    # allowed beside them without being counted as either.
+    # Two application requests — the form and the send. hh's four beacons went
+    # through without the gate treating them as applications at all.
     assert gate.requests_in_window() == 2
-    assert len(gate.allowed) == 2 + len(FURNITURE)
+    assert len(gate.allowed) == 2
     assert gate.submit_clicks[0].allowed == (SEND_URL,)
     gate.assert_no_escapes()
 
 
-def test_a_beacon_with_no_confirmation_behind_it_is_still_refused(ready: None) -> None:
-    """The narrowing must not have become permission. Nothing is armed here."""
+def test_with_nothing_armed_a_beacon_proceeds_and_the_apply_link_does_not(
+    ready: None,
+) -> None:
+    """The narrowing to the path must not have become permission to apply."""
     gate = SubmitGate()
     page = FakePage(gate, a_state(), beacons=FURNITURE)
 
     page.navigate(FURNITURE[0])
+    page.navigate(SEND_URL)
 
-    assert page.aborted == [FURNITURE[0]]
+    assert page.aborted == [SEND_URL]
 
 
 def test_hh_contradicting_itself_stops_the_send_and_says_which_answer_it_gave(
@@ -1091,15 +1179,19 @@ def test_the_real_capture_that_broke_this_reads_as_an_ordinary_page() -> None:
 # ── the letter field nobody has measured ──────────────────────────────
 
 
-def test_a_letter_is_never_typed_into_a_field_nobody_has_seen() -> None:
-    """No fixture here on purpose: this is the state the repository is in.
+def test_a_letter_is_never_typed_into_a_field_whose_evidence_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The field was measured on 2026-09-16; this is the state if that record goes.
 
-    ``add-cover-letter`` is only the button that reveals the field. Guessing the
-    field is the exact failure this package exists to prevent, so the vacancy
-    goes to the owner — and the refusal names the one probe step that closes the
-    gap, because "not verified" without "here is how to verify it" is how a
-    blocker becomes permanent.
+    Guessing the field is the exact failure this package exists to prevent, so
+    the vacancy goes to the owner — and the refusal names the one probe step that
+    closes the gap.
     """
+    unmeasured = Selector(name="letter_field", query="", scope=Scope.UNVERIFIED)
+    monkeypatch.setattr(
+        selectors, "REQUIRED_FOR_A_LETTER", (selectors.ADD_COVER_LETTER, unmeasured)
+    )
     gate = SubmitGate()
     page = FakePage(gate, a_state())
 
@@ -1122,6 +1214,10 @@ def test_a_vacancy_needing_a_letter_goes_to_the_owner_rather_than_failing(
     the broad class would have stopped everything; caught narrowly it is a
     routing decision, and the whole daily budget is still available to the rest.
     """
+    unmeasured = Selector(name="letter_field", query="", scope=Scope.UNVERIFIED)
+    monkeypatch.setattr(
+        selectors, "REQUIRED_FOR_A_LETTER", (selectors.ADD_COVER_LETTER, unmeasured)
+    )
     journal = _prepared_journal(tmp_path)
     _run_one(None, tmp_path, monkeypatch, journal, a_state(), a_state(applied=True))
 

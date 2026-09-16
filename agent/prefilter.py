@@ -326,10 +326,10 @@ def decide(
     ``letter_field_known`` defaults to ``True`` so that this signature keeps
     working, but the caller in the browser must pass
     ``selectors.letter_field_is_known()``. Sending *without* a letter was
-    measured end to end on 2026-09-06; the textarea that holds a letter was not,
-    because nobody clicked «Добавить сопроводительное» during the measurement.
-    So a vacancy that demands a letter goes to a person until that field has
-    been seen, even when a letter is sitting right there. This is a routing
+    measured end to end on 2026-09-06, the textarea that holds a letter on
+    2026-09-16. If that second measurement is ever missing — a redesign, a
+    deleted evidence file — a vacancy that demands a letter goes to a person,
+    even when a letter is sitting right there. This is a routing
     decision, not an error: it takes one vacancy out of the batch rather than
     stopping the run, and it is the difference between "we cannot do this yet"
     and a guessed selector typing somebody's letter into whatever it happens to

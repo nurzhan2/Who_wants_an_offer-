@@ -609,13 +609,33 @@ def test_the_measured_half_of_the_apply_flow_may_start() -> None:
         assert selector.usable_for_applying, selector.name
 
 
-def test_a_cover_letter_still_refuses_and_names_the_step_that_would_close_it() -> None:
-    """The letter field is the one selector nobody has seen, and it stays refused.
+def test_the_letter_field_is_measured_and_backed_by_a_committed_record() -> None:
+    """Measured 2026-09-16: the textarea behind «Добавить сопроводительное».
 
-    ``add-cover-letter`` is only the button that reveals it. Nothing may guess
-    the field itself, and the refusal has to be actionable rather than final:
-    it names the probe step that measures it.
+    Passes here and in CI because its evidence is the redacted file in
+    ``agent/evidence/``, not the gitignored probe report.
     """
+    selectors.assert_letter_field_known()
+
+    assert selectors.letter_field_is_known()
+    assert selectors.LETTER_FIELD.query == ('[data-qa="vacancy-response-popup-form-letter-input"]')
+    assert selectors.LETTER_FIELD.evidence == "20260916-125039"
+
+
+def test_a_letter_field_whose_evidence_is_gone_refuses_and_names_the_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Losing the measurement must route letters to a person, not guess.
+
+    The refusal names the probe step that measures the field again.
+    """
+    unmeasured = dataclasses.replace(
+        selectors.LETTER_FIELD, query="", scope=selectors.Scope.UNVERIFIED, evidence=None
+    )
+    monkeypatch.setattr(
+        selectors, "REQUIRED_FOR_A_LETTER", (selectors.ADD_COVER_LETTER, unmeasured)
+    )
+
     assert not selectors.letter_field_is_known()
     with pytest.raises(selectors.LetterFieldUnknownError) as excinfo:
         selectors.assert_letter_field_known()
@@ -788,21 +808,19 @@ def test_the_gate_matches_the_url_and_not_the_method() -> None:
     "url",
     [
         "https://hh.kz/applicant/vacancy_response?vacancyId=136773120",
-        "https://almaty.hh.kz/anatskytics?hhtmSource=vacancy&vacancyId=136773120",
-        "https://almaty.hh.kz/applicant/blacklist/state?vacancyId=136773120",
-        "https://almaty.hh.kz/shards/vacancies/feedback/roulette?vacancyId=136773120",
+        "https://almaty.hh.kz/applicant/vacancy_response/popup?vacancyId=136773120",
     ],
 )
 def test_the_exemption_list_cannot_become_a_hole_in_consent(
     url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The 2026-09-07 narrowing must not be reachable from the refusal decision.
+    """The window's own question must not be reachable from the refusal decision.
 
-    ``is_the_application_itself`` subtracts four measured paths so that hh's own
-    furniture does not fill the armed window. That list is the kind of thing a
-    later contributor extends — one more beacon, one more widget — and if a
-    refusal ever consulted it, extending it would be extending the set of
-    requests that can leave the browser with nobody's consent behind them.
+    ``is_the_application_itself`` decides only what the armed window counts. It
+    is the predicate a later contributor narrows — one more beacon, one more
+    widget — and if a refusal ever consulted it, narrowing it would widen the
+    set of requests that can leave the browser with nobody's consent behind
+    them.
 
     Asserted by making the narrow predicate answer "not an application" for
     *everything* and requiring an unarmed gate to abort anyway. It is the same

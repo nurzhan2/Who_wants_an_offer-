@@ -58,12 +58,11 @@ LATER than two seconds after the click. The earlier report at
 for exactly that reason: it waited two seconds and photographed the page before
 the modal rendered. Everything here waits for a selector.
 
-**The one thing still unmeasured.** ``add-cover-letter`` is the button that
-reveals the letter field; nobody had clicked it, so no textarea appears in any
-dump and the letter field's selector is genuinely unknown. This stage now
-clicks it and dumps again, and additionally lists every form control inside the
-modal with its attributes, so the answer arrives as a measurement instead of a
-guess.
+**The letter field, measured 2026-09-16.** ``add-cover-letter`` is the button
+that reveals it. This stage clicks it and dumps again, and lists every form
+control inside the modal with its attributes; the run in
+``agent/evidence/20260916-125039.json`` is where ``selectors.LETTER_FIELD``
+comes from. Run it again after a redesign rather than guessing.
 
     uv run python -m agent.probe_apply --stage inspect   --url https://hh.kz/vacancy/123
     uv run python -m agent.probe_apply --stage open-form --url https://hh.kz/vacancy/123
@@ -133,7 +132,12 @@ FORM_CONTROLS_JS = """els => els.map(e => ({
   placeholder: e.getAttribute('placeholder') || '',
   aria: e.getAttribute('aria-label') || '',
   editable: e.isContentEditable === true
+    || ((e.tagName === 'TEXTAREA' || e.tagName === 'INPUT')
+        && !e.disabled && !e.readOnly && e.type !== 'hidden')
 }))"""
+# ``editable`` used to be ``isContentEditable`` alone, which is false for every
+# ``<textarea>`` and ``<input>`` by definition: the 2026-09-16 run reported the
+# letter field as not editable for that reason and no other.
 
 
 @final
@@ -143,16 +147,21 @@ class RequestLog:
 
     #: Application-shaped requests that were refused: another vacancy's.
     intercepted: list[str] = field(default_factory=list)
-    #: Anything that was not a GET. The send is a non-GET, so this list being
-    #: the reason nothing left is a fact about the network, not a promise.
+    #: Anything that was not a GET, as ``"METHOD url"`` for the report. The send
+    #: is a non-GET, so this list being the reason nothing left is a fact about
+    #: the network, not a promise.
     blocked_non_get: list[str] = field(default_factory=list)
+    #: The same requests by bare URL, which is what :attr:`observed` holds. The
+    #: escape check compared the prefixed strings against bare URLs, so a
+    #: request the handler *had* refused could never match and read as escaped.
+    blocked_non_get_urls: list[str] = field(default_factory=list)
     #: This vacancy's own GETs, which were let through: the popup fetch.
     allowed: list[str] = field(default_factory=list)
     observed: list[str] = field(default_factory=list)
 
     def escapes(self) -> list[str]:
         """URLs the page reported that the route handler never got."""
-        seen = set(self.intercepted) | set(self.allowed) | set(self.blocked_non_get)
+        seen = set(self.intercepted) | set(self.allowed) | set(self.blocked_non_get_urls)
         return [url for url in self.observed if url not in seen]
 
 
@@ -327,6 +336,7 @@ def open_form(url: str, *, already_applied: bool) -> dict[str, Any]:
             request_url = str(request.url)
             if str(request.method).upper() != "GET":
                 log.blocked_non_get.append(f"{request.method} {request_url}")
+                log.blocked_non_get_urls.append(request_url)
                 route.abort()
                 return
             if not looks_like_an_application(request_url):

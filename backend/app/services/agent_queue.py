@@ -87,6 +87,7 @@ from app.db.models import (
     VacancySkill,
     VacancySource,
 )
+from app.letters import channel
 from app.resume import ats_audit
 from app.resume.ats_keywords import HeldSkill, match_requirements
 from app.schemas.agent import (
@@ -367,6 +368,10 @@ def _queue_statement(
         # a high similarity and must still never reach the agent. Measured 13
         # Sep 2026: three such vacancies sat in the ready list above the floor.
         .where(Match.bucket != MatchBucket.FILTERED)
+        # The agent already opened it and hh said there is nothing to do —
+        # archived after the crawl, closed, or applied to. See
+        # ``app.letters.channel.skipped_by_agent``.
+        .where(~channel.skipped_by_agent(Vacancy.id))
         .where(Vacancy.is_spam.is_(False))
         .where(~VacancySource.external_id.like(f"%{SEED_ID_MARKER}%"))
         .where(~acted_on)
