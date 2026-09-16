@@ -473,6 +473,39 @@ class FileQueue:
 #: hands out the owner's cover letters.
 TOKEN_VARIABLE: Final[str] = "AGENT_API_TOKEN"
 
+#: The settings file the backend reads the same token from. Read here as well
+#: since 2026-09-16: the token written into ``.env``, as ``.env.example`` says
+#: to, used to reach the backend and not this process, and the run ended in a
+#: 401 whose message did not mention the file. The environment wins when both
+#: are set, as it does for the backend.
+DOTENV: Final[Path] = Path(__file__).resolve().parents[1] / ".env"
+
+
+def local_token() -> tuple[str, str]:
+    """The local token and where it was found: ``окружение``, ``.env`` or ``""``.
+
+    Parsed by hand rather than through the backend's settings, which this
+    package must not import (``agent/tests/test_isolation.py``). ``wwao`` has
+    the same few lines for the same reason.
+    """
+    from_environment = os.environ.get(TOKEN_VARIABLE, "").strip()
+    if from_environment:
+        return from_environment, "окружение"
+    try:
+        text = DOTENV.read_text(encoding="utf-8")
+    except OSError:
+        return "", ""
+    for raw in text.splitlines():
+        key, _, value = raw.strip().removeprefix("export ").partition("=")
+        if key.strip() != TOKEN_VARIABLE:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if value:
+            return value, ".env"
+    return "", ""
+
 
 @final
 class HttpQueue:
@@ -493,7 +526,8 @@ class HttpQueue:
         #: never reaches a command line or a log. An empty token sends no header
         #: at all: the endpoint then answers 401, which reads as "not configured"
         #: rather than as "rejected", and that is the more useful of the two.
-        self.token = os.environ.get(TOKEN_VARIABLE, "") if token is None else token
+        found, self.token_source = local_token() if token is None else (token, "аргумент")
+        self.token = found
 
     def _headers(self) -> dict[str, str]:
         """The one header this client sends. Never logged, never printed."""
@@ -548,7 +582,11 @@ class HttpQueue:
             code = error.response.status_code
             detail = f"{code}"
             if code in (401, 403):
-                detail += f" — очередь закрыта локальным токеном ({TOKEN_VARIABLE})"
+                detail += f" — очередь закрыта локальным токеном ({TOKEN_VARIABLE}); " + (
+                    f"токен взят из: {self.token_source}, и бэкенд его не принял"
+                    if self.token
+                    else "он не задан ни в окружении, ни в файле .env в корне проекта"
+                )
             elif code == 503:
                 detail += f" — у бэкенда не задан {TOKEN_VARIABLE}"
             elif code == 404:

@@ -419,6 +419,54 @@ def _fit(text: str, width: int) -> str:
 #: nothing outside the terminal may be able to stand in for it.
 TOKEN_VARIABLE: Final[str] = "AGENT_API_TOKEN"
 
+#: The settings file the backend reads the same token from. Read here too since
+#: 2026-09-16: a person who put the token in ``.env`` — which is what
+#: ``.env.example`` tells them to do — got a 401 from this command and a message
+#: saying only that the variable was missing from the environment. The
+#: environment still wins when both are set, as it does for the backend.
+DOTENV: Final[Path] = Path(__file__).resolve().parents[1] / ".env"
+
+
+def local_token() -> tuple[str, str]:
+    """The local token and where it was found: ``окружение``, ``.env`` or ``""``.
+
+    Where it came from is returned so an error can say which of the two places
+    to fix. The value itself is never printed by anything in this package.
+    """
+    import os
+
+    from_environment = os.environ.get(TOKEN_VARIABLE, "").strip()
+    if from_environment:
+        return from_environment, "окружение"
+    from_file = read_dotenv(DOTENV).get(TOKEN_VARIABLE, "")
+    if from_file:
+        return from_file, ".env"
+    return "", ""
+
+
+def read_dotenv(path: Path) -> dict[str, str]:
+    """``KEY=value`` lines of a dotenv file, as pydantic-settings reads them.
+
+    Comments, blank lines and an ``export`` prefix are tolerated; one layer of
+    matching quotes is removed. A file that is missing or unreadable is simply
+    empty — the caller then says the token is not set anywhere.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    values: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.removeprefix("export ").partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
 
 def fetch_over_http(base_url: str, limit: int) -> str:
     """``GET {base}/api/v1/applications/queue?limit=…``, as raw text.
@@ -433,12 +481,11 @@ def fetch_over_http(base_url: str, limit: int) -> str:
     ``asyncio.run`` is what turns one request into a command-line program.
     """
     import asyncio
-    import os
 
     import httpx
 
     url = f"{base_url.rstrip('/')}{QUEUE_PATH}"
-    token = os.environ.get(TOKEN_VARIABLE, "")
+    token, found_in = local_token()
     headers = {"Authorization": f"Bearer {token}"} if token else {}
 
     async def get() -> str:
@@ -453,9 +500,14 @@ def fetch_over_http(base_url: str, limit: int) -> str:
         if response.status_code in (401, 403):
             raise QueueUnavailableError(
                 f"{url} отвечает {response.status_code}: очередь закрыта локальным токеном. "
-                f"Он берётся из {TOKEN_VARIABLE} в окружении и должен совпадать с тем, "
-                "что стоит у бэкенда в .env."
-                + ("" if token else f" Сейчас {TOKEN_VARIABLE} не задан.")
+                f"Он берётся из {TOKEN_VARIABLE} — из окружения, а если там его нет, из "
+                f"файла .env в корне проекта — и должен совпадать с тем, что видит бэкенд."
+                + (
+                    f" Сейчас токен взят из: {found_in}, и бэкенд его не принял — "
+                    "перезапустите бэкенд, если меняли .env после его запуска."
+                    if token
+                    else f" Сейчас {TOKEN_VARIABLE} не задан ни в окружении, ни в .env."
+                )
             )
         if response.status_code == 503:
             raise QueueUnavailableError(

@@ -22,6 +22,7 @@ would have been the one crossing that package forbids.
 """
 
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import pytest
@@ -273,3 +274,23 @@ def test_the_token_is_read_from_the_environment_and_never_from_the_code(
     monkeypatch.delenv("AGENT_API_TOKEN")
 
     assert HttpQueue(BASE).token == ""
+
+
+def test_the_agent_reads_the_token_from_dotenv_when_the_environment_has_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The same file the backend reads; the environment still wins."""
+    from agent import queue as queue_module
+
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("OTHER=1\nAGENT_API_TOKEN='from-file'\n", encoding="utf-8")
+    monkeypatch.setattr(queue_module, "DOTENV", dotenv)
+    monkeypatch.delenv("AGENT_API_TOKEN", raising=False)
+    assert queue_module.HttpQueue("http://x").token == "from-file"
+
+    monkeypatch.setenv("AGENT_API_TOKEN", "from-environment")
+    assert queue_module.HttpQueue("http://x").token == "from-environment"
+
+    monkeypatch.delenv("AGENT_API_TOKEN")
+    monkeypatch.setattr(queue_module, "DOTENV", tmp_path / "missing.env")
+    assert queue_module.local_token() == ("", "")

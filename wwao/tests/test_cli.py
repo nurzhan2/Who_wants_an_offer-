@@ -21,7 +21,7 @@ import httpx
 import pytest
 import respx
 
-from wwao import cli
+from wwao import cli, queue_view
 from wwao.cli import Fetcher, Runner
 from wwao.console import printable
 from wwao.queue_view import QueueNotBuiltError, QueueUnavailableError, fetch_over_http
@@ -1042,3 +1042,46 @@ def test_outcomes_runs_where_nobody_is_watching_and_apply_does_not() -> None:
 def test_the_walk_the_cli_names_is_a_file_the_repository_can_show_you() -> None:
     """A router's whole content is where each step lives."""
     assert (cli.REPO_ROOT / "agent" / "outcomes.py").is_file()
+
+
+@respx.mock
+def test_the_token_written_into_dotenv_is_used_when_the_environment_has_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``.env.example`` says to put the token in ``.env``; that has to be enough.
+
+    Until 2026-09-16 only the backend read the file, so the CLI answered 401 and
+    blamed the environment. The environment still wins when both are set.
+    """
+    dotenv = tmp_path / ".env"
+    dotenv.write_text('# local\nexport AGENT_API_TOKEN="from-file"\nOTHER=1\n', encoding="utf-8")
+    monkeypatch.setattr(queue_view, "DOTENV", dotenv)
+    monkeypatch.delenv("AGENT_API_TOKEN", raising=False)
+    route = respx.get(ENDPOINT).mock(
+        return_value=httpx.Response(200, json={"version": 1, "items": []})
+    )
+
+    fetch_over_http(BASE, 5)
+    assert route.calls[0].request.headers["authorization"] == "Bearer from-file"
+
+    monkeypatch.setenv("AGENT_API_TOKEN", "from-environment")
+    fetch_over_http(BASE, 5)
+    assert route.calls[1].request.headers["authorization"] == "Bearer from-environment"
+
+
+@respx.mock
+def test_a_refused_token_from_dotenv_says_where_it_was_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("AGENT_API_TOKEN=stale-token\n", encoding="utf-8")
+    monkeypatch.setattr(queue_view, "DOTENV", dotenv)
+    monkeypatch.delenv("AGENT_API_TOKEN", raising=False)
+    respx.get(ENDPOINT).mock(return_value=httpx.Response(401))
+
+    with pytest.raises(QueueUnavailableError) as raised:
+        fetch_over_http(BASE, 5)
+
+    assert ".env" in str(raised.value)
+    assert "перезапустите бэкенд" in str(raised.value)
+    assert "stale-token" not in str(raised.value)
