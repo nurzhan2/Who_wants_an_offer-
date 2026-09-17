@@ -29,6 +29,7 @@ what it is worth, and ``vacancy_skill.source`` keeps the two apart forever, so
 a report can say which of them it is looking at.
 """
 
+import html
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -95,6 +96,32 @@ NEEDS_COMPANY: frozenset[str] = frozenset({"c", "go"})
 #: decision about them would have to come from.
 KNOWN_AMBIGUOUS: frozenset[str] = frozenset({"swift", "oracle"})
 
+#: Phrases that mark a line as a menu of *other* roles — "not your stack? we
+#: place people in all of these" — rather than this vacancy's requirements. A
+#: line carrying one is not read at all, whatever else it names.
+#:
+#: Measured 13 Sep 2026 over 1957 live descriptions. One recruitment
+#: marketplace closes every posting with such a menu, in two wordings, and it
+#: named 20 dictionary skills per vacancy — every false Rust and 5 of 8 Scala
+#: read from text. Each phrase below was searched across the whole corpus: they
+#: occur only in that menu. «match you» alone does not qualify — «match your
+#: experience with the correct salary» is ordinary benefits prose — and neither
+#: do «подберём» (a shop location) or «other roles» ("apply anyway").
+#:
+#: A phrase list, not a count. The menu sentence names 20 skills, but a real
+#: stack line in the same corpus names 19 («ASP.Net Core, Java, JavaScript,
+#: C++, …») and another 16, so a cap either misses the menu or cuts those; any
+#: cap from 8 to 15 removed skills from 4–7 genuine vacancies. What the list
+#: costs instead: a menu worded differently is still read as requirements, and
+#: a new one has to be measured into this list, as the one above was.
+#: ``docs/MATCHING.md`` records the numbers.
+MENU_MARKERS: tuple[str, ...] = (
+    "not your tech stack",
+    "we'll match you",
+    "we will match you",
+    "match you with a project",
+)
+
 #: A spelling this short is a word of some language as often as it is a skill —
 #: «C», «Go», «мл», «py». Case is what separates them: a technology is a proper
 #: name and gets a capital letter, «идти в ногу» and «500 мл» do not.
@@ -115,6 +142,34 @@ GLUE = r"[\s._\-]+"
 #: carry one, and splitting on it would leave «Node» and «js» in two different
 #: sentences with two different verdicts about the same mention.
 SENTENCE = re.compile(r"(?<=[.!?…])\s+|[\n;•·]+")
+
+#: An HTML entity. Its trailing ``;`` is the reason markup is flattened before
+#: :data:`SENTENCE` sees the text: «&lt;li&gt;C&lt;/li&gt;» would otherwise be
+#: cut into «&lt», «li&gt», «C&lt» and every marker judged on the pieces.
+ENTITY = re.compile(r"&(?:[a-zA-Z][a-zA-Z0-9]*|#\d+|#[xX][0-9a-fA-F]+);")
+
+#: A tag: a name starting with a letter, then only things shaped like attributes.
+#: «a < b» and «если a<b и b > c» are prose, and a bare ``<[^>]+>`` — or a name
+#: followed by anything — would read «<b и b >» as a bold tag.
+TAG = re.compile(
+    r"</?[a-zA-Z][a-zA-Z0-9]*"
+    r"""(?:\s+[a-zA-Z_:][-a-zA-Z0-9_:.]*(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'<>=]+))?)*"""
+    r"\s*/?>"
+)
+
+#: Tags that end a line. Openings count as well as closings: «<p>Communication:
+#: </p><ul><li>…» is written without a newline in the feeds, and a list item has
+#: to be its own sentence either way.
+BLOCK_TAG = re.compile(
+    r"</?(?:p|div|li|ul|ol|tr|td|th|h[1-6]|blockquote|section|article|header|footer)\b[^<>]*>"
+    r"|<br\s*/?>",
+    re.IGNORECASE,
+)
+
+#: How many layers of escaping are peeled. Measured 13 Sep 2026: arbeitnow sends
+#: markup escaped inside its JSON (``&lt;p&gt;``) and sometimes escaped twice
+#: (``&amp;nbsp;``). Bounded so that text about HTML entities cannot loop.
+UNESCAPE_ROUNDS = 3
 
 #: A requirement the employer marked as optional. Checked before the negations
 #: below, because «не обязательно» contains a negation and means "nice to have"
@@ -220,7 +275,7 @@ def skills_in_text(text: str | None) -> TextSkills:
     negated: dict[str, None] = {}
     mentions: list[Mention] = []
 
-    for sentence in _sentences(text):
+    for sentence in _sentences(_without_menus(plain_text(text))):
         found = _mentions_in(sentence)
         if not found:
             continue
@@ -248,9 +303,52 @@ def skills_in_text(text: str | None) -> TextSkills:
     )
 
 
+def plain_text(text: str) -> str:
+    """The description as prose, whatever markup its connector stored it in.
+
+    hh flattens its HTML before storing it (``app.sources.hh.strip_html``); the
+    feed connectors store what the feed sent. Measured 13 Sep 2026 on 1958 live
+    descriptions: every one of arbeitnow's 300 carries tags, 6 of remotive's 19
+    do, 72 of arbeitnow's carry them escaped, and hh's 1606 carry neither. Done
+    here rather than in each connector because the stored rows are what the
+    backfill reads, and a feed that only serves its newest postings will never
+    send those rows again.
+
+    Text with neither a tag nor an entity is returned as it came, so what hh
+    stored is read exactly as before. Otherwise entities are peeled until none
+    is left (at most :data:`UNESCAPE_ROUNDS` layers), block tags become line
+    breaks and every other tag a space.
+    """
+    if not TAG.search(text) and not ENTITY.search(text):
+        return text
+    for _ in range(UNESCAPE_ROUNDS):
+        unescaped = html.unescape(text)
+        if unescaped == text:
+            break
+        text = unescaped
+    text = BLOCK_TAG.sub("\n", text)
+    text = TAG.sub(" ", text).replace("\xa0", " ")
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
 def _sentences(text: str) -> list[str]:
     """The text in the pieces a marker is allowed to speak for."""
     return [part.strip() for part in SENTENCE.split(text) if part and part.strip()]
+
+
+def _without_menus(text: str) -> str:
+    """The text with every line carrying a :data:`MENU_MARKERS` phrase blanked.
+
+    The line, not the sentence: the menu is one paragraph, and before markup is
+    flattened its ``&amp;`` separators cut it into dozens of sentences, only one
+    of which carries the phrase. Blanked rather than removed, so the lines
+    around it still end where they ended. Typographic apostrophes are folded
+    first — the feeds write «we’ll» as often as «we'll».
+    """
+    return "\n".join(
+        "" if _has(line.replace("’", "'"), MENU_MARKERS) else line for line in text.split("\n")
+    )
 
 
 def _has(sentence: str, markers: tuple[str, ...]) -> bool:

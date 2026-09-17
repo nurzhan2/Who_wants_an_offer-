@@ -20,9 +20,11 @@ import pytest
 
 from app.normalize.description import (
     KNOWN_AMBIGUOUS,
+    MENU_MARKERS,
     NEEDS_COMPANY,
     NOT_SEARCHED_IN_TEXT,
     UPPERCASE_ONLY,
+    plain_text,
     skills_in_text,
 )
 from app.resume.skills import default_canonicalizer, known_spellings
@@ -399,6 +401,114 @@ def test_a_denial_beside_a_requirement_costs_the_whole_sentence() -> None:
     assert found.negated == ("python",)
 
 
+# ── markup the connector left in ─────────────────────────────────────────────
+#
+# Fragments of live arbeitnow postings, 13 Sep 2026, shortened and reworded.
+# That feed's descriptions are HTML, and in 72 of 300 the HTML is escaped too.
+
+
+def test_an_escaped_list_item_is_one_sentence_not_three() -> None:
+    """«&lt;li&gt;» ends in «;», and «;» is a sentence break.
+
+    Before flattening, the item below became «&lt», «li&gt», «Experience with
+    C/C++ and Python&lt», «/li&gt» — and a marker in a neighbouring fragment
+    was judging a piece of a tag.
+    """
+    found = skills_in_text(
+        "&lt;ul&gt;&lt;li&gt;Experience with Java and Python&lt;/li&gt;&lt;/ul&gt;"
+    )
+
+    assert set(found.required) == {"java", "python"}
+    assert {mention.sentence for mention in found.mentions} == {"Experience with Java and Python"}
+
+
+def test_entities_escaped_twice_are_peeled_twice() -> None:
+    """The feed sends ``&amp;nbsp;`` and ``Angular &amp;amp; Node.js`` as well."""
+    assert plain_text("&lt;p&gt;Angular &amp;amp; Node.js&amp;nbsp;&lt;/p&gt;") == (
+        "Angular & Node.js"
+    )
+
+
+def test_peeling_stops_after_a_bounded_number_of_layers() -> None:
+    """A text about entities cannot make the loop run for ever."""
+    assert plain_text("&amp;amp;amp;amp;lt;") == "&amp;lt;"
+
+
+def test_a_list_item_is_its_own_sentence_when_the_tags_are_real() -> None:
+    """«Forward Deployed Engineer»: «C-level» shared one sentence with Python.
+
+    Nothing in ``</li><li>`` is a sentence break, so a whole requirements list
+    was one sentence, the company rule for «C» saw other skills beside it, and
+    the vacancy asked for the C language.
+    """
+    found = skills_in_text(
+        "<p>Communication:</p><ul><li>Able to communicate with C-level stakeholders</li>"
+        "</ul><p>Stack:</p><ul><li>Python, Go and AWS</li></ul>"
+    )
+
+    assert "c" not in found.names
+    assert set(found.required) == {"python", "go", "aws"}
+
+
+def test_a_denial_in_one_item_does_not_reach_the_next_item() -> None:
+    """A Leipzig posting: the Go aside used to cost Linux, Docker and Kubernetes."""
+    found = skills_in_text(
+        "<ul><li>Any modern language (we mostly use Go, prior Go experience is not "
+        "required)</li><li>Familiar with Linux, Docker and Kubernetes</li></ul>"
+    )
+
+    assert {"linux", "docker", "kubernetes"} <= set(found.required)
+    assert "go" not in found.required
+
+
+def test_a_plus_in_one_item_does_not_make_the_whole_list_optional() -> None:
+    """A Berlin posting: one «is a plus» turned Java, Python and TypeScript optional."""
+    found = skills_in_text(
+        "<ul><li>We use Java, Python and TypeScript</li>"
+        "<li>Experience with Kafka is a plus</li></ul>"
+    )
+
+    assert set(found.required) == {"java", "python", "typescript"}
+    assert found.optional == ("kafka",)
+
+
+def test_a_tag_attribute_is_not_a_mention() -> None:
+    """A link to a ``.html`` page named HTML in seven postings that never asked for it."""
+    found = skills_in_text(
+        '<p>Read more <a href="https://example.com/careers/privacy.html">here</a>.</p>'
+    )
+
+    assert found.names == ()
+
+
+def test_a_nice_to_have_heading_does_not_reach_the_items_below_it() -> None:
+    """The known cost of flattening, on the record rather than discovered later.
+
+    A heading on a line of its own is a sentence of its own, so the items under
+    «Nice to have:» are read as requirements. Inside one unsplit HTML paragraph
+    they used to inherit the marker by accident, together with everything else
+    in the list. hh's own text has had this limitation since ``strip_html``:
+    measured 13 Sep 2026, roughly 237 mentions in 65 hh vacancies and 221 in
+    48 arbeitnow ones sit under such a heading. ``docs/MATCHING.md`` has it.
+    """
+    found = skills_in_text("<p>Nice to have:</p><ul><li>Experience with Kafka</li></ul>")
+
+    assert found.required == ("kafka",)
+
+
+@pytest.mark.parametrize("name", LIVE_DESCRIPTIONS)
+def test_what_hh_stored_is_read_exactly_as_before(name: str) -> None:
+    """hh flattens its own markup, so flattening again must be a no-op on it."""
+    assert plain_text(live(name)) == live(name)
+
+
+def test_angle_brackets_in_prose_are_not_markup() -> None:
+    """A tag starts with a letter; «< 3 лет» and «a<b» are text."""
+    text = "Опыт < 3 лет, если a<b и b > c"
+
+    assert plain_text(text) == text
+
+
 # ── the text is somebody else's ──────────────────────────────────────────────
 
 
@@ -420,3 +530,108 @@ def test_an_empty_description_is_not_an_error() -> None:
     """Vacancies arrive with no body at all — ``completeness`` has a value for it."""
     assert skills_in_text(None).required == ()
     assert skills_in_text("   ").required == ()
+
+
+# ── a menu of other roles is not a requirement ───────────────────────────────
+
+#: The recruitment marketplace's closing paragraph, from the live corpus of
+#: 13 Sep 2026 (remotive, external_id 2091097–2091101), shortened. Stored as
+#: the feed sent it — ``&amp;`` and all — because that is what cut it into
+#: single-skill fragments that no per-sentence rule could see.
+AGENCY_MENU_HTML = (
+    "<p><strong>NOT YOUR TECH STACK?</strong></p>\n"
+    "<p>We're placing Senior Developers (4+ yrs commercial experience) across "
+    "React &amp; Python, React &amp; Golang, Golang, React &amp; Java, Ruby, "
+    "PHP &amp; Vue, Rust, Shopify &amp; JavaScript, .NET &amp; C#, Electron, "
+    "Scala, C++, Unreal Engine &amp; C++, Python &amp; LLM, Unity, or Machine "
+    "Learning Engineering and more. Reach out and we'll match you.</p>"
+)
+
+#: The same menu in its second wording, from the other two vacancies.
+AGENCY_MENU_PROSE = (
+    "We have a variety of projects, so if you have 4+ years of commercial "
+    "software development experience and are proficient in React & Python, "
+    "Rust, .NET & C#, Scala, C++, Python & LLM, or Machine Learning Engineering, "
+    "we would be happy to connect with you and match you with a project that "
+    "fits your experience."
+)
+
+
+@pytest.mark.parametrize("menu", [AGENCY_MENU_HTML, AGENCY_MENU_PROSE])
+def test_a_menu_of_other_stacks_names_no_requirement(menu: str) -> None:
+    """Twenty skills an agency places people in are not twenty this vacancy wants.
+
+    Before the rule this paragraph was every false Rust and 5 of 8 Scala read
+    from text in the corpus, and 17–20 requirements on each of five vacancies.
+    """
+    found = skills_in_text(menu)
+
+    assert found.names == ()
+    assert found.negated == ()
+
+
+def test_the_vacancys_own_requirements_beside_the_menu_survive() -> None:
+    """The rule blanks the menu's line, not the posting.
+
+    Both lines are from the Senior DevOps Engineer vacancy of the same template:
+    its PHP requirement is real and stays, the menu's Rust and Scala go.
+    """
+    found = skills_in_text(
+        "Senior DevOps Engineer\nKnowledge of Laravel, PHP, and Nuxt is a must\n" + AGENCY_MENU_HTML
+    )
+
+    assert "php" in found.required
+    assert "rust" not in found.names
+    assert "scala" not in found.names
+
+
+def test_a_typographic_apostrophe_does_not_hide_the_marker() -> None:
+    """The feeds write «we’ll» as often as «we'll»."""
+    assert skills_in_text("Rust, Scala, C++ and more. Reach out and we’ll match you.").names == ()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        # Every line is from the live corpus, and every one says «match you…».
+        # None is a menu, which is why the bare phrase is not a marker.
+        "we genuinely want to match your experience with the correct salary",
+        "we aim to match your skills and aspirations with the most suitable role",
+        "We encourage you to apply for future opportunities that match your qualifications",
+        "Подберём локацию, удобную для тебя",
+        "You may be just the right candidate for this or other roles.",
+    ],
+)
+def test_ordinary_prose_near_the_markers_is_not_a_menu(line: str) -> None:
+    """The phrases measured and turned down, kept out of the list by a test."""
+    folded = line.casefold()
+    assert not any(marker in folded for marker in MENU_MARKERS)
+
+
+@pytest.mark.parametrize(
+    ("text", "size"),
+    [
+        (
+            "ASP.Net Core, Java, JavaScript, C++, C# .Net, Go, Python, React, Vue, PHP, "
+            "Kafka, RabbitMQ, Redis, Oracle, PostgreSQL, MSSQL, MySQL, Docker, "
+            "Docker Compose, Kubernetes.",
+            19,
+        ),
+        (
+            "Falls es dich interessiert, ist hier unser vollständiger Tech-Stack des "
+            "Kundencenters: Go, TypeScript, Node.js, React, REST, Open API, gRPC, CQRS, "
+            "Eventsourcing, DDD, Postgres, MongoDB, MySQL, Redis, Docker, Kubernetes, "
+            "Helm, n8n und Temporal als Workflow-Engine, GitLab, Monitoring (Jaeger, "
+            "Sentry, Prometheus, Grafana)",
+            16,
+        ),
+    ],
+)
+def test_a_genuinely_long_stack_is_still_read(text: str, size: int) -> None:
+    """Why the rule is a phrase and not a count.
+
+    The menu names 20 skills in one sentence; these real stack lines, from an hh
+    and an arbeitnow vacancy, name 19 and 16. Any cap that catches the menu is
+    one skill away from cutting the first, and caps from 8 to 15 cut both.
+    """
+    assert len(skills_in_text(text).names) == size
