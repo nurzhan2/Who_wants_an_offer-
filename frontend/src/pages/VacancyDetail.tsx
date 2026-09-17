@@ -3,7 +3,7 @@ import { fileUrl } from '@/api/documents'
 import { ApplyConfirm } from '@/components/ApplyConfirm'
 import { Freshness } from '@/components/Freshness'
 import { Card, Empty, Failure, Field, Loading, Pill, Score, Section } from '@/components/ui'
-import { useGenerateDocument } from '@/hooks/useDocuments'
+import { useDocumentHistory, useGenerateDocument } from '@/hooks/useDocuments'
 import { useVacancy, useWriteLetter } from '@/hooks/queries'
 import { count, date, dateTime, plural, salary, score } from '@/lib/format'
 import { EVIDENCE, outcomeLabel, REMOTE, REQUIREMENT_SOURCE, SKIPPED } from '@/lib/labels'
@@ -113,6 +113,7 @@ export function VacancyDetail({ id }: { id: string }) {
           <p className="mt-4 text-small">Не удалось собрать CV: {cv.error.message}</p>
         ) : null}
         {cv.data ? <CvResult document={cv.data} /> : null}
+        <CvVersions vacancyId={id} />
         {write.data ? (
           <p className="mt-4 text-small">
             {write.data.saved
@@ -291,6 +292,37 @@ function Sources({ sources }: { sources: VacancySource[] }) {
           документы, собранные ниже.
         </p>
       ) : null}
+    </div>
+  )
+}
+
+/**
+ * Every CV generated for this vacancy, newest first, each downloadable.
+ *
+ * Walking the dashboard (2026-09-17), a generated CV could be downloaded only
+ * from the line that appeared right after generating it; leaving the page lost
+ * the link, and the components that list versions were not mounted anywhere.
+ */
+function CvVersions({ vacancyId }: { vacancyId: string }) {
+  const history = useDocumentHistory(vacancyId, 'cv', true)
+  if (!history.data || history.data.length === 0) return null
+  const versions = [...history.data].sort((a, b) => b.version - a.version)
+  return (
+    <div className="mt-4 text-small">
+      <p className="text-muted">Собранные CV для этой вакансии:</p>
+      <ul className="mt-1 space-y-1">
+        {versions.map((version) => (
+          <li key={version.id}>
+            <a href={fileUrl(version.id)} className="underline underline-offset-4">
+              CV, версия {version.version}
+            </a>
+            <span className="text-muted">
+              {' '}
+              · {dateTime(version.created_at)} · ATS {version.ats_score}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
