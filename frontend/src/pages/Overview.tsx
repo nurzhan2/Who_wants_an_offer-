@@ -320,7 +320,7 @@ function Applications({ data }: { data: OverviewData }) {
         <Stat value={count(applications.queued)} label="в очереди" note="письмо есть, ждёт подтверждения" />
         <Stat
           value={count(applications.needs_manual)}
-          label="needs_manual"
+          label="нужен человек"
           note="агент остановился и оставил причину"
         />
         <Stat
