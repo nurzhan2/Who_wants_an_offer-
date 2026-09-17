@@ -4,9 +4,10 @@ import { href } from '@/app/routes'
 import { VacancyDetail } from '@/pages/VacancyDetail'
 import { Empty, Failure, Loading, Pill, Score, Section } from '@/components/ui'
 import { useVacancies, type VacancyQuery } from '@/hooks/queries'
-import { count, date, plural, salary } from '@/lib/format'
+import { ago, count, date, plural, salary } from '@/lib/format'
 import { REMOTE } from '@/lib/labels'
 import type { Facets, VacancyListItem } from '@/types/api'
+import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
 
 /**
  * Вакансии: the ranked list, and one vacancy opened.
@@ -306,7 +307,7 @@ function Row({ item }: { item: VacancyListItem }) {
           <span>{REMOTE[item.remote]}</span>
           <span>{salary(item.salary_min, item.salary_max, item.currency)}</span>
           <SourceLink item={item} />
-          <span>{item.published_at ? date(item.published_at) : 'без даты'}</span>
+          <FreshnessWord item={item} />
           {item.missing_required_count > 0 ? (
             <span>
               не закрыто {item.missing_required_count}{' '}
@@ -320,6 +321,23 @@ function Row({ item }: { item: VacancyListItem }) {
       <Score value={item.score} bucket={item.bucket} />
     </div>
   )
+}
+
+/**
+ * How old the posting is, and a word when it should not be applied to blindly.
+ *
+ * The list never shows an archived posting — the API leaves inactive rows out —
+ * so the words here are «давно не видели» and «старше 30 дней». A fresh posting
+ * shows its date and nothing else; the card says «в архиве» where it applies.
+ */
+function FreshnessWord({ item }: { item: VacancyListItem }) {
+  const verdict = freshnessOf(item.published_at, item.last_seen_at, item.is_active)
+  const published = item.published_at
+    ? `${date(item.published_at)} (${ago(item.published_at)})`
+    : 'без даты'
+  if (verdict === 'unseen') return <span>{published} · давно не видели на сайте</span>
+  if (verdict === 'old') return <span>{published} · старше {OLD_AFTER_DAYS} дней</span>
+  return <span>{published}</span>
 }
 
 /**

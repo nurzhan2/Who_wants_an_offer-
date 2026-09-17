@@ -145,6 +145,11 @@ class VacancyListItem(BaseModel):
     bucket: MatchBucket | None
     missing_required_count: int = 0
     published_at: datetime | None
+    #: The crawler's last sighting and its verdict that the posting is gone, so
+    #: the list can show an archived or long-unseen vacancy before anybody
+    #: opens it — a third of the first real queue was archived (2026-09-16).
+    last_seen_at: datetime | None = None
+    is_active: bool = True
     is_applied: bool = False
 
     @field_validator("source_slugs", mode="before")

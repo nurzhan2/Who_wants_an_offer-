@@ -1027,3 +1027,31 @@ async def test_the_card_answers_over_http(
     # The link the crawler actually read travels with the vacancy: for hh it is a
     # regional subdomain and cannot be rebuilt from an id.
     assert body["vacancy"]["sources"][0]["url"].startswith("https://")
+
+
+async def test_a_list_row_carries_what_the_age_line_needs(
+    async_client: AsyncClient, db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """The list marks a long-unseen posting; an archived one is not listed at all.
+
+    The list has always hidden inactive rows. What it did not carry was the last
+    sighting, so a posting the crawler had not seen for weeks looked as fresh as
+    today's.
+    """
+    from sqlalchemy import update
+
+    from app.db.models import Vacancy
+
+    stale = await a_vacancy(vacancies, "dash-list-stale")
+    gone = await a_vacancy(vacancies, "dash-list-archived")
+    weeks_ago = datetime.now(UTC) - timedelta(days=21)
+    await db_session.execute(
+        update(Vacancy).where(Vacancy.id == stale).values(last_seen_at=weeks_ago)
+    )
+    await db_session.execute(update(Vacancy).where(Vacancy.id == gone).values(is_active=False))
+
+    rows = {row["id"]: row for row in (await async_client.get("/api/v1/vacancies")).json()["items"]}
+
+    assert str(gone) not in rows
+    assert rows[str(stale)]["is_active"] is True
+    assert rows[str(stale)]["last_seen_at"].startswith(weeks_ago.date().isoformat())

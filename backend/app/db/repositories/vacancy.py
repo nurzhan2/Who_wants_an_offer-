@@ -804,6 +804,8 @@ class VacancyRepository:
                     "missing_required_count"
                 ),
                 Vacancy.published_at,
+                Vacancy.last_seen_at,
+                Vacancy.is_active,
                 is_applied.label("is_applied"),
             )
             .select_from(Vacancy)

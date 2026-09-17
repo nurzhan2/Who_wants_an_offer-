@@ -141,6 +141,8 @@ export interface VacancyListItem {
   bucket: Bucket | null
   missing_required_count: number
   published_at: string | null
+  last_seen_at: string | null
+  is_active: boolean
   is_applied: boolean
 }
 

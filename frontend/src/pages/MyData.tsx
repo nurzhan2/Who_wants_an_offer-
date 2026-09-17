@@ -3,10 +3,12 @@ import { useEffect, useState } from 'react'
 import { ApiError } from '@/api/client'
 import { Field } from '@/components/Field'
 import { LinkRows } from '@/components/LinkRows'
+import { ResumeUpload } from '@/components/ResumeUpload'
 import { TargetTitles } from '@/components/TargetTitles'
 import { useActiveProfile, useContacts, useSaveContacts } from '@/hooks/useContacts'
 import type { ContactDraft } from '@/lib/contacts'
 import { diffContacts, hasChanges, toDraft } from '@/lib/contacts'
+import { explain } from '@/lib/errors'
 import type { ContactEdits } from '@/types/contact'
 
 /** What the badge under a field says about where its value came from. */
@@ -69,7 +71,20 @@ function errorMessage(error: unknown): string {
  * the CV or typed, so that "this will change when I upload a new resume" is
  * visible rather than surprising.
  */
+/**
+ * The resume upload is always at the top: until 2026-09-16 this screen said
+ * «Резюме ещё не загружено» and offered no way to load one — that took curl.
+ */
 export function MyData() {
+  return (
+    <div className="flex flex-col gap-12">
+      <ResumeUpload />
+      <ContactsForm />
+    </div>
+  )
+}
+
+function ContactsForm() {
   const profile = useActiveProfile()
   const profileId = profile.data?.id
   const contacts = useContacts(profileId)
@@ -96,8 +111,8 @@ export function MyData() {
     return (
       <Note>
         {missing
-          ? 'Резюме ещё не загружено. Контакты появятся здесь, как только оно разберётся.'
-          : 'Бэкенд недоступен.'}
+          ? 'Резюме ещё не загружено — загрузите его кнопкой выше. Контакты появятся здесь, как только оно разберётся.'
+          : `${explain(profile.error).reason} ${explain(profile.error).remedy}`}
       </Note>
     )
   }

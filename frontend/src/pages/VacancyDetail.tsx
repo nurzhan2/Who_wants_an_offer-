@@ -1,5 +1,7 @@
 import { href } from '@/app/routes'
 import { fileUrl } from '@/api/documents'
+import { ApplyConfirm } from '@/components/ApplyConfirm'
+import { Freshness } from '@/components/Freshness'
 import { Card, Empty, Failure, Field, Loading, Pill, Score, Section } from '@/components/ui'
 import { useGenerateDocument } from '@/hooks/useDocuments'
 import { useVacancy, useWriteLetter } from '@/hooks/queries'
@@ -18,9 +20,10 @@ import type { GeneratedDocument } from '@/types/documents'
  * as «нет» would hide the difference between an afternoon's editing and a
  * career change.
  *
- * The buttons here generate documents. There is no «отправить отклик» and there
- * is not going to be one: an application goes out through `wwao apply --send`,
- * where a person at the keyboard confirms that letter for that vacancy.
+ * The buttons here generate documents, and «Откликнуться…» opens the card the
+ * agent would be handed. Confirming it records consent bound to that card; the
+ * application itself is sent by the agent on the owner's machine, which reads
+ * the vacancy page again first. Nothing is sent from this page.
  *
  * The CV button used to be a link to «Мои данные», because the screen was built
  * on a branch where nothing generated a CV and the nearest true thing to offer
@@ -52,10 +55,14 @@ export function VacancyDetail({ id }: { id: string }) {
             {vacancy.company ?? 'без компании'} · {vacancy.city ?? 'без города'} ·{' '}
             {REMOTE[vacancy.remote]} · {salary(vacancy.salary_min, vacancy.salary_max, vacancy.currency)}
           </p>
-          <p className="mt-1 text-small text-muted">
-            впервые увидели {date(vacancy.first_seen_at)} · опубликовано{' '}
-            {vacancy.published_at ? date(vacancy.published_at) : 'без даты'}
-          </p>
+          <p className="mt-1 text-small text-muted">впервые увидели {date(vacancy.first_seen_at)}</p>
+          <div className="mt-2">
+            <Freshness
+              publishedAt={vacancy.published_at}
+              lastSeenAt={vacancy.last_seen_at}
+              active={vacancy.is_active}
+            />
+          </div>
           <Sources sources={vacancy.sources} />
         </div>
         <Score value={match?.score ?? null} bucket={match?.bucket ?? null} />
@@ -63,9 +70,10 @@ export function VacancyDetail({ id }: { id: string }) {
 
       <Section
         title="Документы"
-        note="Дашборд пишет письмо и сохраняет его. Отправляет — только CLI, где подтверждает человек."
+        note="Сначала письмо, потом «Откликнуться…»: откроется карточка целиком — письмо, оценка, предупреждения hh. Подтверждённый отклик отправит агент на вашем компьютере."
       >
         <div className="flex flex-wrap items-center gap-4">
+          <ApplyConfirm vacancyId={id} />
           <button
             type="button"
             className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper disabled:border-hairline disabled:text-muted"
