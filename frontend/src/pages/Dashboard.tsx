@@ -21,7 +21,9 @@ export function Dashboard() {
   const overview = useOverview()
 
   return (
-    <Shell route={route} profile={overview.data?.profile ?? null}>
+    // undefined until the overview has answered: a header must not say «резюме
+    // нет» while the only thing known is that the server has not replied.
+    <Shell route={route} profile={overview.isSuccess ? overview.data.profile : undefined}>
       {route === 'overview' ? <Overview query={overview} /> : null}
       {route === 'vacancies' ? <Vacancies selected={id} /> : null}
       {route === 'applications' ? <Applications /> : null}

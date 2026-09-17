@@ -21,7 +21,8 @@ export function Shell({
   children,
 }: {
   route: RouteName
-  profile: ProfileBrief | null
+  /** undefined: not known yet; null: known to be absent. */
+  profile: ProfileBrief | null | undefined
   children: ReactNode
 }) {
   return (
@@ -76,11 +77,18 @@ export function Shell({
  * belong on the screen that is about the resume, not in a header that every
  * other screen inherits — and nothing here is logged or measured anywhere.
  */
-function Owner({ profile }: { profile: ProfileBrief | null }) {
+function Owner({ profile }: { profile: ProfileBrief | null | undefined }) {
+  if (profile === undefined) {
+    return null
+  }
   if (profile === null) {
     return (
       <p className="mb-section text-small text-muted">
-        Активного резюме нет. Загрузите его, чтобы вакансии получили оценку.
+        Активного резюме нет.{' '}
+        <a href={href('profile')} className="text-ink underline underline-offset-4">
+          Загрузите его на «Мои данные»
+        </a>
+        , чтобы вакансии получили оценку.
       </p>
     )
   }
