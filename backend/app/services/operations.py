@@ -557,6 +557,20 @@ def _from_crawl(job: PipelineJobRead) -> OperationRead:
             f"Найдено: {job.report.found}, новых: {job.report.new}, "
             f"дублей схлопнуто: {job.report.duplicates}."
         )
+        # Per source, because the total hides a partial one: walking the
+        # dashboard (2026-09-17), arbeitnow lost a request and the job still
+        # read as a plain success.
+        for source in job.report.sources:
+            if source.skipped is not None:
+                report.append(f"{source.slug}: пропущен — {source.skipped.detail}")
+            elif source.errors:
+                report.append(
+                    f"{source.slug}: найдено {source.found}, новых {source.new}, "
+                    f"но с ошибками ({len(source.errors)}) — часть страниц не получена, "
+                    "следующий обход их повторит."
+                )
+            else:
+                report.append(f"{source.slug}: найдено {source.found}, новых {source.new}.")
     return OperationRead(
         id=job.id,
         kind=OperationKind.CRAWL,

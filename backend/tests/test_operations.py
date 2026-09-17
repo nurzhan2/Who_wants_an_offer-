@@ -435,3 +435,34 @@ async def test_embeddings_wait_for_a_running_crawl(
     assert "идёт обход" in refused.json()["detail"]
     assert gates[OperationKind.EMBED].calls == 0
     release.set()
+
+
+def test_a_crawl_report_names_each_source_and_a_partial_one() -> None:
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    from app.schemas.pipeline_job import PipelineJobRead, PipelineJobStatus
+    from app.schemas.source import PlanSummary, RunResponse, SourceRunSummary
+
+    now = datetime.now(UTC)
+    job = PipelineJobRead(
+        id=uuid4(),
+        status=PipelineJobStatus.SUCCESS,
+        message="Обход завершён.",
+        queued_at=now,
+        report=RunResponse(
+            started_at=now,
+            plan=PlanSummary(queries=3),
+            found=63,
+            new=52,
+            sources=[
+                SourceRunSummary(slug="remotive", found=5),
+                SourceRunSummary(slug="arbeitnow", found=58, new=52, errors=[{"stage": "fetch"}]),
+            ],
+        ),
+    )
+
+    report = operations_service._from_crawl(job).report
+
+    assert report[1] == "remotive: найдено 5, новых 0."
+    assert report[2].startswith("arbeitnow: найдено 58, новых 52, но с ошибками (1)")
