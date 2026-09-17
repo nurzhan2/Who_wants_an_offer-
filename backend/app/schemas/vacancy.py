@@ -22,6 +22,7 @@ from app.schemas.common import (
     CountryCode,
     CurrencyCode,
     LanguageCode,
+    MatchMode,
     ReadModel,
     SortDirection,
     SortField,
@@ -141,7 +142,13 @@ class VacancyListItem(BaseModel):
     salary_max: Decimal | None
     currency: str | None
     salary_min_normalized: Decimal | None
+    #: The combined score, whichever mode the list is ranked by.
     score: Decimal | None
+    #: The number of the mode the list is ranked by; equal to ``score`` in the
+    #: combined mode. None when that number was not measured — in the skills
+    #: mode, a posting with no requirements at all.
+    mode_score: Decimal | None = None
+    #: The bucket of the combined score: buckets are drawn on that scale only.
     bucket: MatchBucket | None
     missing_required_count: int = 0
     published_at: datetime | None
@@ -243,6 +250,10 @@ class VacancyFilter(BaseModel):
     include_filtered: bool = False
     sort: SortField = SortField.SCORE
     direction: SortDirection = SortDirection.DESC
+    #: Which stored number ``sort=score`` ranks by. Changes the order only:
+    #: ``score_min``, ``score_max`` and every other filter read the combined
+    #: score in every mode, so switching modes never changes what is listed.
+    mode: MatchMode = MatchMode.COMBINED
 
     @model_validator(mode="after")
     def _score_range_is_ordered(self) -> Self:

@@ -12,16 +12,19 @@ from uuid import UUID
 
 from sqlalchemy import (
     ColumnElement,
+    Numeric,
     Select,
     String,
     Table,
     and_,
     bindparam,
+    case,
     exists,
     false,
     func,
     literal,
     literal_column,
+    null,
     or_,
     select,
 )
@@ -45,6 +48,7 @@ from app.schemas.common import (
     MAX_PAGE_SIZE,
     CursorPage,
     Facets,
+    MatchMode,
     SortField,
 )
 from app.schemas.dashboard import HarvestedVacancy, VacancyCounts
@@ -81,6 +85,8 @@ REFRESHABLE_COLUMNS: tuple[str, ...] = (
 #: Which column each sort option actually orders by, and the label the selected
 #: value carries so the cursor can read it back off the row.
 SORT_COLUMNS: dict[SortField, SortableColumn] = {
+    # The combined score; ``list_filtered`` swaps in :func:`mode_score` for the
+    # mode the list is ranked by.
     SortField.SCORE: Match.score,
     SortField.PUBLISHED_AT: Vacancy.published_at,
     # Never Vacancy.salary_min: comparing advertised amounts across currencies
@@ -89,10 +95,45 @@ SORT_COLUMNS: dict[SortField, SortableColumn] = {
 }
 
 SORT_VALUE_FIELDS: dict[SortField, str] = {
-    SortField.SCORE: "score",
+    # Not "score": under a mode other than the combined one the list is ranked
+    # by the mode's number, and a cursor carrying the combined score would
+    # compare it against the wrong column and skip rows.
+    SortField.SCORE: "mode_score",
     SortField.PUBLISHED_AT: "published_at",
     SortField.SALARY: "salary_min_normalized",
 }
+
+#: The ``match.component_scores`` key each single-signal mode ranks by. The
+#: scoring pass writes all three for every vacancy it scores, whichever formula
+#: it ran, so a mode is a read of a stored number and never a computation.
+MODE_COMPONENTS: dict[MatchMode, str] = {
+    MatchMode.TITLE: "title_similarity",
+    MatchMode.DESCRIPTION: "semantic_similarity",
+    MatchMode.SKILLS: "skill_coverage_required",
+}
+
+
+def mode_score(mode: MatchMode) -> SortableColumn:
+    """The stored number a mode ranks by, as a nullable NUMERIC expression.
+
+    The skills mode has one case the stored component cannot tell apart on its
+    own. ``MatchComponentScores`` writes an unmeasured coverage as 0.00, so a
+    posting that names no requirements at all — 341 of 1355 ranked on 17 Sep
+    2026 — would sit among the postings whose requirements the profile covers
+    none of. Those are different facts: one is silence, the other is a miss.
+    The two stored requirement lists tell them apart, so a posting with both
+    empty ranks as unmeasured, after everything that was measured.
+    """
+    if mode is MatchMode.COMBINED:
+        return Match.score
+    value = sql_cast(Match.component_scores.op("->>")(MODE_COMPONENTS[mode]), Numeric(5, 2))
+    if mode is not MatchMode.SKILLS:
+        return value
+    stated = func.jsonb_array_length(Match.matched_skills) + func.jsonb_array_length(
+        Match.missing_required
+    )
+    return case((stated > 0, value), else_=null())
+
 
 #: (source_slug, external_id) — the natural key of a vacancy_source row.
 type SourceKey = tuple[str, str]
@@ -656,9 +697,11 @@ class VacancyRepository:
         the NULL handling the ordering depends on.
         """
         limit = max(1, min(limit, MAX_PAGE_SIZE))
-        sort_column = SORT_COLUMNS[filters.sort]
+        sort_column: SortableColumn = SORT_COLUMNS[filters.sort]
+        if filters.sort is SortField.SCORE:
+            sort_column = mode_score(filters.mode)
 
-        stmt = self._apply_filters(self._base_select(profile_id), filters)
+        stmt = self._apply_filters(self._base_select(profile_id, filters.mode), filters)
         if cursor is not None:
             stmt = stmt.where(
                 keyset_where(sort_column, Vacancy.id, Cursor.decode(cursor), filters.direction)
@@ -757,7 +800,9 @@ class VacancyRepository:
             return false()
         return and_(Match.vacancy_id == Vacancy.id, Match.profile_id == profile_id)
 
-    def _base_select(self, profile_id: UUID | None) -> Select[Any]:
+    def _base_select(
+        self, profile_id: UUID | None, mode: MatchMode = MatchMode.COMBINED
+    ) -> Select[Any]:
         """Exactly the columns the dashboard table renders, and nothing else.
 
         The sources come fullest first, so the first slug and ``source_url`` name
@@ -799,6 +844,7 @@ class VacancyRepository:
                 Vacancy.currency,
                 Vacancy.salary_min_normalized,
                 Match.score.label("score"),
+                mode_score(mode).label("mode_score"),
                 Match.bucket.label("bucket"),
                 func.coalesce(func.jsonb_array_length(Match.missing_required), 0).label(
                     "missing_required_count"

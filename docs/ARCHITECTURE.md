@@ -660,8 +660,15 @@ query-параметры: `score_min`, `score_max`, `bucket`, `source`, `remote`
 `city`, `country`, `salary_min`, `include_unpriced`, `currency`, `seniority`,
 `posted_within_days`, `has_salary`, `missing_skills_max`, `company`, `q`
 (полнотекст), `exclude_applied`, `include_filtered`, `sort`
-(`score|published_at|salary`), `direction`, плюс `cursor`, `limit`,
+(`score|published_at|salary`), `direction`, `mode`
+(`combined|title|description|skills`), плюс `cursor`, `limit`,
 `with_total`, `with_facets`.
+
+`mode` выбирает, по какому уже сохранённому числу `sort=score` упорядочивает
+список, и ничего не пересчитывает; каждая строка несёт `score` (совмещённый) и
+`mode_score` (число режима). Фильтры, включая `score_min`, во всех режимах
+читают совмещённый балл, так что режим меняет порядок, а не состав. Подробности
+и замер — `docs/MATCHING.md`, раздел «Режимы подбора».
 
 Две подробности этой модели стоят того, чтобы их знать.
 

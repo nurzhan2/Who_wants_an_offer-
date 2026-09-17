@@ -89,6 +89,27 @@ class SortField(StrEnum):
     SALARY = "salary"
 
 
+class MatchMode(StrEnum):
+    """Which stored number ``SortField.SCORE`` orders the list by.
+
+    A mode never computes anything: every one of these numbers was written to
+    ``match`` by the scoring pass, and a mode only picks which of them to rank
+    by. Filters are the same in every mode — a mode changes the order of the
+    list, not what is in it.
+    """
+
+    #: ``match.score`` as the scoring pass wrote it: 0.7 title + 0.3 description.
+    COMBINED = "combined"
+    #: ``component_scores.title_similarity``: the title against the headline.
+    TITLE = "title"
+    #: ``component_scores.semantic_similarity``: the description against the profile.
+    DESCRIPTION = "description"
+    #: ``component_scores.skill_coverage_required``: requirements the profile
+    #: covers. An overlap of requirements, not fitness for the job, and it
+    #: overrates a posting whose list is short — see docs/MATCHING.md.
+    SKILLS = "skills"
+
+
 class SortDirection(StrEnum):
     """Sort direction."""
 

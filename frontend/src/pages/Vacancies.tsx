@@ -4,10 +4,10 @@ import { href } from '@/app/routes'
 import { VacancyDetail } from '@/pages/VacancyDetail'
 import { Empty, Failure, Loading, NextStep, Pill, Score, Section } from '@/components/ui'
 import { useVacancies, type VacancyQuery } from '@/hooks/queries'
-import { ago, count, date, plural, salary } from '@/lib/format'
+import { ago, count, date, plural, salary, score as formatScore } from '@/lib/format'
 import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
 import { REMOTE } from '@/lib/labels'
-import type { Facets, VacancyListItem } from '@/types/api'
+import type { Facets, MatchMode, VacancyListItem } from '@/types/api'
 
 /**
  * Вакансии: the ranked list, and one vacancy opened.
@@ -21,6 +21,7 @@ import type { Facets, VacancyListItem } from '@/types/api'
 export function Vacancies({ selected }: { selected: string | null }) {
   const [filters, setFilters] = useState<Filters>(EMPTY)
   const [cursor, setCursor] = useState<string | null>(null)
+  const [mode, setMode] = useState<MatchMode>(storedMode)
   const listTop = useRef<HTMLDivElement>(null)
 
   // A new page replaces the rows in place, so the reader would be left at the
@@ -39,6 +40,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
     ...(filters.scoreMin ? { score_min: Number(filters.scoreMin) } : {}),
     ...(filters.salaryMin ? { salary_min: Number(filters.salaryMin) } : {}),
     include_unpriced: filters.includeUnpriced,
+    mode,
     ...(cursor ? { cursor } : {}),
     limit: 50,
   }
@@ -56,11 +58,19 @@ export function Vacancies({ selected }: { selected: string | null }) {
     setFilters((current) => ({ ...current, ...next }))
   }
 
+  function rank(next: MatchMode): void {
+    // Same reason as a filter change: the cursor holds a position in the old
+    // order, and read against the new one it skips rows.
+    setCursor(null)
+    setMode(next)
+    rememberMode(next)
+  }
+
   return (
     <div className="rise">
       <Section
         title="Вакансии"
-        note="По убыванию score. У каждой строки — что из требований закрыто, а что нет."
+        note={`${MODES[mode].note} У каждой строки — что из требований закрыто, а что нет.`}
         action={
           page.data?.total !== null && page.data?.total !== undefined ? (
             <span className="tnum text-small text-muted">
@@ -69,6 +79,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
           ) : null
         }
       >
+        <ModeSwitch mode={mode} onChange={rank} />
         <FilterBar
           filters={filters}
           facets={page.data?.facets ?? null}
@@ -113,7 +124,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
             <>
               <div ref={listTop} className="scroll-mt-4 border-t border-hairline">
                 {page.data.items.map((item) => (
-                  <Row key={item.id} item={item} />
+                  <Row key={item.id} item={item} mode={mode} />
                 ))}
               </div>
               <div className="mt-8 flex items-center gap-6">
@@ -143,6 +154,147 @@ export function Vacancies({ selected }: { selected: string | null }) {
           )
         ) : null}
       </Section>
+    </div>
+  )
+}
+
+interface ModeInfo {
+  label: string
+  /** The line under the heading while this mode ranks the list. */
+  note: string
+}
+
+/**
+ * The four orders of one list. Each is a number the scoring pass already
+ * stored; switching reads another one and recomputes nothing.
+ */
+const MODES: Record<MatchMode, ModeInfo> = {
+  combined: {
+    label: 'совмещённо',
+    note: 'По убыванию балла: 0,7 близости названия и 0,3 близости описания.',
+  },
+  title: {
+    label: 'по названию',
+    note: 'По близости названия вакансии к заголовку профиля.',
+  },
+  description: {
+    label: 'по описанию',
+    note: 'По близости текста вакансии к профилю.',
+  },
+  skills: {
+    label: 'по навыкам',
+    note: 'По доле требований вакансии, которые закрывают навыки профиля.',
+  },
+}
+
+const SIGNAL_MODES: MatchMode[] = ['combined', 'title', 'description']
+
+const MODE_KEY = 'vacancies.mode'
+
+function isMode(value: string | null): value is MatchMode {
+  return value !== null && Object.hasOwn(MODES, value)
+}
+
+/**
+ * The mode chosen last time. Browser storage is a convenience here and nothing
+ * more: private windows and blocked site data throw or come back empty, and the
+ * list then simply opens in the combined order.
+ */
+function storedMode(): MatchMode {
+  try {
+    const value = window.localStorage.getItem(MODE_KEY)
+    return isMode(value) ? value : 'combined'
+  } catch {
+    return 'combined'
+  }
+}
+
+function rememberMode(mode: MatchMode): void {
+  try {
+    window.localStorage.setItem(MODE_KEY, mode)
+  } catch {
+    // Not remembered; the choice still holds until the page is closed.
+  }
+}
+
+/**
+ * The switch between the four orders.
+ *
+ * The skills mode stands apart on purpose and carries its caveat whenever it is
+ * chosen. Measured 9 Sep 2026: with coverage at the heart of the score, the top
+ * filled with postings that matched one requirement — «Бариста» on go, five
+ * network engineers on linux — because 893 employers in 1958 leave the skills
+ * field empty, and a share of what was named cannot tell one of one from ten of
+ * ten. The mode stays, and it is not presented as an equal of the other three.
+ */
+function ModeSwitch({ mode, onChange }: { mode: MatchMode; onChange: (next: MatchMode) => void }) {
+  return (
+    <div className="mb-6">
+      <div className="text-micro uppercase text-muted">порядок</div>
+      <div
+        role="radiogroup"
+        aria-label="Порядок списка"
+        className="mt-2 flex flex-wrap items-center gap-2"
+      >
+        {SIGNAL_MODES.map((option) => (
+          <ModeButton key={option} option={option} mode={mode} onChange={onChange} />
+        ))}
+        <span className="mx-2 hidden h-6 border-l border-hairline sm:inline-block" aria-hidden />
+        <ModeButton option="skills" mode={mode} onChange={onChange} />
+      </div>
+      <p className="mt-2 max-w-prose text-small text-muted">
+        {mode === 'skills'
+          ? 'Показывает пересечение требований вакансии с навыками профиля, а не пригодность. У вакансий с коротким списком требований завышает. По замеру 17 сентября верх держится на общих инструментах — linux, git, docker, CI/CD, — и в первую двадцатку попали три вакансии Linux-администратора. Вакансии, где требований нет вовсе, — в конце.'
+          : 'Меняется только порядок: состав списка и фильтры те же, ничего не пересчитывается.'}
+      </p>
+    </div>
+  )
+}
+
+function ModeButton({
+  option,
+  mode,
+  onChange,
+}: {
+  option: MatchMode
+  mode: MatchMode
+  onChange: (next: MatchMode) => void
+}) {
+  const chosen = option === mode
+  return (
+    <button
+      type="button"
+      role="radio"
+      aria-checked={chosen}
+      className={`rounded-pill border px-5 py-2 text-small transition-colors duration-800 ease-slow ${
+        chosen
+          ? 'border-ink bg-ink text-paper'
+          : `${option === 'skills' ? 'border-dashed' : ''} border-hairline hover:border-ink`
+      }`}
+      onClick={() => {
+        onChange(option)
+      }}
+    >
+      {MODES[option].label}
+    </button>
+  )
+}
+
+/**
+ * The number the list is ranked by, with the combined one under it — so that a
+ * reader sees how far the two orders disagree on this row. The bucket word is
+ * not repeated here: buckets are drawn on the combined scale only.
+ */
+function ModeScore({ item, mode }: { item: VacancyListItem; mode: MatchMode }) {
+  return (
+    <div className="text-right">
+      <div className="tnum text-heading font-semibold leading-none">
+        {formatScore(item.mode_score)}
+      </div>
+      <div className="mt-1 text-micro uppercase text-muted">
+        {mode === 'skills' && item.mode_score === null ? 'требований нет · ' : ''}
+        совмещённый <span className="tnum">{formatScore(item.score)}</span>
+      </div>
     </div>
   )
 }
@@ -321,7 +473,7 @@ function NumberField({
  * separate link, so the row is a block with a stretched link rather than an
  * anchor — an anchor inside an anchor is not valid HTML and browsers split it.
  */
-function Row({ item }: { item: VacancyListItem }) {
+function Row({ item, mode }: { item: VacancyListItem; mode: MatchMode }) {
   return (
     <div className="relative grid grid-cols-1 items-baseline gap-2 border-b border-hairline py-5 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper sm:grid-cols-[1fr_auto]">
       <div className="min-w-0">
@@ -352,7 +504,11 @@ function Row({ item }: { item: VacancyListItem }) {
           )}
         </div>
       </div>
-      <Score value={item.score} bucket={item.bucket} />
+      {mode === 'combined' ? (
+        <Score value={item.score} bucket={item.bucket} />
+      ) : (
+        <ModeScore item={item} mode={mode} />
+      )}
     </div>
   )
 }

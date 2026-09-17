@@ -137,7 +137,11 @@ export interface VacancyListItem {
   salary_max: string | null
   currency: string | null
   salary_min_normalized: string | null
+  /** The combined score, whichever mode the list is ranked by. */
   score: string | null
+  /** The number of the mode the list is ranked by; null when it was not measured. */
+  mode_score: string | null
+  /** The combined score's bucket: buckets exist on that scale only. */
   bucket: Bucket | null
   missing_required_count: number
   published_at: string | null
@@ -145,6 +149,9 @@ export interface VacancyListItem {
   is_active: boolean
   is_applied: boolean
 }
+
+/** Which stored number the list is ranked by. Never a recomputation. */
+export type MatchMode = 'combined' | 'title' | 'description' | 'skills'
 
 export interface Facets {
   sources: Record<string, number>

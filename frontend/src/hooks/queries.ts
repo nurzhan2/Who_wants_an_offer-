@@ -5,6 +5,7 @@ import type {
   Board,
   CursorPage,
   Documents,
+  MatchMode,
   Overview,
   Profile,
   QueuedLetter,
@@ -49,6 +50,7 @@ export interface VacancyQuery {
   score_min?: number | undefined
   salary_min?: number | undefined
   include_unpriced?: boolean | undefined
+  mode?: MatchMode | undefined
   q?: string | undefined
   cursor?: string | undefined
   limit?: number | undefined
