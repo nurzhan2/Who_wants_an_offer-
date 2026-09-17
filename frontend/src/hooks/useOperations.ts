@@ -38,6 +38,9 @@ export function useOperations(): UseQueryResult<OperationsState> {
       return next
     },
     refetchInterval: (query) => ((query.state.data?.busy.length ?? 0) > 0 ? BUSY_MS : IDLE_MS),
+    // A crawl runs for twenty minutes in a tab nobody is looking at; its end
+    // still has to refresh the screens it changed.
+    refetchIntervalInBackground: true,
   })
 }
 

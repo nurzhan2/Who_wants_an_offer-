@@ -55,7 +55,11 @@ export function ResumeUpload() {
     queryKey: ['profile', profileId],
     queryFn: () => apiGet<ParsedProfile>(`/api/v1/profile/${profileId ?? ''}`),
     enabled: profileId !== null,
-    refetchInterval: (query) => (query.state.data?.parse_status === 'pending' || !query.state.data ? POLL_MS : false),
+    refetchInterval: (query) =>
+      query.state.data?.parse_status === 'pending' || !query.state.data ? POLL_MS : false,
+    // A three-minute wait is when a person switches tabs; the answer should be
+    // there when they come back, not three seconds later.
+    refetchIntervalInBackground: true,
   })
 
   const status = parsed.data?.parse_status ?? (profileId ? 'pending' : null)
