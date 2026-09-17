@@ -59,6 +59,18 @@ skills, the experience delta and the LLM's verdict. See
 
 ## Quickstart
 
+**Without a terminal:** double-click `start.cmd` in the project folder (Windows;
+`uv run python -m wwao up` anywhere). It checks Docker, starts the database,
+applies migrations, starts the API and the dashboard unless they already answer,
+opens `http://localhost:5173`, and stays in its window as the local agent
+watcher. Each step that cannot run says why and what to do. It refuses to reuse
+an API on port 8000 started from other code — `/health` carries a digest of the
+source it runs — and names the process to stop. An empty `AGENT_API_TOKEN` in
+`.env` is filled with a random one. Docker Desktop, `uv` and Node.js 20+ have to
+be installed; everything else is started for you.
+
+By hand:
+
 ```bash
 cp .env.example .env             # fill ANTHROPIC_API_KEY at minimum
 docker compose up -d db          # PostgreSQL 17 + pgvector, host port 5436
@@ -78,12 +90,15 @@ database:
 
 | Screen | What it answers |
 | --- | --- |
-| Обзор | How much corpus there is, where the crawl got to per city and sitemap file, how the last run ended, what it bought by name, and how many applications went out |
-| Вакансии | The ranked list with filters, and one vacancy explained |
-| Отклики | The applications board: queued, waiting for a person, sent — and what hh has since said |
-| Документы | Resumes with their ATS audit, and every letter with the rules version that judged it |
-| Мастерская | The queue of vacancies worth a letter, and the button that writes one |
-| Мои данные | The resume as the matcher reads it: every field a score is computed from |
+| Обзор | The operations panel — collect vacancies, compute embeddings, rescore, write letters, read outcomes, send what you confirmed — then the corpus, the crawl position, the last runs and the applications counters |
+| Вакансии | The ranked list with filters and each posting's age, and one vacancy explained, with «Откликнуться…» |
+| Отклики | The applications board: queued, waiting for a person, sent but not yet confirmed by hh, sent — and what hh has since said |
+| Документы | Resume upload, resumes with their ATS audit, and every letter with the rules version that judged it |
+| Мастерская | Reference documents and checkable rules for generated CVs and letters, with a preview |
+| Мои данные | Resume upload, the job titles you search for, and the contact block printed on every CV |
+
+hh's sentence about the resume's visibility, when recorded sends carried it,
+hangs under the header on every screen until a newer send comes back without it.
 
 Two rules shape all six.
 
@@ -96,11 +111,29 @@ has not answered has no outcome. Each of those is a different fact from the
 measured version of itself, and the API, the types and the formatters all keep
 them apart.
 
-**There is no «отправить отклик» button, and there will not be one.** The
-dashboard reads, and it writes exactly one thing: a cover letter. An
-application goes out through `wwao apply --send`, where the letter is printed
-on a confirmation card and a person at the keyboard confirms that letter for
-that vacancy — a browser tab cannot make that promise.
+**The browser confirms; only the local agent sends.** «Откликнуться…» on a
+vacancy opens the exact item the agent would be handed — the whole letter, the
+score and its reasons, the ATS summary, what hh said before, the posting's age —
+and a confirmation there is stored bound to a SHA-256 of that card. It is served
+to the agent only while the card and the letter still have those digests and for
+`AGENT_CONFIRMATION_TTL_HOURS` (72), and the first result the agent reports
+spends it. A vacancy the agent must not touch — archived, filtered, below the
+floor, already sent, another source — cannot be confirmed, and the card says
+why. «Отправить подтверждённые» asks the local watcher to run
+`python -m agent.run --send --dashboard`, which sends only those, re-reads each
+vacancy page first, and never sends where hh already counts an application.
+The terminal flow, `wwao apply --send`, is unchanged.
+
+**«Отправлено» means hh confirmed it.** A send counts as sent when hh's own
+count of applications on the vacancy is at least one or it reported a state for
+the conversation; a send the agent reported without that sits in its own column
+until «Обновить исходы» reads the page again.
+
+The long operations run as jobs: a button returns at once, its row follows the
+operation to the end, and a second copy of a running one is refused. Reading
+outcomes and sending need your hh session, so the API only records those two
+requests and the watcher started by `start.cmd` (or `python -m wwao watch`)
+carries them out.
 
 ```bash
 uv run python scripts/seed.py    # deterministic data for every screen state
@@ -118,6 +151,8 @@ uv run python -m wwao letters --limit 20   # write cover letters: hh first, then
 uv run python -m wwao queue                # what is ready to apply to, and why the rest is not
 uv run python -m wwao apply                # show each card and send what you confirm
 uv run python -m wwao outcomes             # read back what hh says about what you sent
+uv run python -m wwao watch                # carry out the dashboard's outcomes and send requests
+uv run python -m wwao up                   # start everything, then watch (what start.cmd runs)
 ```
 
 The first four need no account and no human, which is what makes them the parts
@@ -207,9 +242,10 @@ write, and handed over with the report. The report separates «есть, но н
 is not fixable and is reported with nothing suggested. A document that fails a
 hard rule is not handed over at all; the screen shows what is wrong instead.
 
-The dashboard generates and downloads. It never sends: an application goes out
-through `wwao apply`, from a browser, under your own account, with you at the
-keyboard.
+The dashboard generates and downloads, and every CV version stays downloadable
+from the vacancy card. It never sends: an application goes out from the agent,
+under your own account, after you confirmed that card — in the dashboard or at
+the keyboard.
 
 ## Parsing a resume
 
