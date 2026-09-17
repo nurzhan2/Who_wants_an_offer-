@@ -180,7 +180,11 @@ function ApplicationCard({ card }: { card: BoardCard }) {
           </Field>
         ) : null}
         <Field label={card.sent_at !== null ? 'отправлено' : 'статус'}>
-          {card.sent_at !== null ? date(card.sent_at) : APPLICATION_STATUS[card.status]}
+          {card.sent_at !== null
+            ? date(card.sent_at)
+            : card.status === 'saved'
+              ? 'не отправлено'
+              : APPLICATION_STATUS[card.status]}
         </Field>
       </div>
 
