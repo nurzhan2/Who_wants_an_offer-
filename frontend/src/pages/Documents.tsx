@@ -12,8 +12,9 @@ import type { LetterDocument, ResumeDocument } from '@/types/api'
  * Документы: what this project has written, and whether the loop closed.
  *
  * Two kinds of document exist here and they are honest about being different.
- * A resume is *uploaded* — nothing in this repository generates a CV — so what
- * is shown for one is the file and the readability audit taken when it landed.
+ * A resume is *uploaded*, so what is shown for one is the file and the
+ * readability audit taken when it landed; a CV for one vacancy is generated on
+ * that vacancy's card and is not listed here.
  * Letters are generated, and each carries the three dates the feedback loop is
  * made of: written, sent, answered. A letter written and never sent is work
  * waiting for the owner's confirmation on the vacancy card.
@@ -42,7 +43,7 @@ export function Documents() {
     <div className="rise">
       <Section
         title="Резюме"
-        note="Файл и то, что из него вычитает парсер работодателя. Генератора CV в проекте нет — это то, что было загружено, и аудит читаемости."
+        note="Загруженные файлы и то, что из них вычитает парсер работодателя. CV под конкретную вакансию собирается в её карточке."
       >
         <div className="mb-6">
           <ResumeUpload />
@@ -58,7 +59,7 @@ export function Documents() {
 
       <Section
         title="Письма"
-        note={`Правила проверки сейчас — версия ${String(data.current_rules_version)}. Если письмо писала другая версия, это видно в строке: правила меняются, а письмо остаётся.`}
+        note={`Правила проверки сейчас — версия ${data.current_rules_version}. Если письмо писала другая версия, это видно в строке: правила меняются, а письмо остаётся.`}
       >
         {data.letters.length === 0 ? (
           <NextStep
@@ -144,7 +145,7 @@ function Resume({ resume }: { resume: ResumeDocument }) {
   )
 }
 
-function Letter({ letter, current }: { letter: LetterDocument; current: number }) {
+function Letter({ letter, current }: { letter: LetterDocument; current: string }) {
   const [open, setOpen] = useState(false)
   const stale = letter.rules_version !== null && letter.rules_version !== current
 

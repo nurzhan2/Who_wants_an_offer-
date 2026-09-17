@@ -360,7 +360,8 @@ export interface LetterDocument {
   url: string | null
   text: string
   characters: number
-  rules_version: number | null
+  /** `workshop:<hash>` — the rule set's identity, not a counter. */
+  rules_version: string | null
   problems: LetterProblem[]
   written_at: string
   sent_at: string | null
@@ -373,7 +374,7 @@ export interface LetterDocument {
 export interface Documents {
   resumes: ResumeDocument[]
   letters: LetterDocument[]
-  current_rules_version: number
+  current_rules_version: string
 }
 
 // ── the workshop ─────────────────────────────────────────────────────

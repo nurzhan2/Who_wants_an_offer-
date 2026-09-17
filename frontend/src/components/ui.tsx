@@ -116,10 +116,12 @@ export function Pill({ children, strong = false }: { children: ReactNode; strong
 }
 
 export function Field({ label, children }: { label: string; children: ReactNode }) {
+  // min-w-0 and break-anywhere: a field sits in a grid cell, and one long token
+  // (a rules version like workshop:22431e6788b3, a URL) used to widen the page.
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-micro uppercase text-muted">{label}</div>
-      <div className="mt-1">{children}</div>
+      <div className="break-anywhere mt-1">{children}</div>
     </div>
   )
 }
