@@ -286,6 +286,7 @@ export interface BoardCard {
   hh_last_state_at: string | null
   /** hh itself confirmed this send: a count of at least one, or a state. */
   send_confirmed: boolean
+  confirmed_at: string | null
   vacancy_published_at: string | null
   vacancy_last_seen_at: string | null
   vacancy_active: boolean | null

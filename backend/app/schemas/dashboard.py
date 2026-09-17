@@ -349,6 +349,10 @@ class BoardCard(BaseModel):
     #: send it cannot confirm in a column of its own rather than beside real
     #: ones, because the first real run produced four of them.
     send_confirmed: bool = False
+    #: When the owner confirmed this application on its card, if they did and
+    #: the agent has not used it yet. Whether the confirmation still applies is
+    #: the card's to say; the board only marks that one was given.
+    confirmed_at: datetime | None = None
 
     #: How old the posting is and whether it is still there, so nobody confirms
     #: an application to an archive: a third of the first real queue was.

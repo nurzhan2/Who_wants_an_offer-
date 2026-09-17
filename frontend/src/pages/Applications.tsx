@@ -266,6 +266,12 @@ function ApplicationCard({ card }: { card: BoardCard }) {
 
       {card.sent_at === null && card.agent_status !== 'skipped' && letter ? (
         <div className="mt-4">
+          {card.confirmed_at ? (
+            <p className="mb-3 text-small">
+              <strong className="font-semibold">Подтверждено {date(card.confirmed_at)}</strong> —
+              ждёт отправки агентом.
+            </p>
+          ) : null}
           <ApplyConfirm vacancyId={card.vacancy_id} />
         </div>
       ) : null}

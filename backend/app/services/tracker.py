@@ -24,6 +24,7 @@ shows the rest verbatim, which is the same trade one layer up.
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.enums import ApplicationStatus
 from app.db.repositories.application import ApplicationRepository
 from app.schemas.dashboard import Board, BoardCard, BoardColumn
 
@@ -96,15 +97,28 @@ def _stage_of(card: BoardCard) -> str | None:
     evidence, and showing it beside real ones would make the column unusable as
     a count.
 
-    A row that is in neither — typed into the tracker by hand, never queued,
-    never sent — is not forced into ``queued``. It is somebody's own note about
-    a job, and putting it in a queue would say the agent is about to act on it.
+    A letter written and not yet acted on is ``queued`` even though no agent
+    run has touched it: the letter generators write no ``agent_status``, and
+    walking the dashboard (2026-09-17) every such row sat under «вне очереди»,
+    labelled as typed by hand, while «в очереди» read zero.
+
+    A row that is in neither — typed into the tracker by hand, with no letter,
+    never queued, never sent — is not forced into ``queued``. It is somebody's
+    own note about a job, and putting it in a queue would say the agent is about
+    to act on it.
     """
     if card.sent_at is not None:
         return SENT if card.send_confirmed else SENT_UNCONFIRMED
     if card.agent_status in {QUEUED, NEEDS_MANUAL}:
         return card.agent_status
+    if card.agent_status is None and card.cover_letter and _untouched(card):
+        return QUEUED
     return None
+
+
+def _untouched(card: BoardCard) -> bool:
+    """Nobody moved this row on their own kanban and nobody sent it."""
+    return card.status is ApplicationStatus.SAVED and card.applied_at is None
 
 
 def _outcome_of(card: BoardCard) -> str | None:

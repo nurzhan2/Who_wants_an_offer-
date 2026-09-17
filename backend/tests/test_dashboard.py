@@ -1055,3 +1055,25 @@ async def test_a_list_row_carries_what_the_age_line_needs(
     assert str(gone) not in rows
     assert rows[str(stale)]["is_active"] is True
     assert rows[str(stale)]["last_seen_at"].startswith(weeks_ago.date().isoformat())
+
+
+async def test_a_letter_nobody_acted_on_is_in_the_queue_column(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """The generators write no agent status; their letters are still queued.
+
+    Walking the dashboard, 22 such rows sat under «вне очереди» and the queue
+    column and counter both read zero.
+    """
+    vacancy_id = await a_vacancy(vacancies, "dash-letter-queued")
+    await _application(db_session, vacancy_id, cover_letter="Здравствуйте!")
+    await _application(db_session, vacancy_id)
+    await _application(db_session, vacancy_id, cover_letter="Уже двигали.", applied_at=EPOCH)
+
+    board = await tracker_service.board(db_session)
+    columns = {column.key: len(column.cards) for column in board.stages}
+    counts = (await overview_service.build(db_session)).applications
+
+    assert columns["queued"] == 1
+    assert len(board.other.cards) == 2
+    assert counts.queued == 1

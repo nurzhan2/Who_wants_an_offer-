@@ -25,6 +25,7 @@ from sqlalchemy import ColumnElement, and_, func, nulls_last, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import ScalarSelect
 
+from app.db.enums import ApplicationStatus
 from app.db.models import Application, Match, Vacancy, VacancySource
 from app.schemas.dashboard import ApplicationCounts, BoardCard, LetterBrief, LetterDocument
 
@@ -49,6 +50,23 @@ def _url_of_vacancy() -> ScalarSelect[str | None]:
         .correlate(Vacancy)
         .scalar_subquery()
     )
+
+
+def _queued() -> ColumnElement[bool]:
+    """A letter waiting for the owner: the agent queued it, or nobody touched it yet.
+
+    ``app.services.tracker._stage_of`` in SQL. Letters written by the generators
+    carry no ``agent_status``, and counting only the agent's own word left this
+    number at zero with a queue full of letters.
+    """
+    untouched = and_(
+        Application.agent_status.is_(None),
+        Application.cover_letter.is_not(None),
+        Application.sent_at.is_(None),
+        Application.status == ApplicationStatus.SAVED,
+        Application.applied_at.is_(None),
+    )
+    return or_(Application.agent_status == "queued", untouched)
 
 
 def _send_confirmed() -> ColumnElement[bool]:
@@ -83,7 +101,7 @@ class ApplicationRepository:
         stmt = select(
             func.count().filter(Application.sent_at.is_not(None)).label("sent"),
             func.count().filter(_send_confirmed()).label("sent_confirmed"),
-            func.count().filter(Application.agent_status == "queued").label("queued"),
+            func.count().filter(_queued()).label("queued"),
             func.count().filter(Application.agent_status == "needs_manual").label("needs_manual"),
             func.count().filter(Application.cover_letter.is_not(None)).label("with_letter"),
             func.count().filter(Application.hh_last_state.is_not(None)).label("answered"),
@@ -133,6 +151,7 @@ class ApplicationRepository:
                 Application.hh_last_state,
                 Application.hh_last_state_at,
                 _send_confirmed().label("send_confirmed"),
+                Application.confirmed_at,
                 Vacancy.published_at.label("vacancy_published_at"),
                 Vacancy.last_seen_at.label("vacancy_last_seen_at"),
                 Vacancy.is_active.label("vacancy_active"),
