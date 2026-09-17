@@ -16,7 +16,12 @@ export function explain(error: unknown): { reason: string; remedy: string } {
     }
   }
   const { status, detail } = error
-  if ((status === 502 || status === 503 || status === 504) && !detail) {
+  // The API answers every failure with a problem document. A 5xx without one
+  // came from the dev proxy, which says 500 — not 502 — when nothing listens
+  // behind it: seen walking the dashboard while the API was restarting, and
+  // read as «сервер упал» when it had not started yet.
+  const fromTheApi = typeof error.problem === 'object' && error.problem !== null && 'type' in error.problem
+  if (status >= 500 && !fromTheApi) {
     return { reason: 'Сервер приложения не отвечает.', remedy: START_REMEDY }
   }
   if (status === 401 || status === 403) {
