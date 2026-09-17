@@ -271,7 +271,10 @@ async def _blockers(session: AsyncSession, vacancy: Vacancy) -> list[str]:
             reasons.append("По этой вакансии в трекере уже отмечен отклик.")
             break
     if not any(row.cover_letter for row in applications):
-        reasons.append("Письма ещё нет — сначала напишите его в разделе документов ниже.")
+        reasons.append(
+            "Письма ещё нет — закройте это окно и нажмите «Написать письмо» "
+            "рядом с «Откликнуться…»."
+        )
 
     seed = await session.scalar(
         select(func.count())

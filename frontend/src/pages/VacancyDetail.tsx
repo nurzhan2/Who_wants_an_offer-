@@ -82,7 +82,11 @@ export function VacancyDetail({ id }: { id: string }) {
               write.mutate({ vacancyId: id, force: letter !== null && letter.characters > 0 })
             }}
           >
-            {letter !== null && letter.characters > 0 ? 'Переписать письмо' : 'Написать письмо'}
+            {write.isPending
+              ? 'Пишем письмо — до минуты…'
+              : letter !== null && letter.characters > 0
+                ? 'Переписать письмо'
+                : 'Написать письмо'}
           </button>
           <button
             type="button"
