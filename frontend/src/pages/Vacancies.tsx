@@ -1,13 +1,13 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 
 import { href } from '@/app/routes'
 import { VacancyDetail } from '@/pages/VacancyDetail'
-import { Empty, Failure, Loading, Pill, Score, Section } from '@/components/ui'
+import { Empty, Failure, Loading, NextStep, Pill, Score, Section } from '@/components/ui'
 import { useVacancies, type VacancyQuery } from '@/hooks/queries'
 import { ago, count, date, plural, salary } from '@/lib/format'
+import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
 import { REMOTE } from '@/lib/labels'
 import type { Facets, VacancyListItem } from '@/types/api'
-import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
 
 /**
  * Вакансии: the ranked list, and one vacancy opened.
@@ -21,6 +21,15 @@ import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
 export function Vacancies({ selected }: { selected: string | null }) {
   const [filters, setFilters] = useState<Filters>(EMPTY)
   const [cursor, setCursor] = useState<string | null>(null)
+  const listTop = useRef<HTMLDivElement>(null)
+
+  // A new page replaces the rows in place, so the reader would be left at the
+  // bottom of it (seen walking the dashboard: «Дальше» and nothing visible
+  // changed). Take them to the first row of the page they asked for.
+  function turn(next: string | null): void {
+    setCursor(next)
+    listTop.current?.scrollIntoView({ block: 'start' })
+  }
 
   const query: VacancyQuery = {
     ...(filters.city ? { city: filters.city } : {}),
@@ -71,13 +80,38 @@ export function Vacancies({ selected }: { selected: string | null }) {
         />
 
         {page.isPending ? <Loading what="вакансии" /> : null}
-        {page.isError ? <Failure error={page.error} what="вакансии" /> : null}
+        {page.isError ? (
+          <Failure
+            error={page.error}
+            what="вакансии"
+            onRetry={() => {
+              void page.refetch()
+            }}
+          />
+        ) : null}
         {page.data ? (
           page.data.items.length === 0 ? (
-            <Empty>Под эти фильтры ничего не подходит. Снимите часть условий.</Empty>
+            filters === EMPTY ? (
+              <NextStep
+                title="Вакансий пока нет"
+                action={
+                  <a
+                    href={href('overview')}
+                    className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper"
+                  >
+                    К операциям
+                  </a>
+                }
+              >
+                На «Обзоре» нажмите «Собрать вакансии», затем «Пересчитать подбор» — список
+                появится здесь, лучшие сверху.
+              </NextStep>
+            ) : (
+              <Empty>Под эти фильтры ничего не подходит. Снимите часть условий.</Empty>
+            )
           ) : (
             <>
-              <div className="border-t border-hairline">
+              <div ref={listTop} className="scroll-mt-4 border-t border-hairline">
                 {page.data.items.map((item) => (
                   <Row key={item.id} item={item} />
                 ))}
@@ -88,7 +122,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
                   className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow enabled:hover:bg-ink enabled:hover:text-paper disabled:border-hairline disabled:text-muted"
                   disabled={page.data.next_cursor === null}
                   onClick={() => {
-                    setCursor(page.data.next_cursor)
+                    turn(page.data.next_cursor)
                   }}
                 >
                   Дальше
@@ -98,7 +132,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
                     type="button"
                     className="text-small text-muted underline-offset-4 hover:underline"
                     onClick={() => {
-                      setCursor(null)
+                      turn(null)
                     }}
                   >
                     В начало
