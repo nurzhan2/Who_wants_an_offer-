@@ -118,6 +118,21 @@ async def accept_upload(
     return UploadAccepted(profile_id=profile.id, parse_status=ParseStatus.PENDING), path
 
 
+def background_failure(exc: Exception) -> str:
+    """What the documents screen says about a parse that crashed, in Russian.
+
+    It used to say «parsing failed unexpectedly», which names neither what
+    broke nor what to do (seen 2026-09-17: the embedding model could not reach
+    huggingface.co). The exception's text is not shown — it can carry a URL or
+    a path — only its class, which is what the server log is searched by.
+    """
+    return (
+        f"Разбор не завершился из-за ошибки на сервере ({type(exc).__name__}). "
+        "Загрузите резюме ещё раз. Если повторится — проверьте подключение к интернету "
+        "и настройки моделей в .env; подробности записаны в журнал сервера."
+    )
+
+
 async def parse_in_background(
     profile_id: UUID, path: Path, *, router: LLMRouter | None = None
 ) -> None:
@@ -144,7 +159,7 @@ async def parse_in_background(
         )
         async with session_factory() as session:
             await ProfileRepository(session).set_parse_status(
-                profile_id, ParseStatus.FAILED, error="parsing failed unexpectedly"
+                profile_id, ParseStatus.FAILED, error=background_failure(exc)
             )
             await session.commit()
     finally:

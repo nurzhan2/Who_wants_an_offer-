@@ -476,3 +476,14 @@ async def test_a_parse_left_pending_by_a_dead_process_is_failed_at_startup(
     assert row.parse_status is ParseStatus.FAILED
     assert row.parse_error == resume_service.STALE_PARSE_REASON
     assert "Загрузите резюме заново" in row.parse_error
+
+
+def test_a_crashed_parse_is_explained_in_russian_without_the_exception_text() -> None:
+    """«parsing failed unexpectedly» named neither the cause nor the next step."""
+    message = resume_service.background_failure(
+        RuntimeError("https://huggingface.co/secret-path disconnected")
+    )
+
+    assert "RuntimeError" in message
+    assert "Загрузите резюме ещё раз" in message
+    assert "huggingface" not in message

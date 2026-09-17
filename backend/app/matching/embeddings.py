@@ -147,8 +147,7 @@ class BGEM3Provider:
 
     def _load_blocking(self) -> Any:
         """Import the extra and construct the model. Downloads weights on a cold run."""
-        module = importlib.import_module(SENTENCE_TRANSFORMERS)
-        return module.SentenceTransformer(self._model_name)
+        return load_cached_first(importlib.import_module(SENTENCE_TRANSFORMERS), self._model_name)
 
     @staticmethod
     def _encode_blocking(model: Any, texts: list[str]) -> list[list[float]]:
@@ -160,6 +159,28 @@ class BGEM3Provider:
         """
         encoded = model.encode(texts, normalize_embeddings=True, convert_to_numpy=True)
         return [[float(value) for value in row] for row in encoded]
+
+
+def load_cached_first(module: Any, model_name: str) -> Any:
+    """The model from the local cache, and from the network only if it is not there.
+
+    Measured 2026-09-17, in the dashboard walkthrough: with the weights already
+    in the Hugging Face cache, ``SentenceTransformer(name)`` still asked
+    huggingface.co for file metadata, the connection dropped, and the resume
+    upload failed as a whole — for a model that was on disk the entire time.
+    Asking the cache first makes a warm machine independent of the hub; a cold
+    one still downloads, as before.
+
+    ``Any`` for the module and the model: ``sentence_transformers`` is an
+    optional extra with no stubs, imported only here.
+    """
+    try:
+        return module.SentenceTransformer(model_name, local_files_only=True)
+    except (OSError, ValueError) as error:
+        # huggingface_hub reports "not in the cache" as LocalEntryNotFoundError,
+        # which is both an OSError and a ValueError across its versions.
+        logger.info("embeddings.model_not_cached", model=model_name, reason=type(error).__name__)
+        return module.SentenceTransformer(model_name)
 
 
 class UnavailableEmbeddingProvider:

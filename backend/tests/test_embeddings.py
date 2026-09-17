@@ -843,3 +843,42 @@ async def test_concurrent_first_requests_load_the_model_once(
     await asyncio.gather(provider.encode(["alpha"]), provider.encode(["beta"]))
 
     assert loads == 1
+
+
+class _Hub:
+    """A stand-in ``sentence_transformers`` module that records how it was asked."""
+
+    def __init__(self, cached: bool) -> None:
+        self.cached = cached
+        self.calls: list[dict[str, Any]] = []
+        hub = self
+
+        class SentenceTransformer:
+            def __init__(self, name: str, **kwargs: Any) -> None:
+                hub.calls.append({"name": name, **kwargs})
+                if kwargs.get("local_files_only") and not hub.cached:
+                    raise OSError("not in the local cache")
+
+        self.SentenceTransformer = SentenceTransformer
+
+
+def test_a_cached_model_loads_without_the_network() -> None:
+    """A warm machine must not depend on huggingface.co answering."""
+    from app.matching.embeddings import load_cached_first
+
+    hub = _Hub(cached=True)
+    load_cached_first(hub, "BAAI/bge-m3")
+
+    assert hub.calls == [{"name": "BAAI/bge-m3", "local_files_only": True}]
+
+
+def test_a_model_not_in_the_cache_is_downloaded() -> None:
+    from app.matching.embeddings import load_cached_first
+
+    hub = _Hub(cached=False)
+    load_cached_first(hub, "BAAI/bge-m3")
+
+    assert hub.calls == [
+        {"name": "BAAI/bge-m3", "local_files_only": True},
+        {"name": "BAAI/bge-m3"},
+    ]
