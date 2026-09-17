@@ -271,11 +271,11 @@ def _outcome(embedded: int, backlog: int, stopped: str = "budget") -> object:
     )
 
 
-async def test_embedding_runs_passes_until_the_backlog_is_gone(
+async def test_embedding_runs_passes_while_the_budget_is_what_stopped_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    passes = iter([_outcome(50, 70), _outcome(50, 20), _outcome(20, 0, "drained")])
-    titles = iter([_outcome(8, 0, "drained")])
+    passes = iter([_outcome(50, 70), _outcome(50, 20), _outcome(20, 1809, "drained")])
+    titles = iter([_outcome(8, 400, "drained")])
 
     async def descriptions(_: object, **__: object) -> object:
         return next(passes)
@@ -290,9 +290,28 @@ async def test_embedding_runs_passes_until_the_backlog_is_gone(
     report = await operations_service._embed(progress)
 
     assert (progress.done, progress.total) == (120, 120)
-    assert report[0] == "Векторов описаний посчитано: 120, осталось: 0."
-    assert "названий посчитано: 8" in report[1]
-    assert len(report) == 2
+    assert report == [
+        "Векторов описаний посчитано: 120. Всё посчитано.",
+        "Векторов названий посчитано: 8. Всё посчитано.",
+    ]
+
+
+async def test_a_drained_pass_with_a_large_backlog_is_not_work_left(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured on the walkthrough copy: backlog 1809, nothing to embed."""
+
+    async def nothing(_: object, **__: object) -> object:
+        return _outcome(0, 1809, "drained")
+
+    monkeypatch.setattr(operations_service, "embed_pending", nothing)
+    monkeypatch.setattr(operations_service, "embed_pending_titles", nothing)
+    progress = Progress()
+
+    report = await operations_service._embed(progress)
+
+    assert "нажмите ещё раз" not in " ".join(report)
+    assert (progress.done, progress.total) == (0, 0)
 
 
 async def test_embedding_without_a_model_fails_with_what_to_install(
@@ -306,14 +325,18 @@ async def test_embedding_without_a_model_fails_with_what_to_install(
         await operations_service._embed(Progress())
 
 
-async def test_embedding_stops_when_a_pass_writes_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    ("stopped", "said"),
+    [("budget", "нажмите ещё раз"), ("starved", "не поможет")],
+)
+async def test_a_pass_that_left_work_says_which_kind(
+    monkeypatch: pytest.MonkeyPatch, stopped: str, said: str
 ) -> None:
     calls: list[str] = []
 
     async def stuck(_: object, **__: object) -> object:
         calls.append("pass")
-        return _outcome(0, 40)
+        return _outcome(0, 40, stopped)
 
     monkeypatch.setattr(operations_service, "embed_pending", stuck)
     monkeypatch.setattr(operations_service, "embed_pending_titles", stuck)
@@ -321,7 +344,7 @@ async def test_embedding_stops_when_a_pass_writes_nothing(
     report = await operations_service._embed(Progress())
 
     assert calls == ["pass", "pass"]
-    assert report[-1].startswith("Остаток есть")
+    assert said in report[0]
 
 
 async def test_matching_reports_buckets_and_a_missing_profile_is_a_sentence(

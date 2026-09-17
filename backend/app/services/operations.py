@@ -52,7 +52,7 @@ from app.letters import store
 from app.letters.service import write_batch
 from app.matching import profile_vectors
 from app.matching.scorer import ProfileNotReadyError, score_corpus
-from app.pipeline.embedding import embed_pending, embed_pending_titles
+from app.pipeline.embedding import EmbeddingOutcome, embed_pending, embed_pending_titles
 from app.schemas.operations import (
     AgentProgress,
     OperationKind,
@@ -313,43 +313,60 @@ class OperationRegistry:
 async def _embed(progress: Progress) -> list[str]:
     """Compute missing description vectors, then title vectors.
 
-    Passes until the backlog is gone, the model is missing, a pass writes
-    nothing, or :data:`MAX_EMBED_PASSES` is spent — the same stopping rules as
-    ``scripts/embed_backlog.py --until-drained``.
+    Decided by ``stopped``, never by ``backlog``. The backlog is a ceiling on
+    rows that *may* be stale, not a count of work left: walking the dashboard
+    (2026-09-17) it read 1809 on a corpus with no vector missing, and the panel
+    said «осталось 1809 — нажмите ещё раз» about work that did not exist.
+    ``drained`` means nothing is left; ``budget`` means the time ran out with
+    work outstanding; ``starved`` means rows are missing a vector that the
+    selection does not return. Passes repeat only while the budget is what
+    stopped them and a pass still writes something.
     """
     written = 0
-    backlog: int | None = None
+    last: EmbeddingOutcome | None = None
     for _ in range(MAX_EMBED_PASSES):
         async with session_factory() as session:
-            outcome = await embed_pending(session)
-        if outcome.stopped == "unavailable":
+            last = await embed_pending(session)
+        if last.stopped == "unavailable":
             raise EmbeddingUnavailableError(
                 "Векторы не посчитаны: модель эмбеддингов недоступна. Установите её "
                 "(uv sync --extra embeddings) или включите EMBEDDING_PROVIDER=fake."
             )
-        written += outcome.embedded
-        backlog = outcome.backlog
-        progress.done, progress.total = written, written + backlog
-        progress.note = f"описания: посчитано {written}, осталось {backlog}"
-        if outcome.backlog == 0 or outcome.embedded == 0:
+        written += last.embedded
+        progress.done = written
+        progress.total = written + last.backlog if last.stopped == "budget" else written
+        progress.note = f"описания: посчитано {written}"
+        if last.stopped != "budget" or last.embedded == 0:
             break
 
     titles_written = 0
-    title_backlog: int | None = None
+    last_titles: EmbeddingOutcome | None = None
     for _ in range(MAX_EMBED_PASSES):
         async with session_factory() as session:
-            outcome = await embed_pending_titles(session)
-        titles_written += outcome.embedded
-        title_backlog = outcome.backlog
-        progress.note = f"названия: посчитано {titles_written}, осталось {title_backlog}"
-        if outcome.stopped == "unavailable" or outcome.backlog == 0 or outcome.embedded == 0:
+            last_titles = await embed_pending_titles(session)
+        titles_written += last_titles.embedded
+        progress.note = f"названия: посчитано {titles_written}"
+        if last_titles.stopped != "budget" or last_titles.embedded == 0:
             break
 
-    lines = [f"Векторов описаний посчитано: {written}, осталось: {backlog}."]
-    lines.append(f"Векторов названий посчитано: {titles_written}, осталось: {title_backlog}.")
-    if backlog:
-        lines.append("Остаток есть — нажмите ещё раз, продолжится с того же места.")
-    return lines
+    return [
+        f"Векторов описаний посчитано: {written}. {_left(last)}",
+        f"Векторов названий посчитано: {titles_written}. {_left(last_titles)}",
+    ]
+
+
+def _left(outcome: EmbeddingOutcome | None) -> str:
+    """What is left after a pass, said from why the pass stopped."""
+    if outcome is None or outcome.stopped == "drained":
+        return "Всё посчитано."
+    if outcome.stopped == "budget":
+        return "Время прохода вышло, остаток есть — нажмите ещё раз, продолжится с того же места."
+    if outcome.stopped == "starved":
+        return (
+            "Без вектора остались строки, которые выборка не отдаёт; повторное нажатие не "
+            "поможет — это нужно чинить в коде."
+        )
+    return "Модель эмбеддингов недоступна."
 
 
 async def _match(progress: Progress) -> list[str]:
