@@ -409,3 +409,29 @@ class _NoSession:
 
     def __call__(self) -> "_NoSession":
         return self
+
+
+async def test_embeddings_wait_for_a_running_crawl(
+    client: AsyncClient, gates: dict[OperationKind, Gate], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A crawl ends in an embedding pass over the same rows; two at once is waste."""
+    from app.pipeline import runner as runner_module
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def parked(**_: object) -> object:
+        entered.set()
+        await release.wait()
+        raise AppError("стоп")
+
+    monkeypatch.setattr(runner_module, "run_pipeline", parked)
+    await client.post(OPERATIONS_URL, json={"kind": "crawl"})
+    await asyncio.wait_for(entered.wait(), PATIENCE)
+
+    refused = await client.post(OPERATIONS_URL, json={"kind": "embed"})
+
+    assert refused.status_code == 409
+    assert "идёт обход" in refused.json()["detail"]
+    assert gates[OperationKind.EMBED].calls == 0
+    release.set()

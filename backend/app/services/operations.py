@@ -448,6 +448,14 @@ async def start(kind: OperationKind) -> OperationRead:
     """Start one operation and answer with its handle."""
     if kind is OperationKind.CRAWL:
         return _from_crawl(await pipeline_service.request_run())
+    if kind is OperationKind.EMBED and pipeline_service.list_jobs(limit=1).busy:
+        # Found walking the dashboard (2026-09-17): a crawl ends in an embedding
+        # pass over the same rows, so a second pass alongside it only halves the
+        # speed of both on one CPU.
+        raise OperationBusyError(
+            "Эмбеддинги: сейчас идёт обход, и он сам считает векторы новых вакансий. "
+            "Дождитесь его окончания — остаток, если будет, посчитается этой кнопкой."
+        )
     return view(_registry.start(kind))
 
 

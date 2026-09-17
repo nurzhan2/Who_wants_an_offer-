@@ -373,8 +373,9 @@ def _message(job: _Job) -> str:
         # No number here on purpose: how long a duration reads best is the
         # dashboard's decision, and ``duration_seconds`` is right beside this.
         return (
-            "Обход идёт. Полный обход hh занимает около двадцати минут; что успел "
-            "сделать каждый источник, видно в истории запусков."
+            "Обход идёт: сначала источники, потом векторы для новых вакансий — на "
+            "процессоре это несколько минут. Полный обход hh — около двадцати минут; "
+            "что успел сделать каждый источник, видно в истории запусков."
         )
     if job.status is PipelineJobStatus.SUCCESS and job.report is not None:
         if job.dry_run:

@@ -129,6 +129,13 @@ function StepRow({
   const agentAlive = watcherAlive(state)
   const confirmed = useConfirmedList()
   const nothingToSend = step.kind === 'send' && (confirmed.data?.items.length ?? 0) === 0
+  // A crawl embeds what it fetched; a second pass alongside it is refused.
+  const crawlEmbeds = step.kind === 'embed' && (state?.busy.includes('crawl') ?? false)
+  const why = nothingToSend
+    ? 'Нет подтверждённых откликов: подтвердите их в карточках вакансий'
+    : crawlEmbeds
+      ? 'Идёт обход — он сам посчитает векторы новых вакансий'
+      : undefined
 
   return (
     <div className="grid gap-4 border-b border-hairline py-6 md:grid-cols-[minmax(0,1fr)_auto]">
@@ -143,13 +150,18 @@ function StepRow({
           </p>
         ) : null}
         {step.kind === 'send' ? <ConfirmedSummary list={confirmed.data} /> : null}
+        {crawlEmbeds ? (
+          <p className="mt-2 text-small text-muted">
+            Сейчас идёт обход — векторы новых вакансий он посчитает сам.
+          </p>
+        ) : null}
         {last ? <LastRun operation={last} /> : null}
       </div>
       <div className="flex items-start md:justify-end">
         <Button
           onClick={onStart}
-          disabled={busy || starting || state === undefined || nothingToSend}
-          title={nothingToSend ? 'Нет подтверждённых откликов: подтвердите их в карточках вакансий' : undefined}
+          disabled={busy || starting || state === undefined || nothingToSend || crawlEmbeds}
+          title={why}
         >
           {busy ? statusWord(last) : starting ? 'Запускаем…' : step.label}
         </Button>
