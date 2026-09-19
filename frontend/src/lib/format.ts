@@ -30,6 +30,18 @@ export function score(value: string | null | undefined): string {
   return Number.isFinite(parsed) ? String(Math.round(parsed)) : NOTHING
 }
 
+/** A score as the API sends it — a Decimal, as text — as a number, or null. */
+export function scoreNumber(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+/** A score counted on screen: whole, rounded as `score` rounds. */
+export function wholeNumber(value: number): string {
+  return String(Math.round(value))
+}
+
 export function date(value: string | null | undefined): string {
   if (!value) return NOTHING
   const parsed = new Date(value)

@@ -11,12 +11,15 @@
  * for. They are side by side because that comparison is where a rule that does
  * not measure what its author meant becomes visible.
  */
+import { Button } from '@/components/ui'
 import { describeRule, SCOPE_LABELS, SEVERITY_LABELS } from '@/components/workshop/labels'
 import type { Rule } from '@/types/workshop'
 
 interface Props {
   rules: Rule[]
   busyId: string | null
+  /** What is being done to the row `busyId` names. */
+  busyAction: 'toggle' | 'delete' | null
   onToggle: (rule: Rule) => void
   onDelete: (rule: Rule) => void
 }
@@ -30,7 +33,7 @@ function Badge({ children, tone }: { children: string; tone: 'hard' | 'soft' | '
   return <span className={`rounded px-1.5 py-0.5 text-xs ${tones[tone]}`}>{children}</span>
 }
 
-export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
+export function RuleList({ rules, busyId, busyAction, onToggle, onDelete }: Props) {
   if (rules.length === 0) {
     return <p className="text-sm text-muted">Правил пока нет.</p>
   }
@@ -63,22 +66,28 @@ export function RuleList({ rules, busyId, onToggle, onDelete }: Props) {
 
             {!rule.is_builtin && (
               <div className="flex shrink-0 gap-2">
-                <button
-                  type="button"
+                <Button
+                  outline
                   disabled={busyId === rule.id}
+                  busy={
+                    busyId === rule.id && busyAction === 'toggle'
+                      ? rule.is_active
+                        ? 'Выключаем…'
+                        : 'Включаем…'
+                      : false
+                  }
                   onClick={() => { onToggle(rule); }}
-                  className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-muted disabled:opacity-50"
                 >
                   {rule.is_active ? 'Выключить' : 'Включить'}
-                </button>
-                <button
-                  type="button"
+                </Button>
+                <Button
+                  outline
                   disabled={busyId === rule.id}
+                  busy={busyId === rule.id && busyAction === 'delete' ? 'Удаляем…' : false}
                   onClick={() => { onDelete(rule); }}
-                  className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-ink disabled:opacity-50"
                 >
                   Удалить
-                </button>
+                </Button>
               </div>
             )}
           </div>

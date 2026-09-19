@@ -2,9 +2,10 @@ import { href } from '@/app/routes'
 import { fileUrl } from '@/api/documents'
 import { ApplyConfirm } from '@/components/ApplyConfirm'
 import { Freshness } from '@/components/Freshness'
-import { Card, Empty, Failure, Field, Loading, Pill, Score, Section } from '@/components/ui'
+import { Button, Card, Empty, Failure, Field, Loading, Pill, Score, Section } from '@/components/ui'
 import { useDocumentHistory, useGenerateDocument } from '@/hooks/useDocuments'
 import { useVacancy, useWriteLetter } from '@/hooks/queries'
+import { useFlash } from '@/hooks/useMotion'
 import { count, date, dateTime, plural, salary, score } from '@/lib/format'
 import { EVIDENCE, outcomeLabel, REMOTE, REQUIREMENT_SOURCE, SKIPPED } from '@/lib/labels'
 import type { MatchSummary, RequirementStanding, VacancySource } from '@/types/api'
@@ -35,8 +36,10 @@ export function VacancyDetail({ id }: { id: string }) {
   const { data, isPending, isError, error } = useVacancy(id)
   const write = useWriteLetter()
   const cv = useGenerateDocument('cv')
+  const letterWritten = useFlash(write.data?.saved ? write.submittedAt : 0)
+  const cvBuilt = useFlash(cv.data?.delivered ? cv.submittedAt : 0)
 
-  if (isPending) return <Loading what="вакансию" />
+  if (isPending) return <Loading what="вакансию" shape="detail" />
   if (isError) return <Failure error={error} what="вакансию" />
 
   const { vacancy, match, requirements, letter } = data
@@ -74,30 +77,26 @@ export function VacancyDetail({ id }: { id: string }) {
       >
         <div className="flex flex-wrap items-center gap-4">
           <ApplyConfirm vacancyId={id} />
-          <button
-            type="button"
-            className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper disabled:border-hairline disabled:text-muted"
-            disabled={write.isPending}
+          <Button
+            outline
+            busy={write.isPending ? 'Пишем письмо — до минуты…' : false}
+            done={letterWritten ? 'Письмо записано' : false}
             onClick={() => {
               write.mutate({ vacancyId: id, force: letter !== null && letter.characters > 0 })
             }}
           >
-            {write.isPending
-              ? 'Пишем письмо — до минуты…'
-              : letter !== null && letter.characters > 0
-                ? 'Переписать письмо'
-                : 'Написать письмо'}
-          </button>
-          <button
-            type="button"
-            className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper disabled:border-hairline disabled:text-muted"
-            disabled={cv.isPending}
+            {letter !== null && letter.characters > 0 ? 'Переписать письмо' : 'Написать письмо'}
+          </Button>
+          <Button
+            outline
+            busy={cv.isPending ? 'Собираем CV…' : false}
+            done={cvBuilt ? 'CV собран' : false}
             onClick={() => {
               cv.mutate(id)
             }}
           >
-            {cv.isPending ? 'Собираю CV…' : 'CV под эту вакансию'}
-          </button>
+            CV под эту вакансию
+          </Button>
           {letter !== null && letter.characters > 0 ? (
             <span className="text-small text-muted">
               письмо есть: {count(letter.characters)}{' '}

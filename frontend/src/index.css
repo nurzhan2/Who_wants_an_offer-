@@ -92,6 +92,106 @@
   .rise-list > *:nth-child(4) { animation-delay: 120ms; }
   .rise-list > *:nth-child(n + 5) { animation-delay: 160ms; }
 
+  /* One row of a long list arriving, delayed by the position it was mounted at
+     (`--i`, set by the row). Decided once, at mount: a class chosen by
+     nth-child would start the animation again on a row that merely moved up
+     the list, and a re-sorted row must slide, not blink. The caller gives the
+     class only to the first screenful — two thousand rows each on its own
+     compositor layer is how a cascade stops a page from scrolling. */
+  .enter {
+    animation: rise 0.8s cubic-bezier(0.19, 1, 0.22, 1) both;
+    animation-delay: calc(var(--i, 0) * 30ms);
+  }
+
+  /* A label replacing another inside a button: «Сохранить» → «Сохраняем…» →
+     «Сохранено». Opacity only — the small-change rule. */
+  .swap {
+    animation: fade 0.4s ease both;
+  }
+
+  /* A button at work. It keeps its full ink — a faded pill says «not now»,
+     and this one is saying «doing it» — and a hairline under the label runs
+     along it for as long as the work goes on. */
+  .working {
+    position: relative;
+    cursor: progress;
+  }
+  .working::after {
+    content: '';
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    bottom: 5px;
+    height: 1px;
+    background: currentColor;
+    transform-origin: left;
+    animation: sweep 1.25s cubic-bezier(0.19, 1, 0.22, 1) infinite;
+  }
+
+  @keyframes sweep {
+    0% {
+      transform: scaleX(0);
+      transform-origin: left;
+    }
+    50% {
+      transform: scaleX(1);
+      transform-origin: left;
+    }
+    50.01% {
+      transform: scaleX(1);
+      transform-origin: right;
+    }
+    100% {
+      transform: scaleX(0);
+      transform-origin: right;
+    }
+  }
+
+  /* Pressing a pill: it gives a little under the finger, on the same curve,
+     which reaches the pressed size in a few frames and eases out of it. */
+  .press {
+    transition-property: color, background-color, border-color, opacity, transform;
+    transition-duration: 0.8s;
+    transition-timing-function: cubic-bezier(0.19, 1, 0.22, 1);
+  }
+  .press:not(:disabled):active {
+    transform: scale(0.97);
+  }
+
+  /* A long operation's progress: a 1px line, the only kind of bar the system
+     allows. `.gauge-fill` is scaled, never resized, so a count moving every two
+     seconds does not lay anything out; `.gauge-run` is the same line running
+     when the operation cannot count. */
+  .gauge {
+    position: relative;
+    height: 1px;
+    overflow: hidden;
+    background: var(--hairline);
+  }
+  .gauge-fill {
+    position: absolute;
+    inset: 0;
+    background: var(--ink);
+    transform-origin: left;
+    transition: transform 1.25s cubic-bezier(0.19, 1, 0.22, 1);
+  }
+  .gauge-run {
+    position: absolute;
+    inset: 0;
+    width: 30%;
+    background: var(--ink);
+    animation: run 2s cubic-bezier(0.19, 1, 0.22, 1) infinite;
+  }
+
+  @keyframes run {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(340%);
+    }
+  }
+
   /* A placeholder breathing through opacity only — the small-change rule. */
   .skeleton {
     animation: breathe 1.6s ease infinite alternate;
@@ -131,13 +231,55 @@
     word-break: normal;
   }
 
+  /* Movement off, not faster: every entrance, sweep and slide above simply
+     does not happen, and what they would have revealed is there from the
+     first frame. Colour changes stay — they are not motion. */
   @media (prefers-reduced-motion: reduce) {
     .rise,
     .rise-list > *,
+    .enter,
+    .swap,
     .skeleton,
     .veil,
-    .sheet {
+    .sheet,
+    .working::after,
+    .gauge-run {
       animation: none;
     }
+    .working::after {
+      transform: none;
+      opacity: 0.4;
+    }
+    .gauge-run {
+      width: 100%;
+      opacity: 0.4;
+    }
+    .press,
+    .gauge-fill {
+      transition-property: color, background-color, border-color, opacity;
+    }
+    .press:not(:disabled):active {
+      transform: none;
+    }
+  }
+}
+
+/*
+ * Changing screens. The browser cross-fades the page it had for the page it
+ * has now (see `useLocation`), so the old screen gives way instead of being
+ * swapped out between two frames. Opacity only and the system's 0.4s: a
+ * transition that holds the new screen back any longer is in the way.
+ */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 0.4s;
+  animation-timing-function: ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none;
   }
 }

@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 
+import { Button } from '@/components/ui'
 import { REFERENCE_KIND_LABELS } from '@/components/workshop/labels'
 import type { Reference, ReferenceKind } from '@/types/workshop'
 
@@ -128,13 +129,11 @@ export function ReferenceForm({ busy, error, warnings, onSubmit }: FormProps) {
         </p>
       )}
 
-      <button
-        type="submit"
-        disabled={busy}
-        className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {busy ? 'Загружаем…' : 'Добавить эталон'}
-      </button>
+      <div>
+        <Button type="submit" busy={busy ? 'Загружаем эталон…' : false}>
+          Добавить эталон
+        </Button>
+      </div>
     </form>
   )
 }
@@ -142,11 +141,13 @@ export function ReferenceForm({ busy, error, warnings, onSubmit }: FormProps) {
 interface ListProps {
   references: Reference[]
   busyId: string | null
+  /** What is being done to the row `busyId` names. */
+  busyAction: 'toggle' | 'delete' | null
   onToggle: (reference: Reference) => void
   onDelete: (reference: Reference) => void
 }
 
-export function ReferenceList({ references, busyId, onToggle, onDelete }: ListProps) {
+export function ReferenceList({ references, busyId, busyAction, onToggle, onDelete }: ListProps) {
   if (references.length === 0) {
     return <p className="text-sm text-muted">Эталонов пока нет.</p>
   }
@@ -179,22 +180,28 @@ export function ReferenceList({ references, busyId, onToggle, onDelete }: ListPr
             </div>
 
             <div className="flex shrink-0 gap-2">
-              <button
-                type="button"
+              <Button
+                outline
                 disabled={busyId === reference.id}
+                busy={
+                  busyId === reference.id && busyAction === 'toggle'
+                    ? reference.is_active
+                      ? 'Выключаем…'
+                      : 'Включаем…'
+                    : false
+                }
                 onClick={() => { onToggle(reference); }}
-                className="rounded-md border border-slate-300 px-2.5 py-1 text-xs text-muted disabled:opacity-50"
               >
                 {reference.is_active ? 'Выключить' : 'Включить'}
-              </button>
-              <button
-                type="button"
+              </Button>
+              <Button
+                outline
                 disabled={busyId === reference.id}
+                busy={busyId === reference.id && busyAction === 'delete' ? 'Удаляем…' : false}
                 onClick={() => { onDelete(reference); }}
-                className="rounded-md border border-red-200 px-2.5 py-1 text-xs text-ink disabled:opacity-50"
               >
                 Удалить
-              </button>
+              </Button>
             </div>
           </div>
         </li>

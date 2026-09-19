@@ -27,7 +27,7 @@ import type { BoardCard, BoardColumn } from '@/types/api'
 export function Applications() {
   const { data, isPending, isError, error, refetch } = useBoard()
 
-  if (isPending) return <Loading what="отклики" />
+  if (isPending) return <Loading what="отклики" shape="board" />
   if (isError) {
     return (
       <Failure
@@ -108,13 +108,14 @@ function RefreshOutcomes() {
   return (
     <Button
       outline
-      disabled={busy || start.isPending || operations.data === undefined}
+      disabled={operations.data === undefined}
+      busy={busy ? 'Исходы обновляются…' : start.isPending ? 'Запускаем…' : false}
       title="Агент откроет ваши отправленные отклики на hh и прочитает ответ"
       onClick={() => {
         start.mutate('outcomes')
       }}
     >
-      {busy ? 'Исходы обновляются…' : 'Обновить исходы'}
+      Обновить исходы
     </Button>
   )
 }

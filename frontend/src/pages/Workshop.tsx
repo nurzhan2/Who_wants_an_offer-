@@ -61,10 +61,16 @@ export function Workshop() {
     : deleteRule.isPending
       ? deleteRule.variables
       : null
+  const ruleBusyAction = updateRule.isPending ? 'toggle' : deleteRule.isPending ? 'delete' : null
   const referenceBusyId = updateReference.isPending
     ? updateReference.variables.id
     : deleteReference.isPending
       ? deleteReference.variables
+      : null
+  const referenceBusyAction = updateReference.isPending
+    ? 'toggle'
+    : deleteReference.isPending
+      ? 'delete'
       : null
 
   return (
@@ -87,6 +93,7 @@ export function Workshop() {
           <ReferenceList
             references={references.data}
             busyId={referenceBusyId}
+            busyAction={referenceBusyAction}
             onToggle={(reference) => {
               updateReference.mutate({
                 id: reference.id,
@@ -113,6 +120,7 @@ export function Workshop() {
           <RuleList
             rules={rules.data}
             busyId={ruleBusyId}
+            busyAction={ruleBusyAction}
             onToggle={(rule) => {
               updateRule.mutate({ id: rule.id, changes: { is_active: !rule.is_active } })
             }}

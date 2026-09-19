@@ -1,11 +1,29 @@
 import { useSyncExternalStore } from 'react'
+import { flushSync } from 'react-dom'
 
 import { parseHash, type Location } from '@/app/routes'
+import { stillness } from '@/lib/motion'
 
+/**
+ * A change of screen, handed to the browser as a view transition: it keeps a
+ * picture of the page it had, renders the new one inside `flushSync`, and
+ * cross-fades the two (the timing is in `index.css`). Where the browser has no
+ * view transitions, or the person asked for no motion, the screen changes
+ * between two frames as it always did.
+ */
 function subscribe(onChange: () => void): () => void {
-  window.addEventListener('hashchange', onChange)
+  const change = (): void => {
+    if (typeof document.startViewTransition !== 'function' || stillness()) {
+      onChange()
+      return
+    }
+    document.startViewTransition(() => {
+      flushSync(onChange)
+    })
+  }
+  window.addEventListener('hashchange', change)
   return () => {
-    window.removeEventListener('hashchange', onChange)
+    window.removeEventListener('hashchange', change)
   }
 }
 

@@ -17,6 +17,7 @@
 import { useState } from 'react'
 
 import { ApiError } from '@/api/client'
+import { Button } from '@/components/ui'
 import { DATE_FORMAT_LABELS, KIND_LABELS, SCOPE_LABELS, SEVERITY_HINTS, SEVERITY_LABELS } from '@/components/workshop/labels'
 import type {
   DateFormatPattern,
@@ -266,13 +267,11 @@ export function RuleForm({ busy, error, onSubmit }: Props) {
         </div>
       )}
 
-      <button
-        type="submit"
-        disabled={busy}
-        className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {busy ? 'Сохраняем…' : 'Добавить правило'}
-      </button>
+      <div>
+        <Button type="submit" busy={busy ? 'Сохраняем правило…' : false}>
+          Добавить правило
+        </Button>
+      </div>
     </form>
   )
 }

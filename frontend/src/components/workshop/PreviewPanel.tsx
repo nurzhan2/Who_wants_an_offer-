@@ -12,6 +12,7 @@
  */
 import { useState } from 'react'
 
+import { Button } from '@/components/ui'
 import type { Preview, VacancyChoice, Violation } from '@/types/workshop'
 
 interface Props {
@@ -81,14 +82,16 @@ export function PreviewPanel({ vacancies, query, onQuery, busy, error, preview, 
         </select>
       </div>
 
-      <button
-        type="button"
-        disabled={busy || !chosen}
-        onClick={() => { onRun(chosen); }}
-        className="rounded-md bg-slate-900 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-      >
-        {busy ? 'Пишем…' : 'Сгенерировать пробное письмо'}
-      </button>
+      <div>
+        <Button
+          disabled={!chosen}
+          busy={busy ? 'Пишем пробное письмо…' : false}
+          title={chosen ? undefined : 'Выберите вакансию'}
+          onClick={() => { onRun(chosen); }}
+        >
+          Сгенерировать пробное письмо
+        </Button>
+      </div>
 
       {error != null && (
         <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-ink">

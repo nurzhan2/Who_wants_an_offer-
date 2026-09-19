@@ -26,7 +26,7 @@ import type { LetterDocument, ResumeDocument } from '@/types/api'
 export function Documents() {
   const { data, isPending, isError, error, refetch } = useDocuments()
 
-  if (isPending) return <Loading what="документы" />
+  if (isPending) return <Loading what="документы" shape="cards" />
   if (isError) {
     return (
       <Failure

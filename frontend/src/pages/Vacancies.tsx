@@ -2,10 +2,12 @@ import { useRef, useState } from 'react'
 
 import { href } from '@/app/routes'
 import { VacancyDetail } from '@/pages/VacancyDetail'
-import { Empty, Failure, Loading, NextStep, Pill, Score, Section } from '@/components/ui'
+import { Counted, Empty, Failure, Loading, NextStep, Pill, Score, Section } from '@/components/ui'
 import { useVacancies, type VacancyQuery } from '@/hooks/queries'
-import { ago, count, date, plural, salary, score as formatScore } from '@/lib/format'
+import { useReorder } from '@/hooks/useMotion'
+import { ago, date, plural, salary, score as formatScore, scoreNumber, wholeNumber } from '@/lib/format'
 import { freshnessOf, OLD_AFTER_DAYS } from '@/lib/freshness'
+import { cascade } from '@/lib/motion'
 import { REMOTE } from '@/lib/labels'
 import type { Facets, MatchMode, VacancyListItem } from '@/types/api'
 
@@ -45,6 +47,9 @@ export function Vacancies({ selected }: { selected: string | null }) {
     limit: 50,
   }
   const page = useVacancies(query)
+  // The list re-sorts in place when the order or a filter changes: the rows
+  // that stay slide to their new places, the ones that are new arrive.
+  useReorder(listTop, page.data?.items.map((item) => item.id).join(' ') ?? '')
 
   if (selected !== null) {
     return <VacancyDetail id={selected} />
@@ -73,8 +78,12 @@ export function Vacancies({ selected }: { selected: string | null }) {
         note={`${MODES[mode].note} У каждой строки — что из требований закрыто, а что нет.`}
         action={
           page.data?.total !== null && page.data?.total !== undefined ? (
-            <span className="tnum text-small text-muted">
-              {count(page.data.total)} {plural(page.data.total, 'вакансия', 'вакансии', 'вакансий')}
+            <span className="text-small text-muted" aria-live="polite">
+              {page.isPlaceholderData ? (
+                <span className="swap">перестраиваем список… </span>
+              ) : null}
+              <Counted value={page.data.total} />{' '}
+              {plural(page.data.total, 'вакансия', 'вакансии', 'вакансий')}
             </span>
           ) : null
         }
@@ -90,7 +99,7 @@ export function Vacancies({ selected }: { selected: string | null }) {
           }}
         />
 
-        {page.isPending ? <Loading what="вакансии" /> : null}
+        {page.isPending ? <Loading what="вакансии" shape="rows" /> : null}
         {page.isError ? (
           <Failure
             error={page.error}
@@ -122,15 +131,19 @@ export function Vacancies({ selected }: { selected: string | null }) {
             )
           ) : (
             <>
-              <div ref={listTop} className="scroll-mt-4 border-t border-hairline">
-                {page.data.items.map((item) => (
-                  <Row key={item.id} item={item} mode={mode} />
+              <div
+                ref={listTop}
+                className="relative scroll-mt-4 border-t border-hairline"
+                aria-busy={page.isPlaceholderData}
+              >
+                {page.data.items.map((item, index) => (
+                  <Row key={item.id} item={item} mode={mode} index={index} />
                 ))}
               </div>
               <div className="mt-8 flex items-center gap-6">
                 <button
                   type="button"
-                  className="rounded-pill border border-ink px-6 py-2 text-small transition-colors duration-800 ease-slow enabled:hover:bg-ink enabled:hover:text-paper disabled:border-hairline disabled:text-muted"
+                  className="press rounded-pill border border-ink px-6 py-2 text-small enabled:hover:bg-ink enabled:hover:text-paper disabled:border-hairline disabled:text-muted"
                   disabled={page.data.next_cursor === null}
                   onClick={() => {
                     turn(page.data.next_cursor)
@@ -266,7 +279,7 @@ function ModeButton({
       type="button"
       role="radio"
       aria-checked={chosen}
-      className={`rounded-pill border px-5 py-2 text-small transition-colors duration-800 ease-slow ${
+      className={`press rounded-pill border px-5 py-2 text-small ${
         chosen
           ? 'border-ink bg-ink text-paper'
           : `${option === 'skills' ? 'border-dashed' : ''} border-hairline hover:border-ink`
@@ -288,8 +301,8 @@ function ModeButton({
 function ModeScore({ item, mode }: { item: VacancyListItem; mode: MatchMode }) {
   return (
     <div className="text-right">
-      <div className="tnum text-heading font-semibold leading-none">
-        {formatScore(item.mode_score)}
+      <div className="text-heading font-semibold leading-none">
+        <Counted value={scoreNumber(item.mode_score)} format={wholeNumber} />
       </div>
       <div className="mt-1 text-micro uppercase text-muted">
         {mode === 'skills' && item.mode_score === null ? 'требований нет · ' : ''}
@@ -468,14 +481,30 @@ function NumberField({
   )
 }
 
+/** Rows past this many arrive without an entrance: they are below the fold. */
+const CASCADE_ROWS = 16
+
 /**
  * One row. The whole row opens the card; the original posting is a second,
  * separate link, so the row is a block with a stretched link rather than an
  * anchor — an anchor inside an anchor is not valid HTML and browsers split it.
+ *
+ * The inner 16px (four steps of the system's 4px unit) is what keeps the hover
+ * fill off the text: without it the inverted band ran edge to edge and the
+ * title and the score sat on its border.
+ *
+ * The entrance is decided once, at mount, by the place the row arrived at: a
+ * row that was already on screen and only moved keeps still and is slid by
+ * `useReorder` instead of fading in a second time.
  */
-function Row({ item, mode }: { item: VacancyListItem; mode: MatchMode }) {
+function Row({ item, mode, index }: { item: VacancyListItem; mode: MatchMode; index: number }) {
+  const [arrival] = useState(() => (index < CASCADE_ROWS ? index : null))
   return (
-    <div className="relative grid grid-cols-1 items-baseline gap-2 border-b border-hairline py-5 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper sm:grid-cols-[1fr_auto]">
+    <div
+      data-flip={item.id}
+      style={arrival === null ? undefined : cascade(arrival)}
+      className={`${arrival === null ? '' : 'enter'} relative grid grid-cols-1 items-baseline gap-2 border-b border-hairline px-4 py-5 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper sm:grid-cols-[1fr_auto]`}
+    >
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-3">
           <a

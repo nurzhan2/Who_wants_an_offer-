@@ -105,12 +105,12 @@ export function ResumeUpload() {
       />
       <div className="mt-4 flex flex-wrap items-center gap-4">
         <Button
-          disabled={upload.isPending || status === 'pending'}
+          busy={upload.isPending ? 'Загружаем…' : status === 'pending' ? 'Разбирается…' : false}
           onClick={() => {
             input.current?.click()
           }}
         >
-          {upload.isPending ? 'Загружаем…' : status === 'pending' ? 'Разбирается…' : 'Загрузить резюме'}
+          Загрузить резюме
         </Button>
         {status === 'pending' ? (
           <span className="text-small" role="status" aria-live="polite">

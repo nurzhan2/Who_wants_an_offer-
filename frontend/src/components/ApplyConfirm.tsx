@@ -262,16 +262,16 @@ function Confirmable({
             </p>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button
-                disabled={sending || start.isPending}
+                busy={sending ? 'Отправка идёт…' : start.isPending ? 'Запускаем…' : false}
                 onClick={() => {
                   start.mutate('send')
                 }}
               >
-                {sending ? 'Отправка идёт…' : 'Отправить подтверждённые сейчас'}
+                Отправить подтверждённые сейчас
               </Button>
               <Button
                 outline
-                disabled={withdraw.isPending}
+                busy={withdraw.isPending ? 'Отзываем…' : false}
                 onClick={() => {
                   withdraw.mutate()
                 }}
@@ -308,12 +308,14 @@ function Confirmable({
             </label>
             <div className="mt-4 flex flex-wrap gap-3">
               <Button
-                disabled={!read || confirm.isPending}
+                disabled={!read}
+                busy={confirm.isPending ? 'Записываем…' : false}
+                title={read ? undefined : 'Сначала отметьте, что прочитали карточку и письмо'}
                 onClick={() => {
                   confirm.mutate(digest)
                 }}
               >
-                {confirm.isPending ? 'Записываем…' : 'Подтвердить отклик'}
+                Подтвердить отклик
               </Button>
             </div>
             {confirm.isError ? (

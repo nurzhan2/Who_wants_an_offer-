@@ -32,7 +32,7 @@ import type { CrawlPosition, Overview as OverviewData, SourceRunState } from '@/
 export function Overview({ query }: { query: UseQueryResult<OverviewData> }) {
   const { data, isPending, isError, error, refetch } = query
 
-  if (isPending) return <Loading what="обзор" />
+  if (isPending) return <Loading what="обзор" shape="overview" />
   if (isError) {
     return (
       <Failure
@@ -106,9 +106,9 @@ function Corpus({ data }: { data: OverviewData }) {
       note="Сколько постингов собрано и какая часть из них пригодна для семантического сравнения. Разрыв между «в базе» и «оценено» — это очередь скоринга, а не потеря."
     >
       <Stats>
-        <Stat value={count(vacancies.total)} label="вакансий в базе" note={`активных ${count(vacancies.active)}`} />
+        <Stat value={vacancies.total} label="вакансий в базе" note={`активных ${count(vacancies.active)}`} />
         <Stat
-          value={count(vacancies.embedded)}
+          value={vacancies.embedded}
           label="с эмбеддингами"
           note={
             vacancies.needs_embedding > 0
@@ -116,8 +116,8 @@ function Corpus({ data }: { data: OverviewData }) {
               : 'весь корпус векторизован'
           }
         />
-        <Stat value={count(vacancies.scored)} label="посчитанных match" note="для активного резюме" />
-        <Stat value={count(vacancies.skill_rows)} label="строк навыков" note="то, из чего считается покрытие" />
+        <Stat value={vacancies.scored} label="посчитанных match" note="для активного резюме" />
+        <Stat value={vacancies.skill_rows} label="строк навыков" note="то, из чего считается покрытие" />
       </Stats>
     </Section>
   )
@@ -277,12 +277,12 @@ function HarvestPanel({ data }: { data: OverviewData }) {
             {dateTime(harvest.since)}
             {harvest.items.length < harvest.total ? `, показано ${count(harvest.items.length)}` : ''}
           </p>
-          <div className="border-t border-hairline">
+          <div className="rise-list border-t border-hairline">
             {harvest.items.map((item) => (
               <a
                 key={item.id}
                 href={href('vacancies', item.id)}
-                className="flex items-baseline justify-between gap-6 border-b border-hairline py-3 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper"
+                className="flex items-baseline justify-between gap-6 border-b border-hairline px-4 py-3 transition-colors duration-800 ease-slow hover:bg-ink hover:text-paper"
               >
                 <span className="min-w-0">
                   <span className="block truncate font-semibold">{item.title}</span>
@@ -309,7 +309,7 @@ function Applications({ data }: { data: OverviewData }) {
     >
       <Stats>
         <Stat
-          value={count(applications.sent_confirmed)}
+          value={applications.sent_confirmed}
           label="отправлено, hh подтвердил"
           note={
             applications.sent > applications.sent_confirmed
@@ -317,14 +317,14 @@ function Applications({ data }: { data: OverviewData }) {
               : null
           }
         />
-        <Stat value={count(applications.queued)} label="в очереди" note="письмо есть, ждёт подтверждения" />
+        <Stat value={applications.queued} label="в очереди" note="письмо есть, ждёт подтверждения" />
         <Stat
-          value={count(applications.needs_manual)}
+          value={applications.needs_manual}
           label="нужен человек"
           note="агент остановился и оставил причину"
         />
         <Stat
-          value={count(applications.answered)}
+          value={applications.answered}
           label="с ответом от hh"
           note={`писем написано ${count(applications.with_letter)}`}
         />
