@@ -4,6 +4,56 @@
 
 ---
 
+> **СТАТУС НА 24.09.2026: фаза не сделана, её половина откачена.**
+>
+> Коммит `fdf4656` («some frontend commits», 19.09) внёс 3491 строку этой фазы,
+> но не внёс то, откуда она импортирует. `pytest` из-за этого не мог собрать
+> вообще ничего: два модуля падали на импорте, и с ними вся сюита.
+>
+> Проверено по всей истории (`git log --all -S`), по всем ветками, по stash и по
+> висячим объектам (`git fsck`): недостающего кода **нет нигде**. Он не потерян,
+> он не был написан.
+>
+> Откачены четыре файла, которые не импортируются:
+> `backend/app/services/autopilot.py`, `backend/app/services/freshness.py`,
+> `backend/tests/test_autopilot.py`, `backend/tests/test_freshness.py`.
+> Достать их обратно: `git show fdf4656:<путь>`.
+>
+> **Осталось лежать** и компилируется, но никем не вызывается:
+> `backend/app/schemas/autopilot.py` (`SetAsideKind`, `SetAsideItem`, `BatchPlan`
+> и остальное — это готовая половина контракта), `wwao/chain.py` (HTTP-клиент к
+> эндпоинту, которого нет), `frontend/src/components/SendAll.tsx`,
+> `frontend/src/hooks/useBatch.ts`, `frontend/src/types/autopilot.ts`.
+>
+> **Что надо дописать, чтобы 38 тестов из того коммита прошли** (контракты
+> вынуты из самих тестов, они и есть спецификация):
+>
+> | что | куда | форма |
+> |---|---|---|
+> | `PostingState` | `app/sources/base.py` | модель с `source_slug`, `external_id`, `archived`, `gone`, `closed_for_applicants`, `open_for_applications`, `checked_at` |
+> | `BaseSource.recheck` | `app/sources/base.py` | `(url, external_id) -> PostingState \| None`, необязательный хук; источник, который не умеет, считается в `unsupported` |
+> | `ChainStepStatus` | `app/schemas/operations.py` | `PENDING / RUNNING / DONE / FAILED / SKIPPED` |
+> | `ChainStep` | `app/schemas/operations.py` | `key`, `title`, `status`, `note`, `report`, `started_at`, `finished_at` |
+> | `agent_queue.triage` | `app/services/agent_queue.py` | **новая функция**, не переименование `build_queue`: возвращает `.ready` и `.set_aside` |
+> | четыре поля `Settings` | `app/core/config.py` | `autopilot_daily_at` (время суток), `agent_batch_limit`, `agent_first_batch_limit`, `agent_quiet_period_days` |
+>
+> Плюс запись в `[tool.ruff.lint.per-file-ignores]` для `autopilot.py`
+> (`RUF001`/`RUF002`, как у всех модулей с русским текстом для человека).
+>
+> **Главное для того, кто возьмётся.** Тяжёлое здесь — не схемы и не поля
+> конфига, а `triage`: именно на нём держится весь довод безопасности этой фазы.
+> Одно подтверждение на пачку вместо подтверждения на каждую вакансию безопасно
+> ровно настолько, насколько отбор заменяет человеческий взгляд на карточку —
+> score, бакет, источник, разрыв по опыту, требование языка, правила
+> мастерской, ATS-аудит и перечитывание страницы вакансии. Это не патч, это
+> размер фазы.
+>
+> И даже зелёная, фаза не заработает: её ничто не вызывает. Нет роутера в
+> `app/api/v1/`, нет подкоманды `chain` в `wwao/cli.py`, `SendAll.tsx` не
+> смонтирован ни на одной странице. Подключение — часть работы.
+
+---
+
 ```
 Прочитай CLAUDE.md, agent/run.py, agent/prefilter.py,
 backend/app/services/agent_queue.py, backend/app/letters/channel.py,
