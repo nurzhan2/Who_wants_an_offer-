@@ -171,9 +171,10 @@ for a posting with no salary — the check has to be for the key.
 import html as html_lib
 import json
 import re
+import time
 from bisect import bisect_left, bisect_right
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -193,7 +194,16 @@ from pydantic import (
 from app.core.exceptions import SourceError
 from app.core.logging import get_logger
 from app.db.enums import RemoteType, SalaryPeriod
-from app.schemas.crawl import CrawlPosition, SavedState, SearchPreview, SearchUse
+from app.schemas.crawl import (
+    CrawlChallenge,
+    CrawlCityRun,
+    CrawlPosition,
+    CrawlRunSummary,
+    CrawlStop,
+    SavedState,
+    SearchPreview,
+    SearchUse,
+)
 from app.sources.base import (
     PREVIEW_TERMS,
     AccessMode,
@@ -313,6 +323,25 @@ MAX_MARKUP_FAILURES = 3
 #: full pass over a city's fourteen thousand pages completes over about a dozen
 #: runs. What a run could not reach is logged, never silently dropped.
 MAX_PAGES_PER_RUN = 1200
+
+#: How much longer than the pause the night must have left for a pause to be
+#: worth taking. Two, so a forty-minute wait needs eighty minutes of night: a
+#: pause that fits exactly buys a resumed crawl with no time to crawl in, and
+#: the run would report a recovery that collected nothing.
+PAUSE_HEADROOM = 2.0
+
+#: How much slower than the declared rate a crawl returns after a pause, as a
+#: multiplier on the interval. Two, so 0.25 requests a second becomes 0.125 —
+#: half the pressure that was refused, not a tenth of it. A number rather than a
+#: measurement, and named as a guess: the only rate we know hh tolerates is the
+#: one it did tolerate, and the honest move after being refused is to go under
+#: it rather than to guess a new frontier. See ``_pause_for_challenge``.
+PAUSE_SLOWDOWN = 2.0
+
+#: Where one run's own summary is stored, for the morning after. One row, not
+#: one per city: it describes a run, and the per-file positions beside it are
+#: already keyed per file.
+RUN_KEY = "run:last"
 
 #: Catalogue pages one run opens per site, before it starts on vacancies.
 #:
@@ -1098,25 +1127,139 @@ def load_sites(path: Path | None = None) -> tuple[HHSite, ...]:
         ) from exc
 
 
+class CrawlCity(BaseModel):
+    """One host a run walks, and its share of that run's budget.
+
+    ``share`` is a weight rather than a percentage: the run divides what it has
+    in these proportions, so adding a fourth city does not mean editing the
+    other three. A host named here that no ``sites`` entry describes is a
+    misspelling, and :func:`load_crawl` says so rather than walking three cities
+    when the owner asked for four.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    host: str = Field(min_length=1, max_length=100)
+    share: float = Field(default=1.0, gt=0)
+
+
+class CrawlSettings(BaseModel):
+    """The ``crawl:`` block of ``hh_sites.yaml``: how long one run may go, and where.
+
+    **Every field defaults to today's behaviour**, which is the property the
+    night work is allowed to change nothing by. An empty block, or no block at
+    all, gives a run bounded by :data:`MAX_PAGES_PER_RUN` alone, walking the
+    cities the plan's area names — exactly what ran before this existed.
+
+    In ``hh_sites.yaml`` rather than in ``app/core/config.py`` for the reason
+    the site list is: CLAUDE.md rule 5 keeps a source's settings inside
+    ``sources/``. It is also the honest place for them — the budget and the city
+    rotation are one decision with the city list, not three.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    #: Wall-clock ceiling for one run, in minutes. ``None`` is no ceiling, and
+    #: the page budget alone stops the run. This is what a night run sets: the
+    #: owner knows how many hours the machine is theirs and does not know how
+    #: many pages that is, because the answer depends on how many of them 404.
+    minutes: float | None = Field(default=None, gt=0)
+
+    #: Vacancy pages one run may fetch. ``None`` means :data:`MAX_PAGES_PER_RUN`
+    #: — resolved at the point of use rather than defaulted here, so a test that
+    #: monkeypatches the module constant still changes the answer.
+    pages: int | None = Field(default=None, gt=0)
+
+    #: How long to wait out a check for robots before returning to hh once, in
+    #: minutes. ``None`` keeps today's behaviour: the challenge ends the run.
+    #: See :meth:`HHSource._pause_for_challenge` for what this does and, more
+    #: importantly, for the line it does not cross.
+    pause_minutes: float | None = Field(default=None, gt=0)
+
+    #: Hosts to walk each run, in order, each with its share. Empty means the
+    #: cities the plan's area names, or the ``default: true`` ones, at an equal
+    #: share each — which is what ``sites_for`` did before this field existed.
+    cities: tuple[CrawlCity, ...] = ()
+
+
+def load_crawl(path: Path | None = None, *, sites: Sequence[HHSite] | None = None) -> CrawlSettings:
+    """The ``crawl:`` block, read from the same file as the sites.
+
+    ``sites`` is taken as an argument rather than read here so that the check
+    below is against the very list the run will walk, and not against a second
+    read of the file that could disagree with it.
+    """
+    path = path or SITES_FILE
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise SourceError(
+            f"hh: не читается {path.name} с настройками обхода: {exc}", source_slug="hh"
+        ) from exc
+    try:
+        # Named config, not settings: everywhere else in this project
+        # that word is app.core.config.settings, and a local one of those
+        # inside a source module is the reading somebody will make.
+        config = CrawlSettings.model_validate(raw.get("crawl") or {})
+    except ValidationError as exc:
+        raise SourceError(
+            f"hh: {path.name} не описывает настройки обхода: {exc.errors()}", source_slug="hh"
+        ) from exc
+    if sites is not None:
+        known = {site.host for site in sites}
+        unknown = [city.host for city in config.cities if city.host not in known]
+        if unknown:
+            # Loud rather than skipped. A host in ``crawl.cities`` that no
+            # ``sites`` entry describes is a typo, and a typo that silently
+            # drops a city produces a night of crawling that reports success and
+            # covers three quarters of what was asked for.
+            raise SourceError(
+                f"hh: {path.name}: crawl.cities называет города, которых нет в sites: "
+                f"{', '.join(unknown)}",
+                source_slug="hh",
+            )
+    return config
+
+
 @dataclass(slots=True)
 class CrawlBudget:
-    """Requests one run may still spend, shared across every site it walks.
+    """What one run may still spend, shared across every site it walks.
 
-    A plain counter rather than a per-site allowance, because the interesting
-    question is what the whole run cost hh and not how it was divided. Passed
-    down and mutated: an async generator cannot hand a number back to its
+    Two limits, and a run stops at whichever it reaches first. ``remaining`` is
+    requests: a plain counter rather than a per-site allowance, because the
+    interesting question is what the whole run cost hh and not how it was
+    divided. ``deadline`` is a monotonic instant, and it is the one a night run
+    actually sets — the owner knows the machine is theirs until seven, and does
+    not know how many pages that is, because the answer depends on how many of
+    the pages walked turn out to be 404s that cost a request and store nothing.
+
+    ``deadline`` is ``None`` by default, which is the whole of the compatibility
+    promise: a budget nobody gave a clock to behaves exactly as this class did
+    when it only had a counter.
+
+    Passed down and mutated: an async generator cannot hand a number back to its
     caller, and threading the count through the yields — which the first draft
     of this file did — produces a budget that silently stops applying.
+
+    The clock is injected for the reason every other clock in this project is:
+    a limit that can only be tested by waiting eight hours is a limit nobody
+    tests. It is ``time.monotonic`` and not the wall clock, which has one
+    consequence worth stating: on a laptop that suspends, the suspended hours
+    are spent (Windows' monotonic counts them). That is the safe direction — a
+    run that was given until seven ends at seven rather than crawling into the
+    owner's morning.
     """
 
     remaining: int
+    deadline: float | None = None
+    clock: Callable[[], float] = field(default=time.monotonic)
 
     def spend(self, requests: int = 1) -> None:
         """Record requests that have been sent."""
         self.remaining -= requests
 
     def exhausted(self) -> bool:
-        """Whether this run has spent what it was allowed.
+        """Whether this run has spent what it was allowed, in pages or in time.
 
         A method rather than a property, and not for taste: mypy narrows an
         attribute expression and keeps the narrowing across method calls, so
@@ -1124,7 +1267,21 @@ class CrawlBudget:
         below was typed as always-False and ``warn_unreachable`` failed the
         build on a branch that runs on every truncated crawl.
         """
-        return self.remaining <= 0
+        if self.remaining <= 0:
+            return True
+        return self.deadline is not None and self.clock() >= self.deadline
+
+    def seconds_left(self) -> float | None:
+        """Time to the deadline, or ``None`` when there is not one.
+
+        For the log line and the run summary. A run that stopped because it ran
+        out of pages and a run that stopped because it ran out of night are the
+        same shape in the database and completely different decisions for the
+        owner: the first wants a bigger page budget, the second wants nothing.
+        """
+        if self.deadline is None:
+            return None
+        return self.deadline - self.clock()
 
 
 @dataclass(slots=True)
@@ -1153,6 +1310,108 @@ class _SiteRun:
     #: profile asked for. Together with ``fetched`` this is the number the whole
     #: catalogue path exists to move: relevant postings per request spent.
     role_hits: int = 0
+
+
+@dataclass(slots=True)
+class _RunLog:
+    """What this run has done so far, in the shape the morning after wants.
+
+    Separate from :class:`_SiteRun`, which is one city's tally for one log line
+    and is thrown away. This outlives the walk: it is written to
+    ``source_state`` at the end, and after an eight-hour run the terminal that
+    printed the log lines has usually been closed.
+
+    Seeded with every city the run planned to walk, so a city the run never
+    reached is a row of zeros rather than an absence — "we did not get there" is
+    the answer to «где остановились», and a missing row is not an answer.
+    """
+
+    started_at: datetime
+    pages: int
+    minutes: float | None
+    per_city: dict[str, CrawlCityRun] = field(default_factory=dict)
+    challenges: list[CrawlChallenge] = field(default_factory=list)
+    paused_seconds: float = 0.0
+    stopped_by: CrawlStop = CrawlStop.CORPUS
+
+    @classmethod
+    def opening(
+        cls, sites: Sequence[HHSite], *, pages: int, minutes: float | None, now: datetime
+    ) -> "_RunLog":
+        """A log for a run about to walk these sites."""
+        return cls(
+            started_at=now,
+            pages=pages,
+            minutes=minutes,
+            per_city={site.host: CrawlCityRun(scope=site.host, title=site.city) for site in sites},
+        )
+
+    def _city(self, site: HHSite) -> CrawlCityRun:
+        """This city's row, created if the run reached a site nobody planned."""
+        row = self.per_city.get(site.host)
+        if row is None:
+            row = CrawlCityRun(scope=site.host, title=site.city)
+            self.per_city[site.host] = row
+        return row
+
+    def absorb(self, site: HHSite, state: "_SiteRun", outstanding: int) -> None:
+        """Fold one city's walk into the run, whether it ended well or not.
+
+        Called from a ``finally``, which is the point: a city stopped by a check
+        for robots is exactly the city the report is read for, and it is the one
+        whose ``site_finished`` log line never happens.
+        """
+        row = self._city(site)
+        row.fetched += state.fetched
+        row.stored += state.stored
+        row.role_hits += state.role_hits
+        row.outstanding = outstanding
+
+    def challenged(self, site: HHSite, *, resumed: bool) -> None:
+        """Record that hh asked this host for a human, and what we did next.
+
+        Only a challenge the run did NOT come back from decides the ending. A
+        run that waited one out and then crawled until morning was ended by the
+        morning, and reporting it as ended by the captcha would send the owner
+        to change a setting that worked — while the challenge itself is still on
+        the list below, where it belongs.
+        """
+        self.challenges.append(
+            CrawlChallenge(
+                scope=site.host,
+                title=site.city,
+                at=datetime.now(UTC),
+                after_pages=self.fetched,
+                resumed=resumed,
+            )
+        )
+        if not resumed:
+            self.stopped_by = CrawlStop.CHALLENGE
+
+    def finished_city(self, site: HHSite) -> None:
+        """This city got through its share rather than being cut short in it."""
+        self._city(site).finished = True
+
+    @property
+    def fetched(self) -> int:
+        """Pages bought so far, across every city."""
+        return sum(city.fetched for city in self.per_city.values())
+
+    def summary(self, *, now: datetime) -> CrawlRunSummary:
+        """The run, ready to be stored and read back."""
+        cities = list(self.per_city.values())
+        return CrawlRunSummary(
+            started_at=self.started_at,
+            finished_at=now,
+            pages=self.pages,
+            minutes=self.minutes,
+            fetched=sum(city.fetched for city in cities),
+            stored=sum(city.stored for city in cities),
+            stopped_by=self.stopped_by,
+            cities=cities,
+            challenges=self.challenges,
+            paused_seconds=self.paused_seconds,
+        )
 
 
 @dataclass(slots=True)
@@ -1271,6 +1530,16 @@ class HHSource(BaseSource):
         #: Each host's sitemap index, kept for the run so that the vacancy files
         #: and the catalogue files are read out of one request rather than two.
         self._index: dict[str, str] = {}
+        #: The ``crawl:`` block, read from the same file as the sites.
+        self._crawl: CrawlSettings | None = None
+        #: This run's summary as it accumulates. ``None`` until a walk starts,
+        #: because a connector that has not run has nothing to say about a run.
+        self._run: _RunLog | None = None
+        #: Postings this run has yielded, across every city. The number
+        #: ``_Held.after`` is written in and ``record_progress`` is compared
+        #: against, so it has to count the same thing the pipeline counts: the
+        #: whole stream, not one site's share of it.
+        self._yielded = 0
 
     @property
     def sites(self) -> tuple[HHSite, ...]:
@@ -1278,6 +1547,19 @@ class HHSource(BaseSource):
         if self._sites is None:
             self._sites = load_sites()
         return self._sites
+
+    @property
+    def crawl(self) -> CrawlSettings:
+        """How long a run may go and where, read from the file once per instance.
+
+        Reads ``self.sites`` first, deliberately: ``load_crawl`` checks the
+        city list against the sites, and a misspelled host has to be an error
+        raised where the run starts rather than a city quietly missing from
+        the report eight hours later.
+        """
+        if self._crawl is None:
+            self._crawl = load_crawl(sites=self.sites)
+        return self._crawl
 
     @property
     def families(self) -> tuple[RoleFamily, ...]:
@@ -1297,7 +1579,31 @@ class HHSource(BaseSource):
         than reading nothing at all.
         """
         wanted = [site for site in self.sites if any(site.matches(q.area) for q in queries)]
-        return tuple(wanted) if wanted else tuple(site for site in self.sites if site.default)
+        rotation = self.crawl.cities
+        if not rotation:
+            return tuple(wanted) if wanted else tuple(site for site in self.sites if site.default)
+
+        # An explicit rotation is the owner saying which cities a run walks, and
+        # it replaces the area match rather than adding to it. That is the point
+        # of writing one: the resume says Almaty and the corpus of Almaty is
+        # 14 000 pages, so without this the other three cities in the file are
+        # never read, however many nights the machine is left running.
+        #
+        # It is not a quiet override. A plan naming a city the rotation
+        # leaves out is logged, because "I live in Karaganda and the crawl
+        # never opens it" has to be findable from the outside — and the fix is
+        # one line of ``hh_sites.yaml``, not a support session.
+        by_host = {site.host: site for site in self.sites}
+        chosen = tuple(by_host[city.host] for city in rotation if city.host in by_host)
+        missed = [site.city for site in wanted if site not in chosen]
+        if missed:
+            logger.warning(
+                "sources.hh.area_outside_rotation",
+                area=missed,
+                rotation=[site.city for site in chosen],
+                detail="crawl.cities decides which cities a run walks; the plan's area does not",
+            )
+        return chosen
 
     # ── fetching ──────────────────────────────────────────────────────
 
@@ -1369,33 +1675,266 @@ class HHSource(BaseSource):
                 keywords=len(keywords),
             )
 
-        budget = CrawlBudget(remaining=MAX_PAGES_PER_RUN)
-        # Every city gets an equal share. One shared counter walked in order
-        # would mean the first city in the file takes the whole budget for as
-        # long as its backfill lasts — about a dozen runs — while the others
-        # report a clean, successful, empty crawl.
+        config = self.crawl
+        pages = config.pages if config.pages is not None else MAX_PAGES_PER_RUN
+        clock = self.http.clock
+        started = clock()
+        minutes = config.minutes
+        deadline = None if minutes is None else started + minutes * 60.0
+        budget = CrawlBudget(remaining=pages, deadline=deadline, clock=clock)
+        run = _RunLog.opening(sites, pages=pages, minutes=minutes, now=datetime.now(UTC))
+        self._run = run
+        # Reset, because the registry keeps one instance per slug for the life
+        # of the process: without this the second run of the day would start
+        # counting from where the first stopped, and every entry it held would
+        # be confirmed by the first ``record_progress`` it saw.
+        self._yielded = 0
+        if minutes is not None:
+            # The arithmetic stated once, where somebody can see it disagree
+            # with itself. At 0.25 requests a second a minute buys fifteen
+            # pages, so a page budget under what the night can reach is the
+            # limit that will actually stop the run — and an owner who set
+            # ``minutes: 480`` and left ``pages`` alone would get ninety minutes
+            # of crawling and a report that says the night went fine.
+            reachable = int(minutes * 60.0 * self.rate_limit.requests_per_second)
+            if pages < reachable:
+                logger.warning(
+                    "sources.hh.page_budget_binds",
+                    pages=pages,
+                    minutes=minutes,
+                    reachable=reachable,
+                    detail="crawl.pages stops this run long before crawl.minutes does",
+                )
+
+        # Every city gets its share, and the shares are the config's. One shared
+        # counter walked in order would mean the first city in the file takes
+        # the whole budget for as long as its backfill lasts — about a dozen
+        # runs — while the others report a clean, successful, empty crawl.
         #
         # What a city does not spend is NOT handed to another one inside the
         # same run. Doing that means walking a site twice, and the second walk
         # re-reads its index and every sitemap and re-buys its head slice, which
         # records no position by design. The unspent budget is not lost; the
         # next run spends it, starting where this one stopped.
-        share = max(1, MAX_PAGES_PER_RUN // len(sites))
-        for site in sites:
-            async for posting in self._crawl_site(
-                site,
-                budget,
-                allowance=share,
-                keywords=keywords,
-                families=families,
-                headline=headline,
-            ):
-                yield posting
+        #
+        # **A pause is the one thing that re-slices.** Waiting out a check for
+        # robots spends wall-clock and no pages, so the cities after the pause
+        # would otherwise hold deadlines already in the past and be skipped
+        # without ever being asked for — a captcha at the second hour would then
+        # cost the remaining cities their whole night, which is the failure this
+        # is here to end rather than to relocate.
+        pending = self._slices(sites, config, budget)
+        paused = False
+        # The outer guard exists for the night this was written for: a laptop
+        # that sleeps, a lid that closes, a router that reboots. All three reach
+        # this frame as a request that never came back, and a run that fell over
+        # at the seventh hour has to leave a summary saying so — otherwise the
+        # morning after an interrupted night reads exactly like the morning
+        # after a night that never started. The positions are safe either way;
+        # they are written as the pipeline confirms each batch.
+        try:
+            while pending:
+                site, allowance, until = pending[0]
+                try:
+                    async for posting in self._crawl_site(
+                        site,
+                        budget,
+                        allowance=allowance,
+                        until=until,
+                        keywords=keywords,
+                        families=families,
+                        headline=headline,
+                    ):
+                        yield posting
+                except HHChallengedError:
+                    may_pause = not paused and self._may_pause(config, budget)
+                    run.challenged(site, resumed=may_pause)
+                    if not may_pause:
+                        raise
+                    paused = True
+                    await self._pause_for_challenge(site, config, budget, run)
+                    # The challenged host keeps its place at the head: the walk
+                    # is resumed, not abandoned, and the entry hh refused was
+                    # never recorded, so it is simply due again.
+                    pending = self._slices([held[0] for held in pending], config, budget)
+                    continue
+                run.finished_city(site)
+                pending.pop(0)
+        except Exception:
+            if run.stopped_by is not CrawlStop.CHALLENGE:
+                run.stopped_by = CrawlStop.INTERRUPTED
+            await self._save_run(run)
+            raise
         # No tail flush any more. The walk records nothing on its own: every
         # entry it finishes waits on ``self._held`` until the pipeline confirms
         # the posting is written, and the pipeline confirms after its last write
         # too — so a drained file's remainder is recorded by that confirmation
         # rather than by a hand-off window this generator had to open for it.
+        #
+        # Why the ending is worked out here rather than inferred from the
+        # counters by whoever reads the row: "the run stopped with work left"
+        # and "the run stopped because the night ended" are the same two numbers
+        # and opposite answers, and only this frame knows which limit bit.
+        if run.stopped_by is not CrawlStop.CHALLENGE:
+            if budget.remaining <= 0:
+                run.stopped_by = CrawlStop.PAGES
+            elif budget.exhausted():
+                run.stopped_by = CrawlStop.TIME
+            else:
+                run.stopped_by = CrawlStop.CORPUS
+        await self._save_run(run)
+
+    def _slices(
+        self, sites: Sequence[HHSite], config: CrawlSettings, budget: CrawlBudget
+    ) -> list[tuple[HHSite, int, float | None]]:
+        """Divide what is left of the run between the sites still to walk.
+
+        Pages by weight, time by weight, and the time slices laid end to end
+        from now — because the sites are walked one after another and a deadline
+        each city could reach at the same moment would mean the first city could
+        use the whole night.
+
+        Called again after a pause, over the sites that are left, which is what
+        keeps the pause from being paid for by the cities at the back.
+        """
+        weights = {city.host: city.share for city in config.cities}
+        shares = [weights.get(site.host, 1.0) for site in sites]
+        total = sum(shares) or 1.0
+        seconds = budget.seconds_left()
+        now = budget.clock()
+        plan: list[tuple[HHSite, int, float | None]] = []
+        run = 0.0
+        for site, weight in zip(sites, shares, strict=True):
+            run += weight
+            # ``max(1, ...)`` for the same reason the equal split had it: a city
+            # whose share rounds to nothing would be walked with a budget of
+            # zero, which reads in the log as a city with no vacancies.
+            allowance = max(1, int(budget.remaining * weight / total))
+            until = None if seconds is None else now + seconds * (run / total)
+            plan.append((site, allowance, until))
+        return plan
+
+    def _may_pause(self, config: CrawlSettings, budget: CrawlBudget) -> bool:
+        """Whether waiting out this challenge could still buy anything.
+
+        Three conditions, and a pause needs all of them. It has to be configured
+        — the default is off, so today's behaviour is unchanged. There has to be
+        page budget left. And the wait has to fit inside the night with time to
+        spare: pausing for forty minutes when thirty remain is a run that sleeps
+        through its own deadline and reports a challenge it never returned from.
+        """
+        if config.pause_minutes is None or budget.remaining <= 0:
+            return False
+        left = budget.seconds_left()
+        if left is None:
+            # No deadline, so nothing bounds the wait and nothing says when to
+            # give up. A pause without a ceiling is a crawler that sits on a
+            # host that refused it for as long as the process lives, and that is
+            # not restraint, it is just a slower kind of insistence.
+            return False
+        return left > config.pause_minutes * 60.0 * PAUSE_HEADROOM
+
+    async def _pause_for_challenge(
+        self, site: HHSite, config: CrawlSettings, budget: CrawlBudget, run: "_RunLog"
+    ) -> None:
+        """Wait out one check for robots, then return to hh slower than before.
+
+        **This is the one part of the night work that had to be argued rather
+        than measured, so the argument is here in full.**
+
+        What hh sent is not a 429 with a ``Retry-After``. It is a page asking a
+        human to prove they are one, and retrying it without answering is not
+        obeying it. That is the case against doing this at all, and it is a real
+        case. Against it stand the two measurements in ``rate_limit`` above:
+        0.73 requests a second was refused at the 172nd page, 1.02 at the 50th,
+        and 0.25 walked 961 pages over 88 minutes and was never asked anything.
+        The same crawler, the same robots.txt, the same absence of an account —
+        only the rate differed. What hh is enforcing at this boundary is a rate,
+        and the captcha is how their stack says so.
+
+        So the line this does not cross is drawn by three things, not by one:
+
+        * **The challenge is never answered.** No captcha is solved, read, or
+          sent anywhere. ``app/sources/http.py`` still refuses ``/account/*``
+          outright, so the page cannot even be fetched from here.
+        * **Nothing about the crawler changes.** Same user agent, same absence
+          of cookies and of an account, no proxy, no second host standing in for
+          the first. A pause that had to be paired with a new fingerprint would
+          be circumvention wearing a delay, and this is why the test suite
+          asserts that nothing here touches the client's identity.
+        * **The pressure only ever falls.** The return is at a lower rate than
+          the refusal, via :meth:`SourceHTTP.slow_to`, which can only slow a
+          source down. One return per run, and a second challenge ends the run
+          for good — because a second refusal at a lower rate is no longer hh
+          describing a rate, it is hh describing us, and there is nothing polite
+          left to read into it.
+
+        If a reader disagrees with that reading, the setting is the place to say
+        so: ``crawl.pause_minutes`` is absent by default and a deployment that
+        leaves it absent behaves exactly as this connector did before, stopping
+        at the first challenge. Nothing else in the night work depends on it.
+
+        One cost is not hidden. The pipeline holds an unwritten batch of at most
+        ``UPSERT_BATCH`` postings across this sleep, and a process killed during
+        the pause loses them. It loses nothing else and no position: those
+        entries are still on ``self._held``, unrecorded by design, so the next
+        run simply fetches them again.
+        """
+        seconds = (config.pause_minutes or 0.0) * 60.0
+        slower = PAUSE_SLOWDOWN / self.rate_limit.requests_per_second
+        logger.warning(
+            "sources.hh.pausing_after_challenge",
+            host=site.host,
+            minutes=config.pause_minutes,
+            resume_at_seconds_per_request=round(slower, 1),
+            seconds_left=round(budget.seconds_left() or 0.0),
+            detail="waiting out a robot check; the challenge is not answered, nothing is disguised",
+        )
+        await self.http.pause(seconds)
+        self.http.slow_to(slower)
+        run.paused_seconds += seconds
+        logger.info("sources.hh.resumed_after_challenge", host=site.host)
+
+    async def _save_run(self, run: "_RunLog") -> None:
+        """Store this run's summary for whoever reads it in the morning.
+
+        Quiet on failure, like :meth:`_save_census` and for the same reason: a
+        run that reached hh must not be reported as broken because the line
+        describing it could not be written. The positions this run recorded are
+        untouched either way — they are separate rows, written as the pipeline
+        confirms each batch — so what a failure here costs is the summary, not
+        the crawl.
+        """
+        try:
+            await self.state_set(
+                RUN_KEY, run.summary(now=datetime.now(UTC)).model_dump(mode="json")
+            )
+        except Exception as exc:
+            logger.warning(
+                "sources.hh.run_summary_not_recorded",
+                error=type(exc).__name__,
+                detail=str(exc),
+            )
+
+    def describe_last_run(self, stored: Sequence[SavedState]) -> CrawlRunSummary | None:
+        """The last run's summary, read back out of this connector's own rows.
+
+        The reading half of :meth:`_save_run`, and the same shape as
+        :meth:`describe_position`: the caller hands over the rows this source
+        wrote and takes back something it can render, so ``scripts/`` and the
+        API never learn this connector's key scheme (CLAUDE.md rule 5).
+        """
+        row = next((item for item in stored if item.key == RUN_KEY), None)
+        if row is None:
+            return None
+        try:
+            return CrawlRunSummary.model_validate(row.value)
+        except ValidationError as exc:
+            logger.warning(
+                "sources.hh.run_summary_unreadable",
+                errors=exc.errors(include_input=False, include_url=False)[:2],
+            )
+            return None
 
     async def search(self, query: SearchQuery) -> AsyncIterator[RawPosting]:
         """One query's worth of the same walk.
@@ -1413,6 +1952,7 @@ class HHSource(BaseSource):
         budget: CrawlBudget,
         *,
         allowance: int,
+        until: float | None = None,
         keywords: Sequence[str] = (),
         families: Sequence[RoleFamily] = (),
         headline: str | None = None,
@@ -1446,7 +1986,12 @@ class HHSource(BaseSource):
         same posting reached through two professions is one row, collapsed by the
         fingerprint the pipeline already computes.
         """
-        site_budget = CrawlBudget(remaining=min(allowance, budget.remaining))
+        # ``until`` bounds this city the way ``allowance`` does: the whole run's
+        # deadline still applies through ``budget``, and this one stops the city
+        # at the end of its own slice so the cities behind it get theirs.
+        site_budget = CrawlBudget(
+            remaining=min(allowance, budget.remaining), deadline=until, clock=budget.clock
+        )
 
         def spend() -> None:
             budget.spend()
@@ -1556,6 +2101,7 @@ class HHSource(BaseSource):
                 if posting is not None:
                     if self._in_wanted_roles(posting, catalog.role_ids):
                         state.role_hits += 1
+                    self._yielded += 1
                     yield posting
                 # ``after``, not ``before``: an entry that stored nothing is
                 # accounted for as soon as everything ahead of it is written, and
@@ -1564,13 +2110,38 @@ class HHSource(BaseSource):
                 # for another vacancy — is common in a corpus this size, and
                 # counting them by entry rather than by posting is what would
                 # push the position past unwritten work.
-                self._hold(site, name, entry, state.stored)
+                #
+                # The RUN's count, not this site's. It used to be
+                # ``state.stored``, which restarts at one when the walk moves to
+                # the second city, while ``record_progress`` is handed a count
+                # of the whole stream — so with more than one city the two
+                # numbers meant different things and were compared anyway.
+                #
+                # It was never observed to lose a posting, and the reason is
+                # worth writing down because it is not a reason to leave it: an
+                # entry is held only after the yield that produced it, so the
+                # confirmation that could have covered it early has already
+                # happened, and the next one arrives with everything written.
+                # That is a property of ``pipeline/runner.py``, not of this
+                # file, and ``BaseSource.record_progress`` says in as many words
+                # that the connector may not reason about what the caller
+                # counts. A number that is only safe because of how somebody
+                # else's loop happens to be ordered is one edit from being
+                # unsafe, and the edit would be invisible here.
+                self._hold(site, name, entry, self._yielded)
         except Exception:
             # Re-raised untouched; nothing here classifies it. The held entries
             # are not dropped: the pipeline rescues the batch it was holding and
             # confirms it while this unwinds, and that confirmation is what
             # records them.
             raise
+        finally:
+            # In a ``finally`` rather than beside the log line below, and the
+            # difference is the whole value of the morning summary: a city
+            # stopped by a check for robots never reaches ``_log_site``, and it
+            # is exactly the city somebody wants to read about at breakfast.
+            if self._run is not None:
+                self._run.absorb(site, state, outstanding)
 
         self._log_site(site, state, budget, outstanding, catalog)
 

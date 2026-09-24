@@ -93,3 +93,93 @@ class SearchPreview(BaseModel):
     more: int = Field(default=0, ge=0)
     #: One sentence a person can act on: a budget, a staleness, a caveat.
     note: str | None = None
+
+
+class CrawlStop(StrEnum):
+    """Why a run ended. Four different decisions for whoever reads it.
+
+    Stored as a token and rendered in Russian where it is shown, rather than
+    stored as the sentence: the value survives in ``source_state`` for as long
+    as the row does, and a wording change should not mean two spellings of the
+    same fact in one table.
+    """
+
+    #: Nothing left outstanding on any site the run walked. The good ending.
+    CORPUS = "corpus"
+    #: The wall-clock budget ran out. Expected, on a night run, and not a
+    #: problem: it says the night was the limit, which is what it was for.
+    TIME = "time"
+    #: The page budget ran out. On a timed run this usually means the two
+    #: settings disagree — see ``sources.hh.page_budget_binds``.
+    PAGES = "pages"
+    #: A check for robots ended it. The one ending that asks the owner to decide
+    #: something: crawl that host more slowly, or less often, or not tonight.
+    CHALLENGE = "challenge"
+    #: Something else ended it — the network went, the laptop slept, a module
+    #: broke. Its own value rather than folded into ``PAGES``, because a run
+    #: that spent its budget and a run that fell over look identical in the
+    #: counters and mean opposite things at breakfast.
+    INTERRUPTED = "interrupted"
+
+
+class CrawlChallenge(BaseModel):
+    """One check for robots, and what the run did about it."""
+
+    #: The host that answered with it.
+    scope: str
+    title: str | None = None
+    at: datetime
+    #: Pages the run had fetched by then. The number that says whether the rate
+    #: is the problem: 50 and 172 are the two this connector was built around.
+    after_pages: int = 0
+    #: Whether the run waited it out and came back, rather than ending there.
+    resumed: bool = False
+
+
+class CrawlCityRun(BaseModel):
+    """What one run did in one city."""
+
+    scope: str
+    title: str | None = None
+    fetched: int = 0
+    stored: int = 0
+    #: Postings carrying one of the professions the profile asked for. Against
+    #: ``fetched`` this is relevant postings per request spent.
+    role_hits: int = 0
+    #: Entries still not covered when the run read this city's sitemaps.
+    outstanding: int = 0
+    #: Whether the run got through this city's share or was cut short in it.
+    finished: bool = False
+
+
+class CrawlRunSummary(BaseModel):
+    """One run, in the shape a person reads over coffee.
+
+    Written by the connector into its own ``source_state`` and read back by it,
+    for the same reason :class:`CrawlPosition` is assembled there: the keys and
+    the meaning are the connector's, and rule 5 keeps both inside ``sources/``.
+
+    It is deliberately a *run* summary and not a corpus one. Where the walk has
+    got to is already answered, per file, by :class:`CrawlPosition`; what this
+    adds is the part that is gone by morning — how long the run had, what it
+    spent, and whether anything stopped it.
+    """
+
+    started_at: datetime
+    finished_at: datetime
+    #: Requests the run was allowed, and minutes, as configured.
+    pages: int
+    minutes: float | None = None
+    #: Pages actually fetched, across every city.
+    fetched: int = 0
+    stored: int = 0
+    stopped_by: CrawlStop = CrawlStop.CORPUS
+    cities: list[CrawlCityRun] = Field(default_factory=list)
+    challenges: list[CrawlChallenge] = Field(default_factory=list)
+    #: Seconds spent waiting out a challenge rather than crawling.
+    paused_seconds: float = 0.0
+
+    @property
+    def outstanding(self) -> int:
+        """Entries the run left uncovered across the cities it walked."""
+        return sum(city.outstanding for city in self.cities)

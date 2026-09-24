@@ -699,6 +699,39 @@ class SourceHTTP:
         self._bucket = TokenBucket(source.rate_limit, clock=client.clock, sleep=client.sleep)
         self._on_request = on_request
 
+    @property
+    def clock(self) -> Clock:
+        """The client's clock, so a connector's own deadlines use the injected one.
+
+        Exposed rather than left to ``time.monotonic`` at the call site: a
+        connector that measures a multi-hour budget against the real clock is a
+        budget no test can reach, and the whole point of the client owning a
+        clock is that the tests can move it.
+        """
+        return self._client.clock
+
+    async def pause(self, seconds: float) -> None:
+        """Wait, using the client's sleeper.
+
+        Present for one caller — the hh connector waiting out a check for robots
+        — and public because the alternative was that connector reaching for
+        ``asyncio.sleep`` directly, which would be a wait no test can skip.
+        """
+        if seconds > 0:
+            await self._client.sleep(seconds)
+
+    def slow_to(self, min_delay_seconds: float) -> None:
+        """Hold this source to at most one request per ``min_delay_seconds``, for good.
+
+        A one-way door by construction — :meth:`TokenBucket.widen` only ever
+        lowers the rate — and that is the property that makes it safe to expose.
+        There is no call that can speed a source up past the rate it declared,
+        so this cannot become the "не отключать rate limiting «чтобы быстрее»"
+        that CLAUDE.md forbids; it can only be used to go slower than we said we
+        would, which is what a host that has just refused us is owed.
+        """
+        self._bucket.widen(min_delay_seconds)
+
     async def get_json(
         self,
         url: str,

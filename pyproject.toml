@@ -97,6 +97,9 @@ known-first-party = ["app", "factories", "helpers"]
 # The Stage 0 catalogue probe prints its whole report in Russian, next to hh's
 # own latin slugs and URLs, so every second word mixes scripts and trips this.
 "scripts/probe_hh_roles.py" = ["RUF001", "RUF002"]
+# The morning crawl report is a screen of Russian printed next to hh's own
+# Latin hostnames and sitemap file names, so every other line mixes scripts.
+"scripts/crawl_report.py" = ["RUF001", "RUF002", "RUF003"]
 # A transliteration table IS a homoglyph table: every one of its 33 keys is a
 # Cyrillic letter that ruff correctly points out looks like a Latin one. The
 # protection RUF001 gives is restored as a test instead — see
@@ -184,6 +187,9 @@ known-first-party = ["app", "factories", "helpers"]
 "backend/app/sources/hh.py" = ["RUF001", "RUF002"]
 "backend/tests/test_sources_hh.py" = ["RUF001", "RUF002"]
 "backend/tests/test_hh_canary.py" = ["RUF001", "RUF002"]
+# The night-crawl tests serve Russian city names and hh's own Russian captcha
+# message next to Latin hostnames, which is what mixes the scripts.
+"backend/tests/test_hh_night.py" = ["RUF001", "RUF002", "RUF003"]
 "backend/app/sources/query_planner.py" = ["RUF001", "RUF002"]
 "backend/app/sources/remotive.py" = ["RUF001", "RUF002"]
 "backend/app/sources/arbeitnow.py" = ["RUF001", "RUF002"]

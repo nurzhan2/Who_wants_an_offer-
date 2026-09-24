@@ -32,7 +32,13 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validato
 from app.core.config import settings
 from app.db.enums import EmploymentType, RemoteType
 from app.schemas.common import CountryCode, LanguageCode
-from app.schemas.crawl import CrawlPosition, SavedState, SearchPreview, SearchUse
+from app.schemas.crawl import (
+    CrawlPosition,
+    CrawlRunSummary,
+    SavedState,
+    SearchPreview,
+    SearchUse,
+)
 from app.schemas.vacancy import MAX_POSTED_WITHIN_DAYS
 
 if TYPE_CHECKING:  # pragma: no cover - the runtime import would be a cycle
@@ -350,6 +356,21 @@ class BaseSource(ABC):
         to report.
         """
         return []
+
+    def describe_last_run(self, stored: Sequence[SavedState]) -> CrawlRunSummary | None:
+        """What this source's last run did, if it keeps such a record.
+
+        The companion of :meth:`describe_position`, and the same bargain: the
+        rows are the connector's own invention, so the connector is what reads
+        them back. Where ``describe_position`` answers "how far through the
+        corpus are we", this answers "what happened last night" — a question
+        that only has an answer for a source whose runs are long enough for
+        nobody to have watched them.
+
+        The default is "this source does not keep one". A bounded feed fetched
+        in twenty seconds has no night to report on.
+        """
+        return None
 
     async def record_progress(self, durable: int) -> None:
         """``durable`` postings from this stream are now written. Persist what that covers.

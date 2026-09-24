@@ -18,6 +18,7 @@ what holds them to it.
 
 import importlib.util
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
@@ -31,6 +32,13 @@ from app.matching.rules import UnstatedRequirement
 from app.matching.scorer import ScoringOutcome
 from app.normalize.description import skills_in_text
 from app.normalize.sync import SyncOutcome
+from app.schemas.crawl import (
+    CrawlChallenge,
+    CrawlCityRun,
+    CrawlPosition,
+    CrawlRunSummary,
+    CrawlStop,
+)
 from app.sources.hh_probe import (
     CatalogFile,
     CatalogIndex,
@@ -64,6 +72,7 @@ def _script(name: str) -> ModuleType:
 matching = _script("run_matching")
 backfill = _script("backfill_skills")
 hh_roles = _script("probe_hh_roles")
+crawl_report = _script("crawl_report")
 
 
 def _scored() -> ScoringOutcome:
@@ -397,3 +406,140 @@ def test_the_letters_source_option_is_a_scope_or_one_source() -> None:
     assert script.parse_source("all") == (SourceScope.ALL, None)
     assert script.parse_source("others") == (SourceScope.OTHERS, None)
     assert script.parse_source("remotive") == (SourceScope.ALL, "remotive")
+
+
+# -- the morning crawl report ------------------------------------------
+
+
+def _night() -> CrawlRunSummary:
+    """A night run, in the shape the connector stores one.
+
+    The numbers are the live ones where live ones exist: 961 vacancies in 88
+    minutes is the measured hh crawl of 06.09.2026, and the corpus figures are
+    what ``wwao report --files`` printed off the real database on 23.09.2026.
+    """
+    return CrawlRunSummary(
+        started_at=datetime(2026, 9, 22, 23, 0, tzinfo=UTC),
+        finished_at=datetime(2026, 9, 23, 7, 0, tzinfo=UTC),
+        pages=7500,
+        minutes=480,
+        fetched=5240,
+        stored=4102,
+        stopped_by=CrawlStop.TIME,
+        cities=[
+            CrawlCityRun(
+                scope="almaty.hh.kz",
+                title="Алматы",
+                fetched=3144,
+                stored=2470,
+                role_hits=812,
+                outstanding=12569,
+                finished=True,
+            ),
+            CrawlCityRun(
+                scope="astana.hh.kz", title="Астана", fetched=1048, stored=820, outstanding=3011
+            ),
+        ],
+        challenges=[
+            CrawlChallenge(
+                scope="almaty.hh.kz",
+                title="Алматы",
+                at=datetime(2026, 9, 23, 1, 44, tzinfo=UTC),
+                after_pages=1204,
+                resumed=True,
+            )
+        ],
+        paused_seconds=2700.0,
+    )
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        _night(),
+        # A run that ended the moment it started: no pages, no cities with
+        # anything in them, no challenge. The projection block must not divide
+        # by it, and the report must still print.
+        CrawlRunSummary(
+            started_at=datetime(2026, 9, 22, 23, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 9, 22, 23, 0, tzinfo=UTC),
+            pages=1200,
+            stopped_by=CrawlStop.CHALLENGE,
+        ),
+    ],
+    ids=["a-full-night", "a-run-that-died-at-once"],
+)
+def test_the_crawl_report_renders_over_every_shape(
+    summary: CrawlRunSummary, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Both endings print, and both stay inside the console's codepage."""
+    crawl_report.show_run(summary)
+
+    printed = capsys.readouterr().out
+    assert "остановились" in printed
+    printed.encode("cp1251")
+
+
+@pytest.mark.parametrize("stop", list(CrawlStop))
+def test_the_crawl_report_has_a_sentence_for_every_ending(stop: CrawlStop) -> None:
+    """A new ``CrawlStop`` value must not reach the screen as a bare token.
+
+    The report falls back to printing the token, so a missing entry is legible
+    rather than a crash — but legible-and-wrong is what this catches, because
+    nothing else would.
+    """
+    assert stop in crawl_report.STOPPED, f"{stop.value} has no Russian sentence in STOPPED"
+    crawl_report.STOPPED[stop].encode("cp1251")
+
+
+def test_the_crawl_report_projects_the_night_from_the_run_it_just_read(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The number the whole budget change was argued on, recomputed each time.
+
+    Read off this run rather than off the rate in the config, because a page
+    costs a request plus however long hh took to answer it — the measured 655
+    pages an hour against the 720-900 the rate alone implies.
+    """
+    crawl_report.show_run(_night())
+
+    printed = capsys.readouterr().out
+    assert "ЧТО ДАЁТ ДОЛГИЙ ПРОГОН" in printed
+    assert "8 часов" in printed
+    assert "90 минут" in printed
+    # 5240 pages over 8h less the 45-minute pause: about 720 an hour.
+    assert re.search(r"темп этого прогона: 7\d\d страниц в час", printed), printed
+    printed.encode("cp1251")
+
+
+def test_the_crawl_report_prints_the_position_table(capsys: pytest.CaptureFixture[str]) -> None:
+    """Including a file measured before the connector counted, which is None."""
+    crawl_report.show_files(
+        [
+            CrawlPosition(
+                scope="almaty.hh.kz",
+                label="vacancy0",
+                title="Алматы",
+                total=1418,
+                outstanding=1274,
+                stretches=33,
+                updated_at=datetime(2026, 9, 20, 0, 39, tzinfo=UTC),
+            ),
+            CrawlPosition(scope="astana.hh.kz", label="vacancy0", title="Астана"),
+        ]
+    )
+
+    printed = capsys.readouterr().out
+    assert "Алматы" in printed and "Астана" in printed
+    printed.encode("cp1251")
+
+
+def test_the_crawl_report_says_so_when_nothing_has_ever_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An empty database is an answer, and a blank screen is not."""
+    crawl_report.show([], files=False)
+
+    printed = capsys.readouterr().out
+    assert "wwao crawl" in printed, "tell the owner what to run, not just that there is nothing"
+    printed.encode("cp1251")

@@ -27,3 +27,60 @@ sites:
     city: Караганда
     country: KZ
     aliases: [караганда, karaganda, қарағанды]
+
+# How long one run goes, and which of the cities above it walks.
+#
+# Every value here is absent by default, and absent means exactly what the
+# connector did before this block existed: a run bounded by MAX_PAGES_PER_RUN
+# alone, walking the city the resume names — or the `default: true` ones when
+# it names none — and stopping for good at the first check for robots.
+#
+# The pace is NOT here and is not configurable. 0.25 requests a second is
+# measured, not chosen: at 0.73 hh stopped a live crawl at the 172nd vacancy
+# and at 1.02 at the 50th, while 0.25 walked 961 vacancies in 88 minutes and
+# was never asked anything. Going faster collects LESS, because the run dies
+# and the recorded position does not move. The way to collect more is to go
+# for longer, which is what `minutes` is for.
+crawl:
+  # Wall-clock ceiling for one run, in minutes. Absent: no ceiling, and
+  # `pages` alone stops the run. A night run sets this — the owner knows the
+  # machine is theirs until morning and does not know how many pages that is.
+  #   minutes: 480
+  minutes:
+
+  # Vacancy pages one run may fetch, across every city. Absent means
+  # MAX_PAGES_PER_RUN (1200), which is about 90 minutes at the declared pace.
+  # Raise it with `minutes` or it becomes the limit that actually bites: eight
+  # hours can reach about 7200 pages, and a run left at 1200 stops at ninety
+  # minutes while the report says the night went fine. The connector logs
+  # `sources.hh.page_budget_binds` when these two disagree.
+  #   pages: 7500
+  pages:
+
+  # Wait out a check for robots once per run, in minutes, then come back to hh
+  # at half the pace. Absent: the challenge ends the run, which is what has
+  # always happened. Read `_pause_for_challenge` in hh.py before turning this
+  # on — it argues the case and draws the line. The captcha is never answered,
+  # nothing about the crawler changes, and a second challenge ends the run.
+  # Needs `minutes` set: the wait is refused unless twice its length remains.
+  #   pause_minutes: 45
+  pause_minutes:
+
+  # Which cities a run walks, in order, and each one's share of the budget.
+  # Empty: the city the resume names, or the `default: true` ones.
+  #
+  # An explicit list REPLACES the resume's area — that is the point of writing
+  # one. Almaty's corpus is some 14 000 pages, so a run that follows the resume
+  # never opens Astana however many nights it is left running. A plan naming a
+  # city this list leaves out is logged as `sources.hh.area_outside_rotation`.
+  #
+  # Shares are weights, not percentages: 6/2/1/1 gives Almaty six tenths of the
+  # pages and six tenths of the night, and adding a fifth city does not mean
+  # editing the other four. The order is the order they are walked, so the
+  # first one is the one a short run spends itself on.
+  #   cities:
+  #     - {host: almaty.hh.kz, share: 6}
+  #     - {host: astana.hh.kz, share: 2}
+  #     - {host: shymkent.hh.kz, share: 1}
+  #     - {host: karaganda.hh.kz, share: 1}
+  cities: []

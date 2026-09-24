@@ -187,6 +187,12 @@ WRAPPED: Final[tuple[Wrapped, ...]] = (
         missing="Обход источников живёт в scripts/run_pipeline.py.",
     ),
     Wrapped(
+        name="report",
+        script=SCRIPTS / "crawl_report.py",
+        summary="что собрал прошлый обход: по городам, где остановился, была ли капча",
+        missing="Отчёт об обходе живёт в scripts/crawl_report.py.",
+    ),
+    Wrapped(
         name="match",
         script=SCRIPTS / "run_matching.py",
         summary="посчитать соответствие вакансий профилю",
@@ -223,7 +229,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Резюме -> источники -> соответствие -> письма -> отклик.",
         epilog=(
             "Ночью запускаются crawl, match, letters и queue: им не нужен ни человек, "
-            "ни аккаунт. apply отправляет отклики и работает только в терминале. "
+            "ни аккаунт. report читает утром то, что crawl сделал ночью. "
+            "apply отправляет отклики и работает только в терминале. "
             "outcomes посередине: аккаунт нужен, человек — нет, отправить он ничего "
             "не может. "
             f"Коды возврата: {EXIT_OK} успех, {EXIT_FAILED} шаг не удался, "
