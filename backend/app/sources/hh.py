@@ -170,6 +170,7 @@ for a posting with no salary — the check has to be for the key.
 
 import html as html_lib
 import json
+import os
 import re
 import time
 from bisect import bisect_left, bisect_right
@@ -1183,12 +1184,27 @@ class CrawlSettings(BaseModel):
     cities: tuple[CrawlCity, ...] = ()
 
 
-def load_crawl(path: Path | None = None, *, sites: Sequence[HHSite] | None = None) -> CrawlSettings:
+def load_crawl(
+    path: Path | None = None,
+    *,
+    sites: Sequence[HHSite] | None = None,
+    profile: str = "crawl",
+) -> CrawlSettings:
     """The ``crawl:`` block, read from the same file as the sites.
 
     ``sites`` is taken as an argument rather than read here so that the check
     below is against the very list the run will walk, and not against a second
     read of the file that could disagree with it.
+
+    ``profile`` names which block to read. ``crawl`` is what every caller got
+    before this argument existed and is still the default, so nothing changes
+    for a run that does not ask. ``night`` is the long one: the owner leaves
+    the machine until morning, and a budget that suits that would make the
+    daytime button run for eight hours too. A named block keeps the two apart
+    in the file rather than in somebody's memory of which value is in there
+    right now. A profile the file does not describe falls back to ``crawl``
+    with its keys, which is the conservative direction: a missing ``night:``
+    gives a short run, never an unbounded one.
     """
     path = path or SITES_FILE
     try:
@@ -1201,7 +1217,8 @@ def load_crawl(path: Path | None = None, *, sites: Sequence[HHSite] | None = Non
         # Named config, not settings: everywhere else in this project
         # that word is app.core.config.settings, and a local one of those
         # inside a source module is the reading somebody will make.
-        config = CrawlSettings.model_validate(raw.get("crawl") or {})
+        block = raw.get(profile) if profile != "crawl" else None
+        config = CrawlSettings.model_validate(block or raw.get("crawl") or {})
     except ValidationError as exc:
         raise SourceError(
             f"hh: {path.name} не описывает настройки обхода: {exc.errors()}", source_slug="hh"
@@ -1557,9 +1574,18 @@ class HHSource(BaseSource):
         city list against the sites, and a misspelled host has to be an error
         raised where the run starts rather than a city quietly missing from
         the report eight hours later.
+
+        ``HH_CRAWL_PROFILE`` names the block. It is an environment variable
+        rather than an argument because the caller that needs it is a command
+        the owner types at night, and the callers that must not have it are
+        the dashboard's buttons and the chain — which run in a server process
+        that nobody sets it in. Unset means ``crawl``, so a run that does not
+        ask gets exactly the budget it got before this existed.
         """
         if self._crawl is None:
-            self._crawl = load_crawl(sites=self.sites)
+            self._crawl = load_crawl(
+                sites=self.sites, profile=os.environ.get("HH_CRAWL_PROFILE", "crawl")
+            )
         return self._crawl
 
     @property

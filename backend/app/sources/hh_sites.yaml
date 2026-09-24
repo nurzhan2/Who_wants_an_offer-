@@ -84,3 +84,37 @@ crawl:
   #     - {host: shymkent.hh.kz, share: 1}
   #     - {host: karaganda.hh.kz, share: 1}
   cities: []
+
+# The long run, for a machine left until morning. Read instead of `crawl:`
+# when HH_CRAWL_PROFILE=night, which is what `wwao crawl` is told to set at
+# night and what nothing else sets: the dashboard's buttons and the chain run
+# in a server process that never sees it, so they keep the `crawl:` budget
+# above and behave exactly as they did before this block existed.
+#
+# Why a second block rather than raising the numbers above: those numbers are
+# also what the "Собрать вакансии" button uses. Eight hours there means the
+# daytime press runs until evening, and the owner finds out by waiting.
+#
+# The pace is NOT part of this. Measured against live hh: 1.02 requests a
+# second met a check for robots at the 50th vacancy, 0.73 at the 172nd, and
+# 0.25 walked 961 in 88 minutes untouched. Going faster collects less, because
+# the run dies and the position does not move. The night is about length.
+#
+# `minutes` and `pages` both have to be set. Raising only the time leaves the
+# 1200-page default as the limit that actually bites: the run stops at ninety
+# minutes while the report says the night went fine.
+night:
+  # Eight hours. About 5200 vacancies at the measured 655 pages an hour —
+  # roughly 40% of what Almaty has left, so the city takes two or three nights.
+  minutes: 480
+  # Headroom over what eight hours can reach, so time is the thing that stops
+  # the run and the page count never silently becomes the ceiling.
+  pages: 7500
+  # Wait out one check for robots and come back at half the pace, once per run.
+  # Without it a check at the second hour costs the remaining six.
+  pause_minutes: 45
+  # Empty: the cities the resume names. Add hosts here once Almaty is covered —
+  #   cities:
+  #     - {host: almaty.hh.kz, weight: 3}
+  #     - {host: astana.hh.kz, weight: 1}
+  cities: []
