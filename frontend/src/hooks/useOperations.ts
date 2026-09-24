@@ -25,6 +25,17 @@ const TOUCHES: Record<OperationKind, string[][]> = {
   letters: [['overview'], ['letter-queue'], ['documents'], ['board'], ['vacancy']],
   outcomes: [['overview'], ['board'], ['notices'], ['documents']],
   send: [['overview'], ['board'], ['notices'], ['vacancy'], ['confirmations']],
+  // The chain runs the first four, so its end changes everything they change,
+  // plus the batch it was built to fill.
+  chain: [
+    ['overview'],
+    ['vacancies'],
+    ['vacancy'],
+    ['letter-queue'],
+    ['documents'],
+    ['board'],
+    ['batch'],
+  ],
 }
 
 export function useOperations(): UseQueryResult<OperationsState> {

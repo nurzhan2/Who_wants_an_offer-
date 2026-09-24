@@ -4,7 +4,28 @@
  * `done` and `total` are `null` when an operation cannot count — never zero.
  */
 
-export type OperationKind = 'crawl' | 'embed' | 'match' | 'letters' | 'outcomes' | 'send'
+export type OperationKind =
+  | 'crawl'
+  | 'embed'
+  | 'match'
+  | 'letters'
+  | 'outcomes'
+  | 'send'
+  | 'chain'
+
+/** `ChainStepStatus`. `skipped` is what a resumed chain does with finished work. */
+export type ChainStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped'
+
+/** One step of the chain, as the panel draws it. */
+export interface ChainStep {
+  key: string
+  title: string
+  status: ChainStepStatus
+  note: string | null
+  report: string[]
+  started_at: string | null
+  finished_at: string | null
+}
 
 export type OperationStatus =
   | 'queued'
@@ -27,6 +48,8 @@ export interface Operation {
   total: number | null
   report: string[]
   error: string | null
+  /** The chain's steps, in order. Empty for every other kind. */
+  steps: ChainStep[]
 }
 
 export interface OperationsState {

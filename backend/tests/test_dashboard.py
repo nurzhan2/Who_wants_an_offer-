@@ -772,6 +772,15 @@ async def test_the_dashboard_has_no_way_to_send_an_application(async_client: Asy
         ("/api/v1/documents/cover-letter/{vacancy_id}", "post"),
         ("/api/v1/tracker/confirmations/{vacancy_id}", "post"),
         ("/api/v1/tracker/confirmations/{vacancy_id}", "delete"),
+        # Since 2026-09-24, the same confirmation given to several cards at once.
+        # It is on this list rather than exempt from it, and it belongs here for
+        # the same reason the single one does: it writes ``confirmed_at`` and
+        # the two digests onto tracker rows and sends nothing. What makes it
+        # not a send is not its name — it goes through
+        # ``app.services.confirmations.confirm`` row by row, so a batch cannot
+        # confirm anything the one-at-a-time flow would refuse, and the agent
+        # still mints one mandate per vacancy against the digest it was given.
+        ("/api/v1/tracker/batch", "post"),
         ("/api/v1/operations", "post"),
         ("/api/v1/operations/{operation_id}", "delete"),
     }

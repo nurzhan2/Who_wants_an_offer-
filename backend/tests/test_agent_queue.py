@@ -59,6 +59,7 @@ from app.schemas.agent import (
     MatchExplanation,
     QueueItem,
 )
+from app.schemas.autopilot import SetAsideKind
 from app.schemas.match import MatchedSkill, MissingSkill
 from app.services import agent_queue
 from factories import make_match, make_profile, make_vacancy
@@ -420,7 +421,7 @@ async def test_the_queue_serves_the_stored_regional_url_and_the_sources_own_id(
         seed="queue-served",
         external_id=HH_ID,
         url=HH_URL,
-        derived={"closed_for_applicants": True, "anonymous": True},
+        derived={"anonymous": True},
     )
     await matches.bulk_upsert(
         [make_match(profile.id, vacancy_id, Decimal("91"), missing_required=["kubernetes"])]
@@ -435,7 +436,7 @@ async def test_the_queue_serves_the_stored_regional_url_and_the_sources_own_id(
     assert item.url == HH_URL
     assert item.vacancy_id == HH_ID
     assert item.letter == "Здравствуйте!"
-    assert item.closed_for_applicants is True
+    assert item.closed_for_applicants is False
     assert item.anonymous is True
     assert item.source == "hh"
     assert item.match is not None
@@ -446,6 +447,41 @@ async def test_the_queue_serves_the_stored_regional_url_and_the_sources_own_id(
     assert item.score_explanation is not None
     assert "kubernetes" in item.score_explanation
     assert [skill.canonical_name for skill in item.match.missing_required] == ["kubernetes"]
+
+
+@pytest.mark.db
+async def test_a_posting_hh_has_closed_for_applicants_is_no_longer_served(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    profiles: ProfileRepository,
+    matches: MatchRepository,
+) -> None:
+    """It used to be served with the flag set and left to the agent to judge.
+
+    Since the autopilot it is not. «Отправить все» replaces the owner's look at
+    each card, and there is nobody left to read a flag saying the form on the
+    page does not work any more — so ``triage`` sets it aside with the reason,
+    and the queue the agent is handed is the ready half of that.
+    """
+    profile = await profiles.create(make_profile())
+    vacancy_id = await _posting(
+        vacancies,
+        seed="queue-closed",
+        external_id=HH_ID,
+        url=HH_URL,
+        derived={"closed_for_applicants": True},
+    )
+    await matches.bulk_upsert([make_match(profile.id, vacancy_id, Decimal("91"))])
+    _letter(db_session, vacancy_id)
+    await db_session.flush()
+
+    selection = await agent_queue.triage(db_session, limit=10, profile_id=profile.id)
+
+    assert (await agent_queue.build_queue(db_session, limit=10, profile_id=profile.id)).items == []
+    assert selection.ready == []
+    [aside] = selection.set_aside
+    assert aside.kind is SetAsideKind.CLOSED
+    assert aside.url == HH_URL
 
 
 @pytest.mark.db

@@ -1,6 +1,7 @@
 import type { UseQueryResult } from '@tanstack/react-query'
 
 import { href } from '@/app/routes'
+import { Autopilot } from '@/components/Autopilot'
 import { OperationsPanel } from '@/components/OperationsPanel'
 import {
   Card,
@@ -48,6 +49,7 @@ export function Overview({ query }: { query: UseQueryResult<OverviewData> }) {
   return (
     <div className="rise">
       <FirstSteps data={data} />
+      <Autopilot />
       <OperationsPanel />
       <Corpus data={data} />
       <Crawl data={data} />

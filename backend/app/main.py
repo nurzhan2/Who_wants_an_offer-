@@ -1,5 +1,7 @@
 """FastAPI application factory and ASGI entrypoint."""
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +19,9 @@ from app.db.checks import verify_embedding_dimension
 from app.db.session import dispose_engine, session_factory
 from app.llm.base import LLMTask
 from app.llm.router import get_router
+from app.schemas.operations import OperationKind
+from app.services import autopilot
+from app.services import operations as operations_service
 from app.services.health import code_fingerprint, service_version
 from app.services.resume import fail_interrupted_parses, sweep_orphaned_uploads
 from app.sources.http import close_client as close_source_client
@@ -57,6 +62,17 @@ async def probe_optional_providers() -> None:
         await probe()
 
 
+async def _start_chain() -> None:
+    """What the schedule fires: the same button the dashboard presses.
+
+    Through the operations service rather than ``autopilot.run_chain`` directly,
+    so a scheduled chain is one row in the same panel, under the same "only one
+    at a time" rule, and the owner watching at 03:05 sees it running rather than
+    finding work done by nothing.
+    """
+    await operations_service.start(OperationKind.CHAIN)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Configure logging on startup, release the connection pool on shutdown."""
@@ -80,9 +96,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # A killed process leaves its staged uploads behind; nothing else deletes
     # them, and uploads/ would grow one resume at a time.
     await sweep_orphaned_uploads()
+    # The daily chain, when AUTOPILOT_DAILY_AT is set. It starts the chain and
+    # only the chain: collecting and preparing need no person, and sending is
+    # not one of the chain's steps. A clock cannot read a letter, so a clock may
+    # not cause an application — there is no setting here or anywhere that would
+    # let it. The loop lives as long as this process, which is honest about what
+    # it is: the dashboard is a program the owner starts on their own machine,
+    # and the README's Windows task is the other half, running the same chain
+    # through the same endpoint.
+    schedule = asyncio.create_task(
+        autopilot.schedule_daily(_start_chain), name="autopilot-schedule"
+    )
     try:
         yield
     finally:
+        schedule.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await schedule
         # The source layer owns a connection pool of its own, kept for the life
         # of the process so a crawl reuses connections instead of building one
         # per request.

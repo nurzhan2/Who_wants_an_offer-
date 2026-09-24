@@ -27,12 +27,50 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_session
+from app.schemas.autopilot import BatchConfirmRequest, BatchConfirmResult, BatchPlan
 from app.schemas.confirmations import ConfirmationCard, ConfirmedList, ConfirmRequest
 from app.schemas.dashboard import Board
+from app.services import autopilot as autopilot_service
 from app.services import confirmations as confirmations_service
 from app.services import tracker as tracker_service
 
 router = APIRouter(prefix="/tracker", tags=["dashboard"])
+
+
+@router.get(
+    "/batch",
+    response_model=BatchPlan,
+    summary="Everything «Отправить все» shows: the queue, what was set aside, the ceiling",
+)
+async def read_batch(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> BatchPlan:
+    """The batch screen in one read: every letter in full, and why the rest is out.
+
+    Beside ``/confirmations/{id}`` rather than instead of it. That one answers
+    "may I send this one?", this one answers "what would go out if I said yes
+    once", and both hand back the same card digests, because a batch
+    confirmation is N single confirmations and not a different kind of promise.
+    """
+    return await autopilot_service.plan(session)
+
+
+@router.post(
+    "/batch",
+    response_model=BatchConfirmResult,
+    summary="Confirm the ticked rows, each against its own card digest",
+)
+async def confirm_batch(
+    payload: BatchConfirmRequest,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> BatchConfirmResult:
+    """Record one "yes" per row. Sends nothing, and there is no flag that does.
+
+    409 when the batch is larger than the ceiling — refused whole rather than
+    half-written. A single row whose card moved since the screen was drawn is
+    refused on its own and reported in ``outcomes``; the rest still stand.
+    """
+    return await autopilot_service.confirm(session, payload)
 
 
 @router.get(

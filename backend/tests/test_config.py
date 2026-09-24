@@ -121,3 +121,21 @@ def test_the_shipped_env_example_produces_valid_settings() -> None:
 
     assert settings.llm_pricing
     assert settings.environment == "development"
+
+
+def test_a_schedule_that_is_not_a_time_of_day_is_refused_at_boot() -> None:
+    """The alternative is discovering it at 03:00, in a process nobody is watching.
+
+    ``AUTOPILOT_DAILY_AT`` is read once when the loop is armed, so an
+    unparseable value would not raise until the first wake-up — by which point
+    the chain has silently not run for a day and the traceback is in a log.
+    """
+    for bad in ("3pm", "25:00", "ночью"):
+        with pytest.raises(ValidationError):
+            _settings(AUTOPILOT_DAILY_AT=bad)
+
+
+def test_an_empty_schedule_means_no_schedule_rather_than_an_error() -> None:
+    """``AUTOPILOT_DAILY_AT=`` in a copied .env is "I do not want one"."""
+    assert _settings(AUTOPILOT_DAILY_AT="").autopilot_daily_at is None
+    assert _settings(AUTOPILOT_DAILY_AT="03:30").autopilot_daily_at == "03:30"

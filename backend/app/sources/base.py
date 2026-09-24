@@ -196,6 +196,43 @@ class SearchQuery(BaseModel):
         return tuple(cleaned)
 
 
+class PostingState(BaseModel):
+    """What one posting's own page says about itself right now.
+
+    Not a posting and deliberately not shaped like one: it carries no title, no
+    description and no payload, because it is the answer to a question asked
+    seconds before an application — "is this still a job somebody can apply to?"
+    — and a model that could carry a description would sooner or later be used
+    to overwrite the one the embeddings were computed from.
+
+    The three ways a posting stops being applicable are separate fields rather
+    than one flag, because they mean different things to the person reading the
+    reason: :attr:`gone` is a page that 404s, :attr:`archived` is hh's own
+    archive, and :attr:`closed_for_applicants` is a live page that has stopped
+    taking applications. Only the first is not a sighting; see
+    ``app.services.freshness``.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_slug: str = Field(min_length=1, max_length=50)
+    external_id: str = Field(min_length=1, max_length=200)
+    #: The source's own archive: the posting exists and is over.
+    archived: bool = False
+    #: The page is not served any more at all.
+    gone: bool = False
+    #: Live, listed, and refusing applications.
+    closed_for_applicants: bool = False
+    #: When the page was actually read. Defaulted rather than required so a
+    #: connector cannot accidentally report a stale read as a fresh one.
+    checked_at: AwareDatetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @property
+    def open_for_applications(self) -> bool:
+        """Whether an application sent against this page could still land."""
+        return not (self.gone or self.archived or self.closed_for_applicants)
+
+
 class RawPosting(BaseModel):
     """One posting exactly as a source returned it.
 
@@ -488,6 +525,24 @@ class BaseSource(ABC):
     async def fetch_detail(self, posting: RawPosting) -> RawPosting:
         """Fill in what the list endpoint left out. Identity unless overridden."""
         return posting
+
+    async def recheck(self, url: str, external_id: str) -> PostingState | None:
+        """Read this one posting's page again and say whether it is still open.
+
+        Optional, and ``None`` is the honest default rather than an omission: a
+        source that cannot be asked has not said the posting is open, and the
+        caller (:mod:`app.services.freshness`) counts that as ``unsupported``
+        and leaves the row exactly as stale as it found it. The vacancy then
+        stays in «посмотреть руками» with the reason that nobody could read its
+        page, which is the outcome the autopilot is built to prefer over a
+        guess.
+
+        It is a *re*-read, not a fetch: an implementation answers the three
+        flags on :class:`PostingState` and nothing else. Re-importing the
+        posting here would let a check run to decide whether to apply rewrite
+        the description the embeddings were computed from.
+        """
+        return None
 
     async def search_batch(self, queries: Sequence[SearchQuery]) -> AsyncIterator[RawPosting]:
         """Run several queries, yielding each posting exactly once.

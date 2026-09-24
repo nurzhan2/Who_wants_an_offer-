@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { href } from '@/app/routes'
 import { ApplyConfirm } from '@/components/ApplyConfirm'
 import { Freshness } from '@/components/Freshness'
+import { SendAll } from '@/components/SendAll'
 import { Button, Card, Empty, Failure, Field, Loading, NextStep, Pill, Section } from '@/components/ui'
 import { useBoard } from '@/hooks/queries'
 import { useOperations, useStartOperation } from '@/hooks/useOperations'
@@ -48,7 +49,12 @@ export function Applications() {
       <Section
         title="Отклики"
         note="Слева направо — путь письма внутри проекта. Отклик уходит только после вашего подтверждения в карточке вакансии; «отправлено» — только то, что подтвердил сам hh."
-        action={<RefreshOutcomes />}
+        action={
+          <div className="flex flex-wrap items-center gap-3">
+            <SendAll />
+            <RefreshOutcomes />
+          </div>
+        }
       >
         {nothing ? (
           <NextStep

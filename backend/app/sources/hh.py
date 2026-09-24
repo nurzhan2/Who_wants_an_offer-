@@ -208,6 +208,7 @@ from app.sources.base import (
     PREVIEW_TERMS,
     AccessMode,
     BaseSource,
+    PostingState,
     RateLimit,
     RawPosting,
     SearchQuery,
@@ -2552,6 +2553,61 @@ class HHSource(BaseSource):
             pay_for_performance=bool(states.get("payForPerformance")),
             description_html=view.description,
             sitemap_lastmod=entry.lastmod,
+        )
+
+    # ── re-reading one page ───────────────────────────────────────────
+
+    async def recheck(self, url: str, external_id: str) -> PostingState | None:
+        """Read this posting's page again and answer the three flags. Stores nothing.
+
+        The one capability that makes «отправить пачку» defensible: everything
+        else the selection knows is a memory of the last crawl, and an
+        application is sent today. Measured 17 Sep 2026, every hh row in the
+        corpus carried ``last_seen_at`` of 8 Sep and a third of the queue of the
+        day before had been archived by the time the agent opened it.
+
+        Deliberately narrower than :meth:`_fetch`, which this shares its parsing
+        with but not its purpose. ``_fetch`` builds a whole ``RawPosting``;
+        this reads ``status`` and ``closedForApplicants`` and throws the rest
+        away, because a check run to decide whether to apply must not be able
+        to rewrite the description the embeddings were computed from or the
+        title on a card somebody has already read.
+
+        Uncached, unlike a crawl fetch. The whole question is what the page says
+        *now*, and a cache hit would answer it with the same bytes the stale
+        ``last_seen_at`` came from.
+
+        A 404 or a 410 is ``gone``. A page answering for a different posting —
+        hh redirects a taken-down vacancy to its successor — is also ``gone``
+        for this id, because whatever is at that address, an application sent
+        against our number would not land. A challenge is re-raised: the caller
+        stops the whole pass rather than walking the rest of the list into it.
+        """
+        try:
+            body = await self.http.get_text(url, cache_ttl=timedelta(0))
+        except HHChallengedError:
+            logger.warning("sources.hh.challenged", url=url, stage="recheck")
+            raise
+        except SourceError as exc:
+            if exc.extra.get("response_status") in GONE_STATUSES:
+                logger.debug("sources.hh.recheck_gone", url=url, external_id=external_id)
+                return PostingState(source_slug=self.slug, external_id=external_id, gone=True)
+            raise
+
+        entry = SitemapEntry(external_id=external_id, url=url, lastmod=datetime.now(UTC))
+        parsed = self._state(entry, body)
+        if parsed is None:
+            # An empty ``vacancyView``, or a page answering under another id.
+            # Both mean the same thing to somebody about to apply: this posting
+            # is not at this address any more.
+            return PostingState(source_slug=self.slug, external_id=external_id, gone=True)
+        view, _ = parsed
+        status = view.status or HHStatus(active=True)
+        return PostingState(
+            source_slug=self.slug,
+            external_id=external_id,
+            archived=status.archived or status.disabled or not status.active,
+            closed_for_applicants=view.closed_for_applicants,
         )
 
     # ── the catalogue ─────────────────────────────────────────────────

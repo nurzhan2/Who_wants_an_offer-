@@ -3,6 +3,7 @@
     python -m wwao crawl              обойти источники
     python -m wwao match              посчитать соответствие профилю
     python -m wwao letters --limit 5  написать письма
+    python -m wwao chain              весь сбор и подготовка одной командой
     python -m wwao queue              что готово к отклику и почему остальное нет
     python -m wwao apply --send       отклики, по одному, с подтверждением
     python -m wwao outcomes           что hh отвечает на уже отправленное
@@ -101,6 +102,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, TextIO, final
 
+from wwao import chain as chain_command
 from wwao import up as stack
 from wwao import watch as watch_loop
 from wwao.console import encoding_of, harden, printable
@@ -247,6 +249,32 @@ def build_parser() -> argparse.ArgumentParser:
             add_help=False,
             help=f"{wrapped.summary} ({wrapped.script.name}; флаги — его собственные)",
         )
+
+    chain = subparsers.add_parser(
+        "chain",
+        help="собрать, посчитать, оценить, написать письма и собрать очередь — подряд",
+        description=(
+            "Та же цепочка, что кнопка «Цепочка» на «Обзоре», и через тот же "
+            "сервер: собрать вакансии, досчитать эмбеддинги, пересчитать подбор, "
+            "написать письма прошедшим отбор, собрать очередь. Идёт долго — обход "
+            "от часа до трёх. Ничего не отправляет и не может: цепочка "
+            "заканчивается готовой очередью, а отклики уходят только после того, "
+            "как человек прочитает пачку и подтвердит её. Это команда, которую "
+            "ставят в планировщик задач."
+        ),
+    )
+    chain.add_argument(
+        "--from",
+        dest="backend",
+        default=DEFAULT_BACKEND,
+        help="базовый адрес бэкенда. По умолчанию: %(default)s",
+    )
+    chain.add_argument(
+        "--interval",
+        type=float,
+        default=chain_command.DEFAULT_INTERVAL,
+        help="как часто спрашивать сервер о ходе цепочки, секунд. По умолчанию: %(default)s",
+    )
 
     queue = subparsers.add_parser("queue", help="что готово к отклику и почему остальное нет")
     queue.add_argument(
@@ -408,6 +436,13 @@ def main(
             "Её флаги перечислены в --help и это весь список."
         )
 
+    if args.command == "chain":
+        # No terminal check, unlike ``apply`` and ``watch``: there is no card to
+        # read and no word to type, because this command cannot send. It is
+        # meant to run from a scheduler at three in the morning.
+        return chain_command.run(
+            str(args.backend), out=out, interval=max(1.0, float(args.interval))
+        )
     if args.command == "queue":
         return _show_queue(args, fetch=fetch, out=out, err=err)
     if args.command == "outcomes":

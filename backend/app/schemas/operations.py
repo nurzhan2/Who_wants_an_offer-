@@ -36,11 +36,56 @@ class OperationKind(StrEnum):
     LETTERS = "letters"
     OUTCOMES = "outcomes"
     SEND = "send"
+    #: The first four in order, from one press. A member of this family rather
+    #: than a family of its own so that one panel, one poll and one "already
+    #: running" rule cover it too — and so that a reader looking for what may
+    #: send finds it in the same list and sees that this is not it.
+    CHAIN = "chain"
 
     @property
     def needs_agent(self) -> bool:
         """True when only the local agent, under the owner's login, can do this."""
         return self in {OperationKind.OUTCOMES, OperationKind.SEND}
+
+
+class ChainStepStatus(StrEnum):
+    """Where one step of the chain is.
+
+    Its own enum rather than :class:`OperationStatus`, because a step has one
+    state that an operation does not — ``skipped``, which is what a resumed
+    chain does with the work the interrupted one had already finished — and
+    lacks two it does not need.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class ChainStep(BaseModel):
+    """One step of the chain, as the panel and the CLI both read it.
+
+    Per step rather than one bar, because the steps are minutes apart and of
+    wildly different lengths: a polite hh crawl is about twenty minutes and the
+    queue takes seconds, so a single percentage would sit at nothing for a third
+    of an hour and then jump.
+    """
+
+    #: Stable and machine-readable. It is also what a resume point is written
+    #: against, so renaming one starts the next chain from the top rather than
+    #: silently skipping a different step.
+    key: str
+    #: Russian, for the panel.
+    title: str
+    status: ChainStepStatus = ChainStepStatus.PENDING
+    #: What it is doing right now, or why it failed or was skipped. One line.
+    note: str | None = None
+    #: What it did, once it is finished. Russian.
+    report: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class OperationStatus(StrEnum):
@@ -89,6 +134,10 @@ class OperationRead(BaseModel):
     #: Short result lines once the operation has finished, in Russian.
     report: list[str] = Field(default_factory=list)
     error: str | None = None
+    #: The chain's steps, in order. Empty for every other kind — an operation
+    #: that is one act has one line, and inventing a single step for it would
+    #: make the panel draw a chain of one.
+    steps: list[ChainStep] = Field(default_factory=list)
 
 
 class OperationsState(BaseModel):

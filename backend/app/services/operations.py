@@ -55,12 +55,15 @@ from app.matching.scorer import ProfileNotReadyError, score_corpus
 from app.pipeline.embedding import EmbeddingOutcome, embed_pending, embed_pending_titles
 from app.schemas.operations import (
     AgentProgress,
+    ChainStep,
+    ChainStepStatus,
     OperationKind,
     OperationRead,
     OperationsState,
     OperationStatus,
 )
 from app.schemas.pipeline_job import PipelineJobRead, PipelineJobStatus
+from app.services import autopilot
 from app.services import pipeline as pipeline_service
 
 logger = get_logger(__name__)
@@ -131,6 +134,12 @@ class Progress:
     done: int | None = None
     total: int | None = None
     note: str | None = None
+    #: The chain's steps, mutated in place by ``app.services.autopilot`` as it
+    #: walks them. Empty for every other kind. They live on the progress rather
+    #: than beside it because that is exactly what they are — what this
+    #: operation can say about itself while a twenty-minute crawl is running —
+    #: and it keeps the runner signature one argument wide.
+    steps: list[ChainStep] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -181,6 +190,7 @@ class OperationRegistry:
             kind=kind,
             status=OperationStatus.WAITING_AGENT if kind.needs_agent else OperationStatus.QUEUED,
             queued_at=datetime.now(UTC),
+            progress=Progress(steps=autopilot.fresh_steps() if kind is OperationKind.CHAIN else []),
         )
         self._operations[operation.id] = operation
         self._evict()
@@ -424,6 +434,22 @@ async def _letters(progress: Progress) -> list[str]:
     return lines
 
 
+async def _chain(progress: Progress) -> list[str]:
+    """The whole day's collecting and preparing, in order, from one press.
+
+    A thin adapter and nothing else: the chain itself is
+    :func:`app.services.autopilot.run_chain`, because the dashboard's button and
+    ``python -m wwao chain`` must not be two implementations of one routine that
+    can disagree about what «собрать очередь» means. This function exists to
+    hand it the step list the panel is already polling.
+
+    It ends with a ready queue. Nothing in it sends, and there is no kind of
+    operation it can start that would — ``send`` is the agent's, on the owner's
+    machine, after somebody has read a batch and confirmed it.
+    """
+    return await autopilot.run_chain(progress.steps)
+
+
 _BUCKETS: Final[dict[str, str]] = {
     "apply_now": "откликаться",
     "strong": "сильное",
@@ -446,7 +472,15 @@ _TITLES: Final[dict[OperationKind, str]] = {
     OperationKind.LETTERS: "Письма",
     OperationKind.OUTCOMES: "Исходы откликов",
     OperationKind.SEND: "Отправка подтверждённых",
+    OperationKind.CHAIN: "Цепочка",
 }
+
+#: The kinds the chain runs itself. Starting one beside a chain would be the
+#: same two-scoring-passes collision the per-kind rule already forbids, only
+#: spelled across two rows of the panel instead of one.
+_INSIDE_CHAIN: Final[frozenset[OperationKind]] = frozenset(
+    {OperationKind.CRAWL, OperationKind.EMBED, OperationKind.MATCH, OperationKind.LETTERS}
+)
 
 #: Replaced wholesale in tests, which is also what a restart looks like.
 _registry = OperationRegistry(
@@ -454,6 +488,7 @@ _registry = OperationRegistry(
         OperationKind.EMBED: _embed,
         OperationKind.MATCH: _match,
         OperationKind.LETTERS: _letters,
+        OperationKind.CHAIN: _chain,
     }
 )
 
@@ -463,6 +498,7 @@ _registry = OperationRegistry(
 
 async def start(kind: OperationKind) -> OperationRead:
     """Start one operation and answer with its handle."""
+    _refuse_if_the_chain_covers_it(kind)
     if kind is OperationKind.CRAWL:
         return _from_crawl(await pipeline_service.request_run())
     if kind is OperationKind.EMBED and pipeline_service.list_jobs(limit=1).busy:
@@ -474,6 +510,39 @@ async def start(kind: OperationKind) -> OperationRead:
             "Дождитесь его окончания — остаток, если будет, посчитается этой кнопкой."
         )
     return view(_registry.start(kind))
+
+
+def _refuse_if_the_chain_covers_it(kind: OperationKind) -> None:
+    """Refuse a step the running chain is going to run, and a chain over a step.
+
+    Both directions, because the collision is the same one either way: two
+    scoring passes write the same ``match`` rows twice and two letter batches
+    pick the same vacancies. The per-kind rule in the registry cannot see it —
+    from its side a chain and a rescore are different kinds — so it is stated
+    here, where both are in view.
+
+    The crawl is deliberately not in the second direction: the chain's first
+    step joins a crawl already running rather than refusing beside it, which is
+    what somebody who pressed «Собрать вакансии» five minutes ago expects.
+    """
+    if kind is OperationKind.CHAIN:
+        busy = [
+            other
+            for other in _INSIDE_CHAIN - {OperationKind.CRAWL}
+            if _registry.live(other) is not None
+        ]
+        if busy:
+            raise OperationBusyError(
+                "Цепочка делает то же самое, что уже идёт сейчас: "
+                + ", ".join(_TITLES[other].lower() for other in busy)
+                + ". Дождитесь окончания и запустите цепочку — она пройдёт все шаги подряд."
+            )
+        return
+    if kind in _INSIDE_CHAIN and _registry.live(OperationKind.CHAIN) is not None:
+        raise OperationBusyError(
+            f"{_TITLES[kind]}: сейчас идёт цепочка, и этот шаг входит в неё. "
+            "Дождитесь её окончания — она сделает его сама."
+        )
 
 
 def cancel(operation_id: UUID) -> OperationRead:
@@ -528,6 +597,7 @@ def view(operation: _Operation) -> OperationRead:
         total=operation.progress.total,
         report=list(operation.report),
         error=operation.error,
+        steps=list(operation.progress.steps),
     )
 
 
@@ -552,11 +622,35 @@ def _message(operation: _Operation) -> str:
             f"двойным щелчком по start.cmd (или командой {WATCH_COMMAND}) на своём компьютере."
         )
     if status is OperationStatus.RUNNING:
+        if operation.kind is OperationKind.CHAIN:
+            return f"{title}: {_chain_note(operation)}"
         note = f" {operation.progress.note}." if operation.progress.note else ""
         return f"{title}: идёт.{note}"
     if status is OperationStatus.SUCCESS:
         return f"{title}: готово."
     return operation.error or f"{title}: не удалось."
+
+
+def _chain_note(operation: _Operation) -> str:
+    """Which step the chain is on, for the one line above the step list.
+
+    Named rather than counted: «шаг 2 из 5» tells nobody that twenty minutes of
+    crawling are what they are waiting for, and this line is read by somebody
+    deciding whether to leave the window open.
+    """
+    running = next(
+        (step for step in operation.progress.steps if step.status is ChainStepStatus.RUNNING),
+        None,
+    )
+    if running is None:
+        return "идёт."
+    done = sum(
+        1
+        for step in operation.progress.steps
+        if step.status in {ChainStepStatus.DONE, ChainStepStatus.SKIPPED}
+    )
+    note = f" {running.note}." if running.note else ""
+    return f"шаг {done + 1} из {len(operation.progress.steps)} — «{running.title}».{note}"
 
 
 def _from_crawl(job: PipelineJobRead) -> OperationRead:

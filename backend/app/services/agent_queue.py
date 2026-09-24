@@ -66,21 +66,23 @@ time-to-answer measurement needs.
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, final
 from urllib.parse import urlsplit
 from uuid import UUID
 
 from pydantic import BaseModel
-from sqlalchemy import Select, select, text, update
+from sqlalchemy import Select, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.base import uuid7
-from app.db.enums import ApplicationStatus, MatchBucket
+from app.db.enums import ApplicationStatus, MatchBucket, RuleScope
 from app.db.models import (
     Application,
     CandidateProfile,
@@ -103,9 +105,13 @@ from app.schemas.agent import (
     ResultAck,
     ResultsResponse,
 )
-from app.schemas.ats import ATSSummary, DocumentKind
+from app.schemas.ats import ATSSummary, DocumentKind, Overall
+from app.schemas.autopilot import SetAsideItem, SetAsideKind
 from app.schemas.match import MatchComponentScores, MatchedSkill, MissingSkill
 from app.services import ats as ats_service
+from app.workshop import rules as workshop_rules
+from app.workshop import store as workshop_store
+from app.workshop.rules import RuleSpec
 
 logger = get_logger(__name__)
 
@@ -131,6 +137,150 @@ MAX_LISTED = 6
 #: with its id is dropped rather than served.
 OVERFETCH = 2
 
+#: How many rows one :func:`triage` pass reads, in total rather than per item
+#: asked for. Not a multiple of the limit, and that is the whole point.
+#:
+#: A multiple is the natural shape for a read whose rows are mostly kept, which
+#: is what the queue used to be: the statement dropped a letterless vacancy, so
+#: ``limit * OVERFETCH`` rows yielded about ``limit`` items. The selection
+#: cannot work that way — «письма ещё нет» is a line the owner reads, not a row
+#: SQL hides — so every refusal now spends the same budget a served item does,
+#: and the ratio between the two is a property of the corpus rather than of the
+#: request. Measured 24 Sep 2026: 93 of the 102 candidates in the walk corpus
+#: were letterless, so ``limit=10`` at eight rows apiece answered 7 items while
+#: 9 qualified, and no multiple fixes that in general.
+#:
+#: A flat ceiling does, because the thing being read is bounded and small. The
+#: statement already narrows to one profile, one source, above the score floor,
+#: not filtered, not acted on, not seeded — 87 rows on the live corpus and 102
+#: on the walk one. Five hundred covers both several times over in one query,
+#: and a corpus that genuinely exceeds it has a queue nobody could read anyway.
+CANDIDATE_CEILING: Final[int] = 500
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class ReadyItem:
+    """One vacancy that passed every check, with the card the agent would get.
+
+    Carries our own ``vacancy_id`` beside the item because :class:`QueueItem`'s
+    ``vacancy_id`` is hh's number — the agent's vocabulary — and everything on
+    this side of the seam (the batch, the confirmations, the tracker) is keyed
+    by ours.
+    """
+
+    vacancy_id: UUID
+    item: QueueItem
+
+
+@final
+@dataclass(frozen=True, slots=True)
+class Triage:
+    """The whole selection: what may be applied to, and what may not and why."""
+
+    ready: list[ReadyItem] = field(default_factory=list)
+    set_aside: list[SetAsideItem] = field(default_factory=list)
+
+
+async def triage(
+    session: AsyncSession,
+    *,
+    limit: int,
+    profile_id: UUID | None = None,
+    min_score: Decimal | None = None,
+    require_letter: bool = True,
+    vacancy_id: UUID | None = None,
+) -> Triage:
+    """Split the candidates into "send this" and "a person should look", with reasons.
+
+    **This function is the whole safety argument of the autopilot.** One
+    confirmation for a batch replaces the owner's look at each card, and it is
+    only as safe as this selection: score, bucket, source, the experience gap,
+    the language requirement, the workshop's rules over the stored letter, the
+    ATS audit, and a re-read of the posting's own page. Every end-to-end run
+    before this existed put something in the queue that a person then caught by
+    eye — three ``filtered`` vacancies on 9 Sep, two archived of six on 16 Sep,
+    a «Бариста» matched on "go" on 13 Sep. Nothing that fails a check here is
+    meant to reach a batch screen, because nobody is looking any more.
+
+    **Nothing is thrown away.** A vacancy that fails goes into
+    :attr:`Triage.set_aside` with its link and one Russian sentence naming what
+    was found, so the owner can open it and apply by hand. A check that only
+    dropped the row would move the September defects from the card to nowhere.
+
+    **What is not here is not a candidate at all.** The statement below already
+    refuses a vacancy under the score floor, in the ``filtered`` bucket, from
+    another source, marked spam, seeded, or already acted on. Those produce no
+    set-aside entry on purpose: "посмотреть руками" is a short list of near
+    misses, and a corpus's worth of vacancies nobody scored is not that.
+
+    ``require_letter=False`` asks the narrower question the chain asks before it
+    writes letters: "what has cleared every check *except* having a letter?".
+    """
+    profile = profile_id if profile_id is not None else await active_profile_id(session)
+    if profile is None:
+        logger.info("agent.queue.no_profile")
+        return Triage()
+
+    threshold = min_score if min_score is not None else Decimal(settings.agent_queue_min_score)
+    rows = (
+        await session.execute(
+            _queue_statement(
+                profile_id=profile,
+                min_score=threshold,
+                # Always False here: a vacancy with no letter is a set-aside
+                # row with a reason, not a row the SQL hides. ``require_letter``
+                # decides what it *becomes*, below.
+                require_letter=False,
+                limit=CANDIDATE_CEILING,
+                vacancy_id=vacancy_id,
+            )
+        )
+    ).all()
+
+    # Both read once for the whole pass rather than per row. The skills are the
+    # same candidate's every time, and the rules are the same workshop's; a
+    # per-row read would be an N+1 over a list the owner is about to confirm.
+    # ``active_rules`` rather than ``stored_rules`` so the two built-in ones —
+    # no links, no contact handles — are checked here exactly as they are when
+    # the letter is written; they are the ones hh files as spam.
+    held = await ats_service.held_skills(session, profile)
+    rules = await workshop_store.active_rules(session, scope=RuleScope.COVER_LETTER)
+
+    ready: list[ReadyItem] = []
+    set_aside: list[SetAsideItem] = []
+    seen: set[UUID] = set()
+    for row in rows:
+        if len(ready) >= limit:
+            break
+        if row.vacancy_id in seen:
+            continue
+        seen.add(row.vacancy_id)
+        item = _to_item(row)
+        if item is None:
+            # The agent rejects a whole batch when a URL does not name its own
+            # id (``agent/queue.py``), so this one must not be served — and the
+            # owner is told, because the alternative is a vacancy that scored
+            # 91 and silently never appears anywhere.
+            set_aside.append(_unservable(row))
+            continue
+        item = item.model_copy(update={"ats": _ats_summary(item, row, held)})
+        item = item.model_copy(update={"confirmation": _confirmation(item, row)})
+        refusal = _refusal(row, item, rules=rules, require_letter=require_letter)
+        if refusal is None:
+            ready.append(ReadyItem(vacancy_id=row.vacancy_id, item=item))
+        else:
+            set_aside.append(_aside(row, item, *refusal))
+
+    logger.info(
+        "agent.queue.triaged",
+        profile_id=str(profile),
+        ready=len(ready),
+        set_aside=len(set_aside),
+        source=settings.agent_source_slug,
+    )
+    return Triage(ready=ready, set_aside=set_aside)
+
 
 async def build_queue(
     session: AsyncSession,
@@ -143,6 +293,10 @@ async def build_queue(
 ) -> QueueResponse:
     """Vacancies worth an application, best score first.
 
+    :func:`triage`'s ready half and nothing else, so that what the agent is
+    handed and what the batch screen offers cannot be two different lists. The
+    reasons go to the screen; the agent gets the items.
+
     Every item carries the URL the crawler actually read. It is never rebuilt
     from the id: for hh that address is a regional subdomain, because the
     connector walks ``almaty.hh.kz``'s own sitemap, and it is both the page the
@@ -151,50 +305,182 @@ async def build_queue(
     of served — the agent rejects the whole batch on that mismatch
     (``agent/queue.py``), so one bad row must not cost the run.
     """
-    profile = profile_id if profile_id is not None else await active_profile_id(session)
-    if profile is None:
-        logger.info("agent.queue.no_profile")
-        return QueueResponse(version=CONTRACT_VERSION, items=[])
-
-    threshold = min_score if min_score is not None else Decimal(settings.agent_queue_min_score)
-    rows = (
-        await session.execute(
-            _queue_statement(
-                profile_id=profile,
-                min_score=threshold,
-                require_letter=require_letter,
-                limit=limit * OVERFETCH + OVERFETCH,
-                vacancy_id=vacancy_id,
-            )
-        )
-    ).all()
-
-    # Read once for the whole batch rather than per item: it is the same
-    # candidate for every vacancy in the queue, and the audit below needs it to
-    # tell "not written in this letter" from "not a skill this person has".
-    held = await ats_service.held_skills(session, profile)
-
-    items: list[QueueItem] = []
-    seen: set[UUID] = set()
-    for row in rows:
-        if len(items) >= limit:
-            break
-        if row.vacancy_id in seen:
-            continue
-        item = _to_item(row)
-        if item is None:
-            continue
-        seen.add(row.vacancy_id)
-        item = item.model_copy(update={"ats": _ats_summary(item, row, held)})
-        items.append(item.model_copy(update={"confirmation": _confirmation(item, row)}))
-
+    selection = await triage(
+        session,
+        limit=limit,
+        profile_id=profile_id,
+        min_score=min_score,
+        require_letter=require_letter,
+        vacancy_id=vacancy_id,
+    )
     logger.info(
         "agent.queue.served",
-        profile_id=str(profile),
-        count=len(items),
+        count=len(selection.ready),
         source=settings.agent_source_slug,
     )
-    return QueueResponse(version=CONTRACT_VERSION, items=items)
+    return QueueResponse(version=CONTRACT_VERSION, items=[ready.item for ready in selection.ready])
+
+
+# ── the checks the batch confirmation rests on ────────────────────────
+
+
+#: A language flag as ``app.matching.rules.language_verdict`` writes it: the
+#: name, the level asked for and the level claimed, all three CEFR. Narrow on
+#: purpose — ``red_flags`` is a column of prose and the other things in it
+#: («зарплата ниже минимума…», «семантика не посчитана…», «работодатель не
+#: указал ключевые навыки») must not be read as a language the owner lacks.
+LANGUAGE_FLAG: Final[re.Pattern[str]] = re.compile(
+    r"^(?P<name>[^:]+): требуется (?P<asked>[A-C][12]), заявлен (?P<held>[A-C][12])$"
+)
+
+
+def _refusal(
+    row: Any,
+    item: QueueItem,
+    *,
+    rules: Sequence[RuleSpec],
+    require_letter: bool,
+) -> tuple[SetAsideKind, str] | None:
+    """Why this vacancy is not getting an application, or None when it is.
+
+    **The order is the design.** A dead posting is reported as dead rather than
+    as "its letter breaks a rule", because the first is what the owner would do
+    something about. And the page-age check is *last*, so ``stale_page`` means
+    "the only thing left wrong with this is that nobody has looked" — which is
+    exactly the set ``app.services.autopilot`` re-reads before it writes letters
+    or builds a batch. Moving that check up would make the chain re-read pages
+    of vacancies it is never going to apply to.
+
+    ``Any`` for the row for the reason :func:`_to_item` gives.
+    """
+    if item.archived:
+        return (
+            SetAsideKind.ARCHIVED,
+            "Вакансия в архиве: при последнем чтении страницы её там уже не было. "
+            "Отклик физически не уйдёт.",
+        )
+    if item.closed_for_applicants:
+        return (
+            SetAsideKind.CLOSED,
+            f"{settings.agent_source_slug} закрыл вакансию для откликов — "
+            "форма отклика на странице больше не работает.",
+        )
+
+    gap = row.experience_gap_years
+    allowed = settings.agent_max_experience_gap_years
+    if gap is not None and gap > Decimal(str(allowed)):
+        # ``allowed`` is formatted from the float rather than from the Decimal
+        # built out of it: ``format(Decimal("1.0"), "g")`` keeps the trailing
+        # zero and the sentence reads «разрыв до 1.0 года», which is not how
+        # anybody writes a number of years.
+        return (
+            SetAsideKind.EXPERIENCE_GAP,
+            f"Просят опыта больше вашего на {gap:g} {_years(gap)}. "
+            f"Без разбора отклик уходит при разрыве до {allowed:g} "
+            f"{_years(Decimal(str(allowed)))} (AGENT_MAX_EXPERIENCE_GAP_YEARS). "
+            "Если берётесь сознательно — откликнитесь сами.",
+        )
+
+    for flag in item.match.red_flags if item.match is not None else []:
+        found = LANGUAGE_FLAG.match(flag)
+        if found is not None:
+            return (
+                SetAsideKind.LANGUAGE,
+                f"Требуется {found['name']} на уровне {found['asked']}, "
+                f"в резюме заявлен {found['held']}. Такой отклик агент не отправляет.",
+            )
+
+    if item.letter is None:
+        if require_letter:
+            return (
+                SetAsideKind.NO_LETTER,
+                "Письма ещё нет. Запустите цепочку на «Обзоре» — она напишет письма "
+                "для всех прошедших отбор, — или напишите его в карточке вакансии.",
+            )
+    else:
+        broken = workshop_rules.hard(
+            workshop_rules.check(item.letter, scope=RuleScope.COVER_LETTER, rules=rules)
+        )
+        if broken:
+            # The owner's own sentence, not a restatement of it: they wrote the
+            # rule, and «hh считает такое письмо спамом» is the whole reason it
+            # exists.
+            return (
+                SetAsideKind.LETTER_RULES,
+                "Письмо не проходит правила мастерской: "
+                + " ".join(violation.message for violation in broken),
+            )
+        # ``unreadable`` and not ``degraded``: a critical finding means a parser
+        # gets this letter wrong, while ``degraded`` is the ordinary state of a
+        # letter that does not name every requirement — refusing on that would
+        # empty the queue and teach nobody anything.
+        if item.ats is not None and item.ats.overall is Overall.UNREADABLE:
+            return (
+                SetAsideKind.LETTER_AUDIT,
+                "Письмо не прошло ATS-аудит: "
+                + "; ".join(item.ats.critical[:3])
+                + ". Робот-фильтр работодателя прочитает его неправильно.",
+            )
+
+    fresh_for = timedelta(hours=settings.agent_page_freshness_hours)
+    if datetime.now(UTC) - row.last_seen_at > fresh_for:
+        return (
+            SetAsideKind.STALE_PAGE,
+            f"Страницу вакансии не перечитывали дольше "
+            f"{settings.agent_page_freshness_hours} ч, а база помнит только прошлый обход. "
+            "Запустите цепочку на «Обзоре» — она перечитает страницу и вернёт вакансию "
+            "в пачку, если та ещё открыта.",
+        )
+    return None
+
+
+def _years(value: Decimal) -> str:
+    """«год» / «года» / «лет» for a number that may be fractional.
+
+    Fractions take the genitive singular in Russian («1,9 года»), which is the
+    same form as 2–4, so the only case worth separating is a whole 1.
+    """
+    if value != value.to_integral_value():
+        return "года"
+    whole = int(value) % 100
+    if 11 <= whole <= 14:
+        return "лет"
+    last = whole % 10
+    if last == 1:
+        return "год"
+    return "года" if 2 <= last <= 4 else "лет"
+
+
+def _aside(row: Any, item: QueueItem, kind: SetAsideKind, reason: str) -> SetAsideItem:
+    """One refused vacancy, as the screen and the report read it."""
+    return SetAsideItem(
+        vacancy_id=row.vacancy_id,
+        external_id=item.vacancy_id,
+        title=item.title,
+        company=item.company,
+        url=item.url,
+        score=item.score,
+        kind=kind,
+        reason=reason,
+    )
+
+
+def _unservable(row: Any) -> SetAsideItem:
+    """The one refusal built from the row, because there is no item to build from."""
+    return SetAsideItem(
+        vacancy_id=row.vacancy_id,
+        external_id=str(row.external_id),
+        title=str(row.title),
+        company=row.company,
+        url=str(row.url),
+        score=row.score,
+        kind=SetAsideKind.UNSERVABLE,
+        reason=(
+            f"Сохранённая ссылка не заканчивается номером вакансии "
+            f"{row.external_id}, и агент отклонил бы всю пачку из-за неё. "
+            "Откройте ссылку и откликнитесь сами."
+        ),
+    )
 
 
 async def record_results(
@@ -398,11 +684,23 @@ def _queue_statement(
     )
     # Anything past "saved" means a person or a previous run already acted on
     # this vacancy. Offering it again is how a second application gets sent.
+    #
+    # ``hh_negotiations_total`` is the third way to learn the same fact, and it
+    # is here rather than among the set-aside reasons for that reason: it is not
+    # a near miss the owner might overrule, it is an application that already
+    # exists. hh publishes the count on the posting's own page and «Обновить
+    # исходы» records it, so this catches the case the other two columns miss —
+    # an application the owner sent by hand, outside this project, on a vacancy
+    # it is still offering. The agent refuses on the same number when it opens
+    # the page; refusing here as well means the owner is never asked to confirm
+    # a batch row that was going to be dropped a minute later anyway.
     acted_on = (
         select(Application.id)
         .where(Application.vacancy_id == Vacancy.id)
         .where(
-            (Application.status != ApplicationStatus.SAVED) | (Application.applied_at.is_not(None))
+            (Application.status != ApplicationStatus.SAVED)
+            | (Application.applied_at.is_not(None))
+            | (func.coalesce(Application.hh_negotiations_total, 0) >= 1)
         )
         .exists()
     )
@@ -413,6 +711,11 @@ def _queue_statement(
             Vacancy.title,
             Vacancy.company,
             Vacancy.is_active,
+            # When somebody last read this posting's own page. The freshness
+            # rule in :func:`triage` is written against it, and it is selected
+            # here rather than looked up per row because the answer is one
+            # column of a join the statement already makes.
+            Vacancy.last_seen_at,
             VacancySource.external_id,
             VacancySource.url,
             VacancySource.raw,

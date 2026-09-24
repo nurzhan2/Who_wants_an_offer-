@@ -132,16 +132,27 @@ async def card(session: AsyncSession, vacancy_id: UUID) -> ConfirmationCard:
     blockers = await _blockers(session, vacancy)
     item = None
     if not blockers:
-        served = await agent_queue.build_queue(
+        # Through ``triage`` rather than ``build_queue``, so that this card and
+        # the batch screen refuse for the same reason in the same words. The
+        # selection grew checks the blockers above do not mirror — the page's
+        # age, the experience gap, the language level, the workshop's rules over
+        # the stored letter — and before this the card reported the one reason
+        # it could name («ссылка не совпадает с номером») for all of them.
+        selection = await agent_queue.triage(
             session,
             limit=1,
             min_score=_floor(),
             require_letter=True,
             vacancy_id=vacancy_id,
         )
-        item = served.items[0] if served.items else None
+        item = selection.ready[0].item if selection.ready else None
         if item is None:
-            blockers = ["Агент не получит эту вакансию: её ссылка на hh не совпадает с её номером."]
+            blockers = [
+                aside.reason for aside in selection.set_aside if aside.vacancy_id == vacancy_id
+            ] or [
+                "Агент не получит эту вакансию: она не проходит отбор, "
+                "а причину назвать не удалось. Пересчитайте подбор."
+            ]
     state = await _state(session, vacancy_id, item)
     return base.model_copy(
         update={

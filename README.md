@@ -90,7 +90,7 @@ database:
 
 | Screen | What it answers |
 | --- | --- |
-| Обзор | The operations panel — collect vacancies, compute embeddings, rescore, write letters, read outcomes, send what you confirmed — then the corpus, the crawl position, the last runs and the applications counters |
+| Обзор | Автопилот — one press for the whole chain and one confirmation for the whole batch — then the operations panel step by step, the corpus, the crawl position, the last runs and the applications counters |
 | Вакансии | The ranked list with filters and each posting's age, and one vacancy explained, with «Откликнуться…» |
 | Отклики | The applications board: queued, waiting for a person, sent but not yet confirmed by hh, sent — and what hh has since said |
 | Документы | Resume upload, resumes with their ATS audit, and every letter with the rules version that judged it |
@@ -135,6 +135,61 @@ outcomes and sending need your hh session, so the API only records those two
 requests and the watcher started by `start.cmd` (or `python -m wwao watch`)
 carries them out.
 
+### Автопилот: one press, and one confirmation for a batch
+
+«Запустить цепочку» runs the whole day's preparation in order — collect,
+embed, rescore, re-read the pages of everything it is about to offer, write
+letters for what passed, build the queue — and reports per step rather than as
+one bar, because the steps are wildly different lengths: measured here the hh
+crawl took 79, 97 and 178 minutes on three separate runs, and the queue takes
+seconds.
+A step that fails stops the chain and names itself; pressing again continues
+from that step instead of crawling again. The same chain from a terminal is
+`python -m wwao chain`.
+
+**The chain ends with a ready queue and sends nothing.** «Отправить все» is the
+other half: one screen with every letter in full, a tick per row, and one press.
+That press records N confirmations, each bound to a SHA-256 of the card it was
+shown on — so a batch is N separate yeses to N separate texts, and a letter that
+changes between the confirmation and the send does not go out. There is no flag,
+setting or schedule anywhere that skips it.
+
+One confirmation replaces reading each card only because the selection refuses
+what you would have refused. A vacancy reaches the batch after its score, its
+bucket, its source, the experience gap, the language level, the workshop's
+rules re-checked over the stored letter, the ATS audit and a re-read of the
+posting's own page. Everything else goes to «посмотреть руками» with one
+sentence saying what was found and a link — nothing is thrown away. On the
+corpus of 24 Sep 2026 that was 22 vacancies set aside: 11 asking more experience
+than `AGENT_MAX_EXPERIENCE_GAP_YEARS` allows, 4 archived since the last crawl,
+4 with no letter yet and 3 whose page nobody had re-read within the day.
+
+The ceiling on one batch is `AGENT_BATCH_LIMIT` (15), and the first batch after
+`AGENT_QUIET_PERIOD_DAYS` without a single application is the smaller
+`AGENT_FIRST_BATCH_LIMIT` (5): a mistake in the selection is discovered by an
+employer reading it, so the batch after a break must not reach fifteen of them
+at once. The ceiling counts confirmations already standing, not just the ones
+in this press.
+
+### Running the chain every night on Windows
+
+`AUTOPILOT_DAILY_AT=03:30` makes the dashboard start the chain itself at that
+local time, for as long as the dashboard is running. For a schedule that
+survives a reboot and a closed window, use the Task Scheduler and the same
+chain through the same endpoint:
+
+```bat
+schtasks /create /tn "who-wants-an-offer chain" /tr "cmd /c cd /d C:\Users\you\Who_wants_an_offer && uv run python -m wwao chain" /sc daily /st 03:30
+```
+
+The task needs the application server running, which `start.cmd` provides; it
+prints one line per step and leaves them in the window as its record, and its
+exit code is 0 when the chain went through and 1 when a step failed. A
+scheduled run collects and prepares. **It cannot send**, and that is a property
+of the command rather than of how it is scheduled: a clock can neither read a
+letter nor tick a box, so an application still waits for you to open «Отправить
+все».
+
 ```bash
 uv run python scripts/seed.py    # deterministic data for every screen state
 npm --prefix frontend run dev    # proxies /api and /health to :8000
@@ -142,9 +197,11 @@ npm --prefix frontend run dev    # proxies /api and /health to :8000
 
 ## From a crawl to an application
 
-One entry point, six subcommands, in the order you use them:
+One entry point, and these subcommands in the order you use them — or `chain`,
+which is the first four plus the queue from one press:
 
 ```bash
+uv run python -m wwao chain                # all four below in order, then the queue
 uv run python -m wwao crawl                # walk the sources (hh, arbeitnow, remotive, …)
 uv run python -m wwao match                # score what was found against the profile
 uv run python -m wwao letters --limit 20   # write cover letters: hh first, then the rest

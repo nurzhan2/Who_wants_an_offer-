@@ -5,6 +5,7 @@ feature that needs it fails loudly instead of silently using a placeholder.
 """
 
 import json
+from datetime import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -343,6 +344,68 @@ class Settings(BaseSettings):
     #: the agent reached it; a "yes" given days ago was given about a page that
     #: may no longer exist, so it expires and the owner is asked again.
     agent_confirmation_ttl_hours: Annotated[int, Field(ge=1, le=720)] = 72
+
+    # ── Autopilot: what one confirmation is allowed to cover ──────────
+    # These six turn «подтвердить каждую карточку» into «подтвердить пачку».
+    # That trade is only safe while the selection refuses everything a person
+    # would have refused, so every number here is a ceiling on trust and not a
+    # convenience; see app/services/agent_queue.triage.
+
+    #: How far short of a posting's stated experience the candidate may be and
+    #: still have an application sent without anybody looking at the card.
+    #:
+    #: Measured on the corpus of 24 Sep 2026, and the number falls out of hh's
+    #: own vocabulary rather than being chosen. hh states experience as one of
+    #: four bands, so against a profile holding 1.1 years the gap takes exactly
+    #: five values: -2.0, -1.1/-1.0, -0.1, 1.9 (the «3–6 лет» band) and 4.9 (the
+    #: «более 6 лет» band). Of the 87 vacancies above AGENT_QUEUE_MIN_SCORE and
+    #: not filtered, 17 sat at 1.9 — «Senior Golang разработчик», «Lead AI/LLM
+    #: Engineer», «Middle / Senior DevOps» — and none at 4.9, because the
+    #: scorer's own MAX_EXPERIENCE_GAP of 4 had already filtered that band away.
+    #:
+    #: So the only live decision is the 1.9 band, and the threshold has to sit
+    #: strictly between the largest gap the candidate actually meets (-0.1) and
+    #: the smallest they do not (1.9). One year is the middle of that interval:
+    #: "up to a year short is a stretch worth taking, more is a different job".
+    #: It is not the scorer's filter said twice — that one decides whether a
+    #: vacancy belongs in the list at all, this one whether an application goes
+    #: out unwatched — and it holds even if somebody raises the other.
+    agent_max_experience_gap_years: Annotated[float, Field(ge=0, le=20)] = 1.0
+    #: How recently somebody must have re-read a posting's own page before an
+    #: application may be sent against it. Measured 17 Sep 2026: every hh row in
+    #: the corpus carried last_seen_at of 8 Sep, nine days earlier, and a third
+    #: of the 16 Sep queue turned out archived when the agent opened it. A day,
+    #: because the chain runs daily and re-reading is what its last steps do.
+    agent_page_freshness_hours: Annotated[int, Field(ge=1, le=168)] = 24
+    #: How many applications one batch confirmation may cover.
+    agent_batch_limit: Annotated[int, Field(ge=1, le=100)] = 15
+    #: How many the first batch after a silence may cover. Smaller because a
+    #: mistake in the selection is discovered by an employer reading it, and the
+    #: first batch after a break is the one that must not reach fifteen of them
+    #: at once.
+    agent_first_batch_limit: Annotated[int, Field(ge=1, le=100)] = 5
+    #: How long without a single application counts as that silence.
+    agent_quiet_period_days: Annotated[int, Field(ge=1, le=365)] = 7
+    #: Local time of day the chain starts by itself, «HH:MM», or unset for never.
+    #: It starts the chain and only ever the chain: collecting and preparing
+    #: need no person, and sending is not in the chain at all. There is no
+    #: setting anywhere that lets a clock cause an application.
+    autopilot_daily_at: str | None = None
+
+    @field_validator("autopilot_daily_at")
+    @classmethod
+    def _valid_time_of_day(cls, value: str | None) -> str | None:
+        """Refuse a schedule that cannot be read, at boot rather than at 03:00."""
+        if value is None:
+            return None
+        try:
+            time.fromisoformat(value)
+        except ValueError as error:
+            raise ValueError(
+                f"AUTOPILOT_DAILY_AT={value!r} — это не время суток. Ожидается «ЧЧ:ММ», "
+                "например 03:30."
+            ) from error
+        return value
 
     @field_validator("*", mode="before")
     @classmethod
