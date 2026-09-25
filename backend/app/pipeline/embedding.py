@@ -360,12 +360,43 @@ async def _exhausted(
     ``count_never_embedded`` is the question that actually distinguishes them: a
     row with no vector at all needs one whatever its text hash says. So a full
     window of already-current rows plus rows that have never been embedded means
-    the selection really is starving them — it orders by ``last_seen_at`` and
-    applies its limit before anything knows whether a row's text moved, so the
-    churn crowds the window and the un-embedded rows behind it are unreachable.
-    That is a defect in the selection, not here, and it earns a warning. A full
+    the selection really is starving them, and that earns a warning. A full
     window of already-current rows with nothing un-embedded behind them is just
     a drained run with some churn in the count, and it earns silence.
+
+    Since 2026-09-25 the selection offers rows with no vector first
+    (:meth:`~app.db.repositories.vacancy.VacancyRepository.needs_embedding`), so
+    the warning above should now be unreachable: a row with no vector cannot sit
+    behind the window, and if one is in the window its stored hash is NULL, so it
+    is never counted as unchanged. A ``starved`` report from here is therefore
+    worth investigating rather than acting on — it means something is wrong with
+    an assumption in this file, not merely that the backlog is deep.
+
+    **What ``drained`` does not mean, and this is the known hole.** It means
+    nothing *without a vector* is stuck. It does not mean nothing is stuck. A row
+    whose description genuinely moved is only distinguishable by hashing its
+    text, which is the caller's second stage, so the selection cannot order by
+    it; and nothing retires an unchanged row from the predicate, so the window
+    that just proved itself useless comes back identical. A changed row sitting
+    behind a full window of unchanged ones is therefore unreachable, and this
+    function reports it as ``drained`` — a quiet failure where the un-embedded
+    case is a loud one.
+
+    It is left alone on purpose rather than overlooked. The fix is to record that
+    a row hashed and found current *has* a current vector, which would retire it
+    from the predicate; that contradicts the decision
+    ``test_an_unchanged_posting_stays_flagged_and_is_still_not_a_backlog`` pins
+    deliberately, so it is a design change and not a bug fix.
+
+    Nothing about the ordering mitigates it, and it would be comfortable to think
+    otherwise: the crawl that rewrites a description bumps ``last_seen_at`` on
+    that row, but it bumps the same column on every unchanged row it saw, so a
+    changed row shares the newest timestamp with all of them rather than leading
+    them. Whether it falls inside the window is decided by how many rows that
+    crawl touched, and ties are not broken any further, so the answer can differ
+    between two calls against unchanged data. What bounds the damage is the size
+    of the hole and not its shape: it needs more than ``SELECT_WINDOW`` rows
+    touched in one crawl before a changed row can hide behind them.
     """
     backlog = await _outstanding(vacancies, progress)
     if backlog == 0:
