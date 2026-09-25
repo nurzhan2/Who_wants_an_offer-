@@ -407,8 +407,37 @@ class VacancyRepository:
         which is the common case, because every re-crawl bumps ``updated_at``
         whether or not the description actually moved.
 
-        Ordered by ``last_seen_at`` so that when the limit bites, it is the
-        postings still being advertised that get vectors first.
+        **Rows with no vector at all come first, and that is load-bearing.**
+        Ordering by ``last_seen_at`` alone lets a crawl decide what the
+        selection can reach, because the crawl bumps that timestamp on every row
+        it sees — including the thousands whose description never moved, which
+        the wider arm of the predicate then flags. Those crowd the window ahead
+        of rows that have never been embedded, the caller hashes them, finds
+        nothing to do, and asks again; nothing retires an unchanged row from the
+        predicate, so the very same window comes back and the backlog behind it
+        is unreachable in that call and in every later one.
+
+        Measured on the live corpus, 24 Sep 2026: a chain whose crawl brought in
+        1236 new postings computed **zero** description vectors and reported
+        ``stopped="starved"`` with 1704 rows holding none, and the scoring step
+        right after it read 1703 vacancies without one. That is not a number to
+        widen the window against — the ratio of churn to real work belongs to
+        the crawl, not to the window — so the sort leads with the only fact that
+        cannot be wrong: a row with no vector needs one whatever its text hash
+        turns out to be.
+
+        ``last_seen_at`` still breaks the tie inside each group, so among rows
+        that genuinely need work it is still the postings still being advertised
+        that get vectors first.
+
+        The extra sort term is not worth an index and does not need one.
+        ``ix_pg_vacancy_needs_embedding`` is partial on the narrow predicate and
+        this statement's ``WHERE`` is the wide one, so the plan was already a
+        sequential scan with a top-N heapsort before this ordering existed and
+        still is: measured on a corpus of 10 232, 9.0 ms before and 15.4 ms
+        after, against roughly fifty seconds of model time for the batch the
+        window feeds. The index earns its keep on
+        :meth:`count_never_embedded`, whose predicate it matches exactly.
         """
         stmt = (
             select(
@@ -420,7 +449,7 @@ class VacancyRepository:
                 Vacancy.embedding_text_hash,
             )
             .where(_needs_embedding())
-            .order_by(Vacancy.last_seen_at.desc())
+            .order_by(_never_embedded().desc(), Vacancy.last_seen_at.desc())
             .limit(limit)
         )
         rows = (await self.session.execute(stmt)).all()

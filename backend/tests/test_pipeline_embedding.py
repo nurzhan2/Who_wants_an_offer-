@@ -957,6 +957,138 @@ async def test_an_unchanged_posting_stays_flagged_and_is_still_not_a_backlog(
     assert outcome.backlog == 0, "nothing to do, even though six rows are still flagged"
 
 
+@pytest.mark.db
+async def test_a_row_with_no_vector_is_offered_before_one_that_merely_might_be_stale(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """The ordering the whole starvation turned on, asserted on its own.
+
+    ``last_seen_at`` says when a posting was last advertised. It says nothing
+    about whether this row needs a vector, so ordering by it alone lets a
+    re-crawl decide what the selection can reach: the crawl bumps the timestamp
+    on every row it sees, including thousands whose description never moved, and
+    those crowd the window ahead of rows that have no vector at all.
+
+    Measured on the live corpus, 24 Sep 2026: a chain whose crawl brought in
+    1236 new postings then computed **zero** description vectors and reported
+    ``stopped="starved"``, with 1704 rows holding no vector. Scoring right after
+    it read 1703 vacancies without one.
+
+    So the sort key leads with the only fact that cannot be wrong: a row with no
+    vector needs one whatever its text hash turns out to be.
+    """
+    older, newer = await store(vacancies, 2)
+    await _embed_one(db_session, newer)
+    # The crawl saw the already-embedded row most recently. Under the old
+    # ordering that alone was enough to put it first.
+    await db_session.execute(
+        sa_update(Vacancy.__table__)
+        .where(Vacancy.__table__.c.id == newer)
+        .values(last_seen_at=func.now(), updated_at=func.now())
+    )
+    await db_session.execute(
+        sa_update(Vacancy.__table__)
+        .where(Vacancy.__table__.c.id == older)
+        .values(last_seen_at=func.now() - timedelta(days=9))
+    )
+    await db_session.flush()
+
+    window = await vacancies.needs_embedding(limit=2)
+
+    assert [row.id for row in window] == [older, newer]
+
+
+@pytest.mark.db
+async def test_a_backlog_behind_a_window_of_churn_is_reached_rather_than_starved(
+    db_session: AsyncSession,
+    vacancies: VacancyRepository,
+    real_fake_provider: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live failure of 24 Sep, in miniature and against real SQL.
+
+    A window's worth of already-embedded rows whose text never moved, all seen
+    more recently than the rows that have no vector at all. The step hashes the
+    window, finds nothing to do, asks again, gets *the same window* — nothing
+    retires an unchanged row from the predicate — and stops. Under the old
+    ordering the backlog behind it was unreachable in that call and in every
+    later one, because the query has no offset and the answer never changed.
+
+    The fix is not a bigger window: the ratio of churn to real work is a
+    property of the crawl, not of the window. It is that a row with no vector
+    outranks one that merely might be stale.
+    """
+    monkeypatch.setattr(step, "SELECT_WINDOW", 4)
+    churn = await store(vacancies, 4)
+    await embed_pending(db_session)
+    assert await with_vectors(db_session, churn) == 4
+
+    # Age every vector so the "written since we embedded it" arm of the
+    # predicate fires, then add the backlog and make the churn look fresher.
+    await db_session.execute(
+        sa_update(Vacancy.__table__).values(
+            embedded_at=Vacancy.__table__.c.embedded_at - timedelta(hours=1)
+        )
+    )
+    backlog = await _store_more(vacancies, 4)
+    await db_session.execute(
+        sa_update(Vacancy.__table__)
+        .where(Vacancy.__table__.c.id.in_(backlog))
+        .values(last_seen_at=func.now() - timedelta(days=9))
+    )
+    await db_session.flush()
+    assert await vacancies.count_never_embedded() == 4
+
+    outcome = await embed_pending(db_session)
+
+    assert outcome.embedded == 4, "the rows with no vector were reached"
+    assert outcome.stopped != "starved"
+    assert await vacancies.count_never_embedded() == 0
+    assert await with_vectors(db_session, backlog) == 4
+
+
+async def _embed_one(session: AsyncSession, vacancy_id: UUID) -> None:
+    """Give one row a vector and a hash, the way a finished pass leaves it.
+
+    ``embedded_at`` is backdated an hour on purpose: inside one transaction
+    PostgreSQL's ``now()`` is constant, so a vector written and a row touched in
+    the same test would come out with equal timestamps and the "written since we
+    embedded it" arm of the predicate could never fire. Same trick the churn
+    tests above use, for the same reason.
+    """
+    await session.execute(
+        sa_update(Vacancy.__table__)
+        .where(Vacancy.__table__.c.id == vacancy_id)
+        .values(
+            embedding=[0.0] * settings.embedding_dim,
+            embedded_at=func.now() - timedelta(hours=1),
+            embedding_text_hash="x" * 64,
+        )
+    )
+    await session.flush()
+
+
+async def _store_more(vacancies: VacancyRepository, count: int) -> tuple[UUID, ...]:
+    """A second batch of postings with no vectors, under their own ids."""
+    result = await vacancies.bulk_upsert(
+        [
+            (
+                make_vacancy(
+                    seed=f"backlog-{index}",
+                    description_raw=f"Platform engineer. Backlog posting {index}.",
+                ),
+                "fixture_source",
+                f"backlog-{index}",
+                f"https://example.test/backlog/{index}",
+                {},
+            )
+            for index in range(count)
+        ]
+    )
+    await vacancies.session.flush()
+    return result.vacancy_ids
+
+
 # ── the script that drives it ─────────────────────────────────────────
 #
 # scripts/embed_backlog.py is where a person actually meets this step, and it is
