@@ -40,7 +40,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.db.base import uuid7
 from app.db.enums import MatchBucket
-from app.db.models import Application, Match, Vacancy, VacancySkill, VacancySource
+from app.db.models import (
+    Application,
+    CandidateProfile,
+    Match,
+    Vacancy,
+    VacancySkill,
+    VacancySource,
+)
 from app.db.repositories.cursor import Cursor, SortableColumn, keyset_order_by, keyset_where
 from app.db.seed_rows import fullest_first, seed_only
 from app.schemas.common import (
@@ -152,6 +159,13 @@ class EmbeddingCandidate:
     description: str | None
     #: Hash of the text the current vector was computed from, if any.
     stored_hash: str | None
+    #: How near this row's title is to the profile's headline, on the same
+    #: ``(cos + 1) / 2`` scale ``matching`` scores with. Filled only when the
+    #: selection was asked to rank — see :meth:`VacancyRepository.needs_embedding`
+    #: — and ``None`` both when it was not and when the row has no title vector
+    #: to measure. The description pass needs it to know when it may stop, and
+    #: it comes from the database because that is where the vectors are.
+    title_similarity: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -397,7 +411,9 @@ class VacancyRepository:
         stmt = select(func.count()).select_from(Vacancy).where(_never_embedded())
         return int((await self.session.execute(stmt)).scalar_one())
 
-    async def needs_embedding(self, *, limit: int = 500) -> list[EmbeddingCandidate]:
+    async def needs_embedding(
+        self, *, limit: int = 500, near: UUID | None = None
+    ) -> list[EmbeddingCandidate]:
         """Rows whose vector may be missing or out of date.
 
         Two stages on purpose. This one is the cheap SQL narrowing: a vector is
@@ -438,20 +454,54 @@ class VacancyRepository:
         after, against roughly fifty seconds of model time for the batch the
         window feeds. The index earns its keep on
         :meth:`count_never_embedded`, whose predicate it matches exactly.
+
+        **``near`` ranks the window by title, and it is how the expensive pass
+        stops paying for postings nobody will read.** Given a profile id, the
+        rows come back nearest-title-first: the distance between each row's title
+        vector and that profile's headline vector, which is 0.7 of the score in
+        ``docs/MATCHING.md``. Measured on the live corpus, the single best title
+        match of 7298 — «Data Analyst / Data Engineer», 0.9402 against the active
+        profile's headline — had no description vector, and under a
+        ``last_seen_at`` ordering it sat wherever the last crawl happened to put
+        it. Ranked, it is first in line.
+
+        The ordering composes rather than replaces: rows with no vector still
+        come first, because that half cannot be wrong, and the title distance
+        only decides the order *within* them. Rows with no title vector sort
+        last — there is nothing to rank them by, and the title pass is cheap
+        enough (0.32 s against a description's 8.55 s) that the next run will
+        have given them one.
+
+        Without ``near`` the order is what it was, so every caller that does not
+        rank is unaffected.
         """
-        stmt = (
-            select(
-                Vacancy.id,
-                Vacancy.title,
-                Vacancy.company,
-                Vacancy.city,
-                Vacancy.description_raw,
-                Vacancy.embedding_text_hash,
+        distance = None
+        if near is not None:
+            headline = select(CandidateProfile.headline_embedding).where(
+                CandidateProfile.id == near
             )
-            .where(_needs_embedding())
-            .order_by(_never_embedded().desc(), Vacancy.last_seen_at.desc())
-            .limit(limit)
-        )
+            distance = Vacancy.title_embedding.cosine_distance(headline.scalar_subquery())
+
+        columns = [
+            Vacancy.id,
+            Vacancy.title,
+            Vacancy.company,
+            Vacancy.city,
+            Vacancy.description_raw,
+            Vacancy.embedding_text_hash,
+        ]
+        stmt = select(*columns, *([distance.label("distance")] if distance is not None else []))
+        # Annotated because the first element types the list, and the two that
+        # follow are ordering expressions over other column types.
+        order: list[ColumnElement[Any]] = [_never_embedded().desc()]
+        if distance is not None:
+            # NULLS LAST rather than a coalesce: a row with no title vector has
+            # no distance, and inventing one for it would rank it against rows
+            # whose distance was measured.
+            order.append(distance.asc().nullslast())
+        order.append(Vacancy.last_seen_at.desc())
+        stmt = stmt.where(_needs_embedding()).order_by(*order).limit(limit)
+
         rows = (await self.session.execute(stmt)).all()
         return [
             EmbeddingCandidate(
@@ -461,6 +511,13 @@ class VacancyRepository:
                 city=row.city,
                 description=row.description_raw,
                 stored_hash=row.embedding_text_hash,
+                # The same ``(cos + 1) / 2`` scale ``matching`` scores on, so the
+                # caller compares like with like rather than converting.
+                title_similarity=(
+                    None
+                    if distance is None or row.distance is None
+                    else 1 - float(row.distance) / 2
+                ),
             )
             for row in rows
         ]

@@ -252,7 +252,23 @@ _CRAWL_TERMINAL: Final[frozenset[PipelineJobStatus]] = frozenset(
 
 
 async def _step_embed(step: ChainStep) -> list[str]:
-    """Compute the vectors the scoring step needs, descriptions then titles."""
+    """Compute the vectors the scoring step needs, titles then descriptions.
+
+    Titles lead because the description pass ranks by them; see
+    ``pipeline.embedding.embed_pending``. The report below still reads
+    "описаний, названий", which is the order a person asks about them in rather
+    than the order they are computed.
+    """
+    titles = 0
+    last_titles: EmbeddingOutcome | None = None
+    for _ in range(MAX_EMBED_PASSES):
+        async with session_factory() as session:
+            last_titles = await embed_pending_titles(session)
+        titles += last_titles.embedded
+        step.note = f"названия: посчитано {titles}"
+        if last_titles.stopped != "budget" or last_titles.embedded == 0:
+            break
+
     written = 0
     last: EmbeddingOutcome | None = None
     for _ in range(MAX_EMBED_PASSES):
@@ -266,16 +282,6 @@ async def _step_embed(step: ChainStep) -> list[str]:
         written += last.embedded
         step.note = f"описания: посчитано {written}"
         if last.stopped != "budget" or last.embedded == 0:
-            break
-
-    titles = 0
-    last_titles: EmbeddingOutcome | None = None
-    for _ in range(MAX_EMBED_PASSES):
-        async with session_factory() as session:
-            last_titles = await embed_pending_titles(session)
-        titles += last_titles.embedded
-        step.note = f"названия: посчитано {titles}"
-        if last_titles.stopped != "budget" or last_titles.embedded == 0:
             break
     return [
         f"Векторов посчитано: описаний {written}, названий {titles}.",

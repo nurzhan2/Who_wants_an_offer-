@@ -208,6 +208,34 @@ class Settings(BaseSettings):
     #: neither bounds the other: a row served from the disk cache costs
     #: microseconds and a cold one costs seconds.
     embedding_time_budget_seconds: Annotated[float, Field(gt=0)] = 3600.0
+    #: Titles get their own budget, and the two numbers above are why. Measured
+    #: on the owner's CPU, 25 Sep 2026, over real corpus text: a title is 33
+    #: characters and costs **0.32 s**, a full vacancy text is 4065 characters
+    #: and costs **8.55 s** — twenty-seven times apart. Sharing one budget makes
+    #: them compete, and descriptions win because they run first and eat the
+    #: hour: one live run computed 379 titles and 80 descriptions while 2934
+    #: titles were outstanding, which is sixteen minutes of work.
+    #:
+    #: Sixteen minutes is the whole point. Title vectors are what the
+    #: description pass ranks by, so finishing them is the cheap prerequisite
+    #: for spending the expensive pass only where it can change the answer —
+    #: see ``pipeline.embedding.embed_pending``. A cap high enough to drain any
+    #: plausible corpus in one pass, and an hour of clock as the real stop.
+    embedding_titles_max_per_run: Annotated[int, Field(ge=1)] = 50_000
+    embedding_titles_time_budget_seconds: Annotated[float, Field(gt=0)] = 3600.0
+    #: How many rows the description pass embeds before it is allowed to stop
+    #: early. The stopping rule reads the largest semantic similarity seen so
+    #: far, and a ceiling estimated from a handful of rows is too low — measured:
+    #: with no warm-up the walk stopped after 15 descriptions and returned the
+    #: wrong top ten. Fifty was the smallest value that reproduced the
+    #: full-computation top-K exactly at every K tested (10, 25, 50, 100, 200).
+    embedding_warmup_rows: Annotated[int, Field(ge=0)] = 50
+    #: How deep the ranking the description pass protects goes. The chain builds
+    #: its queue from ``autopilot.SELECTION_LIMIT`` (50) behind a score gate of
+    #: ``agent_queue_min_score`` (78), so fifty is the depth that has to be
+    #: exactly right; asking for more costs descriptions and changes nothing a
+    #: person will read.
+    embedding_protect_top: Annotated[int, Field(ge=1)] = 50
     #: Vectors are cached on disk by sha256(text + model). Without it a full
     #: pipeline run re-encodes thousands of unchanged vacancies.
     embedding_cache_dir: Path | None = Path(".cache/embeddings")

@@ -39,7 +39,7 @@ from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import replace
 from datetime import timedelta
 from types import ModuleType
-from typing import cast
+from typing import Final, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -50,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from structlog.testing import capture_logs
 
 from app.core.config import settings
-from app.db.models import Vacancy
+from app.db.models import CandidateProfile, Vacancy
 from app.db.repositories.vacancy import EmbeddedVacancy, EmbeddingCandidate, VacancyRepository
 from app.matching import embeddings
 from app.matching.embeddings import (
@@ -91,6 +91,8 @@ class FakeVacancies:
         self.counts = 0
         #: And how many times for the narrow one.
         self.never_embedded_counts = 0
+        #: The profile each selection was asked to rank against, in order.
+        self.near: list[UUID | None] = []
 
     def outstanding(self) -> list[EmbeddingCandidate]:
         """Every row the selection still flags, with no window on it.
@@ -99,10 +101,29 @@ class FakeVacancies:
         """
         return [row for row in self._rows if row.id not in self.written]
 
-    async def needs_embedding(self, *, limit: int) -> list[EmbeddingCandidate]:
-        """Rows with no vector yet, newest first, capped at ``limit``."""
+    async def needs_embedding(
+        self, *, limit: int, near: UUID | None = None
+    ) -> list[EmbeddingCandidate]:
+        """Rows with no vector yet, capped at ``limit``.
+
+        ``near`` reproduces the SQL's ordering rather than ignoring it: rows with
+        no vector first, and within them nearest title first. A double that
+        returned insertion order would let a test about the walk's stopping point
+        pass while the real selection handed the step a different sequence, which
+        is the one thing the reach rule depends on.
+        """
         self.selections.append(limit)
-        return self.outstanding()[:limit]
+        self.near.append(near)
+        rows = self.outstanding()
+        if near is not None:
+            rows = sorted(
+                rows,
+                key=lambda row: (
+                    row.stored_hash is not None,
+                    -(row.title_similarity if row.title_similarity is not None else -1.0),
+                ),
+            )
+        return rows[:limit]
 
     async def count_needing_embedding(self) -> int:
         """The same predicate, counted rather than windowed.
@@ -171,7 +192,9 @@ class CountingProvider:
         return [FakeEmbeddingProvider.vector_for(text) for text in texts]
 
 
-def candidate(index: int, *, unchanged: bool = False) -> EmbeddingCandidate:
+def candidate(
+    index: int, *, unchanged: bool = False, title_similarity: float | None = None
+) -> EmbeddingCandidate:
     """One selectable row. ``unchanged`` gives it the hash of its own text."""
     row = EmbeddingCandidate(
         id=uuid4(),
@@ -180,6 +203,7 @@ def candidate(index: int, *, unchanged: bool = False) -> EmbeddingCandidate:
         city=None,
         description=f"Body of posting {index}.",
         stored_hash=None,
+        title_similarity=title_similarity,
     )
     if not unchanged:
         return row
@@ -235,16 +259,63 @@ def session(log: list[str]) -> FakeSession:
     return FakeSession(log)
 
 
+#: The profile vector the ranked tests score against. Deliberately not a unit
+#: vector of ones: with every component equal, every row's semantic similarity
+#: comes out the same and a test could not tell the reach rule from a coin.
+PROFILE_VECTOR: Final[list[float]] = FakeEmbeddingProvider.vector_for(
+    "Python Developer - Backend / AI"
+)
+
+
 def wire(
     monkeypatch: pytest.MonkeyPatch,
     rows: Sequence[EmbeddingCandidate],
     provider: CountingProvider,
+    *,
+    profile: tuple[UUID, Sequence[float]] | None = None,
 ) -> FakeVacancies:
-    """Point the step at the doubles and hand back the repository."""
+    """Point the step at the doubles and hand back the repository.
+
+    ``profile`` is what ``_ranking_profile`` will answer. ``None`` — the default
+    — is the unranked pass: no headline vector to rank by, so the step embeds
+    everything, which is what it did before the reach rule existed and what
+    every test above this line is about. Patched rather than served from the fake
+    session because resolving it is one SQL query and ``FakeSession`` has no
+    ``execute``; a double for it would be testing SQLAlchemy.
+    """
     vacancies = FakeVacancies(rows)
     monkeypatch.setattr(step, "VacancyRepository", lambda _session: vacancies)
     monkeypatch.setattr(embeddings, "get_provider", lambda: provider)
+
+    async def ranking_profile(_session: object) -> tuple[UUID, Sequence[float]] | None:
+        return profile
+
+    monkeypatch.setattr(step, "_ranking_profile", ranking_profile)
     return vacancies
+
+
+def ranked(
+    *, warmup: int, protect: int, monkeypatch: pytest.MonkeyPatch
+) -> tuple[UUID, list[float]]:
+    """Turn the reach rule on with those two numbers, and hand back a profile."""
+    monkeypatch.setattr(settings, "embedding_warmup_rows", warmup)
+    monkeypatch.setattr(settings, "embedding_protect_top", protect)
+    return uuid4(), PROFILE_VECTOR
+
+
+def full_score(row: EmbeddingCandidate) -> float:
+    """What the shipped formula would give this row once its vector exists.
+
+    Built from the same two pieces the step uses — the row's title similarity and
+    its description's similarity to the profile — so a test can compute the
+    ranking the reach rule claims to preserve without embedding anything.
+    """
+    text = vacancy_text(
+        title=row.title, company=row.company, city=row.city, description=row.description
+    )
+    semantic = step._cosine(FakeEmbeddingProvider.vector_for(text), PROFILE_VECTOR)
+    title = row.title_similarity or 0.0
+    return 100 * (step._TITLE_W * title + step._SEMANTIC_W * semantic)
 
 
 def as_session(fake: FakeSession) -> AsyncSession:
@@ -822,6 +893,255 @@ async def with_vectors(session: AsyncSession, ids: Sequence[UUID] | None = None)
     if ids is not None:
         stmt = stmt.where(Vacancy.id.in_(ids))
     return int((await session.execute(stmt)).scalar_one())
+
+
+# ── the reach rule: paying only for descriptions that can change the answer ──
+
+
+@pytest.mark.unit
+async def test_an_unranked_pass_still_embeds_everything(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession, log: list[str]
+) -> None:
+    """No headline vector to rank by means the old behaviour, unchanged.
+
+    The fallback is the whole compatibility promise of the reach rule: a
+    deployment whose profile has no headline vector yet — a fresh resume, a
+    profile saved before ``0015_title_embedding`` — must not quietly stop
+    embedding. It pays full price, as it always did, and says so in the log.
+    """
+    rows = [candidate(n) for n in range(12)]
+    vacancies = wire(monkeypatch, rows, CountingProvider(log), profile=None)
+
+    with capture_logs() as logs:
+        outcome = await embed_pending(as_session(session))
+
+    assert outcome.embedded == 12
+    assert outcome.stopped == "drained"
+    assert outcome.declined == 0
+    assert vacancies.near == [None, None], "an unranked pass must not ask for a ranking"
+    plan = next(entry for entry in logs if entry["event"] == "pipeline.embedding.plan")
+    assert plan["ranked"] is False
+
+
+@pytest.mark.unit
+async def test_the_warm_up_is_paid_before_anything_may_be_declined(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession, log: list[str]
+) -> None:
+    """The measured failure, pinned.
+
+    With no warm-up the walk stopped after fifteen descriptions on a ceiling
+    estimated from fifteen rows, and returned the wrong top ten. So the rule is
+    not allowed to decline anything until it has embedded ``warmup`` rows,
+    however hopeless the rows ahead look — and here every row after the first is
+    deliberately hopeless, so a rule that could stop early would stop at once.
+    """
+    rows = [candidate(0, title_similarity=0.99)] + [
+        candidate(n, title_similarity=0.10) for n in range(1, 40)
+    ]
+    profile = ranked(warmup=20, protect=1, monkeypatch=monkeypatch)
+    monkeypatch.setattr(settings, "embedding_batch_size", 4)
+    wire(monkeypatch, rows, CountingProvider(log), profile=profile)
+
+    outcome = await embed_pending(as_session(session))
+
+    assert outcome.embedded >= 20, (
+        f"embedded {outcome.embedded}: the rule declined rows before the warm-up was paid"
+    )
+    assert outcome.stopped == "beyond_reach"
+
+
+@pytest.mark.unit
+async def test_a_pass_that_can_reach_nothing_more_stops_and_says_what_it_left(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession, log: list[str]
+) -> None:
+    """Stopping early is reported as its own ending, with the count it declined.
+
+    Not as ``drained`` — which would claim the corpus is done — and not as
+    ``budget``, which would send somebody to raise a limit that is not the
+    reason. ``declined`` is counted in the database rather than subtracted from
+    two totals, so it is rows with no vector that this pass chose to leave.
+    """
+    rows = [candidate(n, title_similarity=0.95 - n * 0.01) for n in range(10)] + [
+        candidate(n, title_similarity=0.05) for n in range(10, 60)
+    ]
+    profile = ranked(warmup=4, protect=3, monkeypatch=monkeypatch)
+    monkeypatch.setattr(settings, "embedding_batch_size", 2)
+    vacancies = wire(monkeypatch, rows, CountingProvider(log), profile=profile)
+
+    outcome = await embed_pending(as_session(session))
+
+    assert outcome.stopped == "beyond_reach"
+    assert outcome.embedded < len(rows), "the point is that it did not embed everything"
+    assert outcome.declined > 0, "rows left without a vector have to be counted"
+    assert outcome.declined == len(vacancies.outstanding())
+    assert all(near == profile[0] for near in vacancies.near)
+
+
+@pytest.mark.unit
+async def test_the_walk_reproduces_the_top_of_the_ranking_it_did_not_compute(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession, log: list[str]
+) -> None:
+    """The measurement, as a test: the same top K for a fraction of the work.
+
+    Two passes over the same corpus. One has the reach rule on; the other has it
+    effectively off, which is what "compute every description" means here. The
+    claim is that the K best rows by the shipped formula are the same rows in the
+    same order — because a row the rule declines has a title similarity too low
+    for any description to lift it past the K-th score already found.
+
+    Measured on the live corpus this held at every K tried while embedding about
+    3% of the descriptions. Here it is asserted on a corpus small enough to check
+    by hand, with the saving asserted too so that a rule which quietly stopped
+    declining anything would fail rather than pass.
+    """
+    protect = 5
+    # Titles spread across the range, so the ranking is not the insertion order
+    # and a rule that simply took the first rows would get a different answer.
+    similarities = [0.95, 0.62, 0.88, 0.71, 0.93, 0.66, 0.90, 0.74, 0.80, 0.68]
+    rows = [
+        candidate(n, title_similarity=similarities[n % len(similarities)] - n * 0.004)
+        for n in range(80)
+    ]
+    monkeypatch.setattr(settings, "embedding_batch_size", 4)
+
+    everything = ranked(warmup=len(rows) + 1, protect=protect, monkeypatch=monkeypatch)
+    wire(monkeypatch, rows, CountingProvider(log), profile=everything)
+    baseline = await embed_pending(as_session(session))
+
+    selective = ranked(warmup=8, protect=protect, monkeypatch=monkeypatch)
+    picky = wire(monkeypatch, rows, CountingProvider(log), profile=selective)
+    outcome = await embed_pending(as_session(session))
+
+    assert baseline.embedded == len(rows), "the baseline has to embed everything"
+    assert outcome.embedded < baseline.embedded, (
+        f"embedded {outcome.embedded} of {baseline.embedded}: the rule declined nothing"
+    )
+
+    ordered = sorted(rows, key=lambda row: (-full_score(row), str(row.id)))
+    top = [row.id for row in ordered[:protect]]
+    # Every row of the true top K was embedded by the selective pass. That is the
+    # guarantee: a declined row cannot be in the top K, so the K best rows of the
+    # cheap pass are the K best rows, in the same order.
+    assert set(top) <= set(picky.written), (
+        "the selective pass skipped a row that belongs in the top "
+        f"{protect}: {[str(i)[:8] for i in top if i not in picky.written]}"
+    )
+    cheap_top = [
+        row.id
+        for row in sorted(
+            (row for row in rows if row.id in picky.written),
+            key=lambda row: (-full_score(row), str(row.id)),
+        )[:protect]
+    ]
+    assert cheap_top == top, "same rows, and the same order"
+
+
+@pytest.mark.unit
+async def test_a_row_with_no_title_vector_is_not_guessed_about(
+    monkeypatch: pytest.MonkeyPatch, session: FakeSession, log: list[str]
+) -> None:
+    """Nothing ranks it, so the walk stops at it rather than assuming about it.
+
+    It sorts last by construction, and the title pass costs 0.32 s a row, so the
+    next run will have given it one. Inventing a similarity for it here would put
+    it in a ranking it is not in.
+    """
+    rows = [candidate(n, title_similarity=0.9 - n * 0.05) for n in range(8)] + [
+        candidate(99, title_similarity=None)
+    ]
+    profile = ranked(warmup=2, protect=2, monkeypatch=monkeypatch)
+    monkeypatch.setattr(settings, "embedding_batch_size", 1)
+    vacancies = wire(monkeypatch, rows, CountingProvider(log), profile=profile)
+
+    outcome = await embed_pending(as_session(session))
+
+    unranked = next(row for row in rows if row.title_similarity is None)
+    assert unranked.id not in vacancies.written, "a row with no title vector was embedded anyway"
+    assert outcome.stopped == "beyond_reach"
+
+
+@pytest.mark.db
+async def test_the_ranked_selection_orders_by_title_distance_in_the_database(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """The half a double cannot test: the ``ORDER BY`` is SQL and pgvector.
+
+    Three postings and a profile, with title vectors placed so that the nearest
+    title is deliberately NOT the newest row — because ``last_seen_at`` is what
+    the selection used to order by, and a fixture where the two agree would pass
+    either way.
+
+    Also asserts the composition with ``adf6d66``'s leading key: a row that
+    already has a description vector sorts behind every row that has none,
+    however near its title. Rows with no vector cannot be ranked out of the way,
+    because that half of the ordering cannot be wrong.
+    """
+    ids = await store(vacancies, 3)
+    far, near, already = ids
+    dim = settings.embedding_dim
+    # Unit vectors along two axes: the profile points along axis 0, so a title
+    # along axis 0 is near it and one along axis 1 is orthogonal to it.
+    axis0 = [1.0] + [0.0] * (dim - 1)
+    axis1 = [0.0, 1.0] + [0.0] * (dim - 2)
+    profile = CandidateProfile(
+        name="Ranked",
+        headline="Data Analyst",
+        is_active=True,
+        embedding=axis0,
+        headline_embedding=axis0,
+    )
+    db_session.add(profile)
+    await db_session.flush()
+
+    await db_session.execute(
+        sa_update(Vacancy).where(Vacancy.id == far).values(title_embedding=axis1)
+    )
+    await db_session.execute(
+        sa_update(Vacancy).where(Vacancy.id == near).values(title_embedding=axis0)
+    )
+    # ``already`` has the nearest possible title AND a description vector, so it
+    # is the row that proves which key leads.
+    await db_session.execute(
+        sa_update(Vacancy)
+        .where(Vacancy.id == already)
+        .values(title_embedding=axis0, embedding=axis0, embedded_at=func.now())
+    )
+    await db_session.flush()
+
+    ranked_rows = await vacancies.needs_embedding(limit=10, near=profile.id)
+
+    order = [row.id for row in ranked_rows]
+    assert order[0] == near, "the nearest title of the rows with no vector must come first"
+    assert order.index(far) < order.index(already) if already in order else True, (
+        "a row that already has a description vector sorts behind rows that have none"
+    )
+    similarities = {row.id: row.title_similarity for row in ranked_rows}
+    assert similarities[near] is not None and similarities[far] is not None
+    assert similarities[near] > similarities[far]
+    # The same (cos + 1) / 2 scale matching scores on: identical vectors are 1.0,
+    # orthogonal ones 0.5.
+    assert similarities[near] == pytest.approx(1.0, abs=1e-6)
+    assert similarities[far] == pytest.approx(0.5, abs=1e-6)
+
+
+@pytest.mark.db
+async def test_an_unranked_selection_is_byte_for_byte_what_it_always_was(
+    db_session: AsyncSession, vacancies: VacancyRepository
+) -> None:
+    """Callers that pass no profile get the committed ordering and no distance.
+
+    The compatibility half of the same statement: ``near=None`` must not add a
+    column, a join or a sort term, because every caller outside the ranked pass
+    relies on the ordering ``adf6d66`` settled.
+    """
+    await store(vacancies, 3)
+
+    rows = await vacancies.needs_embedding(limit=10)
+
+    assert len(rows) == 3
+    assert all(row.title_similarity is None for row in rows), (
+        "an unranked selection must not report a distance it was not asked for"
+    )
 
 
 @pytest.mark.db

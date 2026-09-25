@@ -50,18 +50,26 @@ the next run, and every non-semantic part of the product still works.
 """
 
 import hashlib
+import math
 import time
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import get_logger
-from app.db.repositories.vacancy import EmbeddedVacancy, EmbeddingCandidate, VacancyRepository
+from app.db.models import CandidateProfile
+from app.db.repositories.vacancy import (
+    EmbeddedVacancy,
+    EmbeddingCandidate,
+    VacancyRepository,
+)
 from app.matching.embeddings import EmbeddingError, encode_texts, vacancy_text
+from app.matching.rules import TITLE_WEIGHTS
 
 logger = get_logger(__name__)
 
@@ -72,7 +80,7 @@ type Clock = Callable[[], float]
 
 #: Why the step stopped. Reported rather than inferred, because "embedded 0" has
 #: four completely different meanings and only one of them is fine.
-type StopReason = Literal["drained", "budget", "starved", "unavailable"]
+type StopReason = Literal["drained", "budget", "starved", "unavailable", "beyond_reach"]
 
 #: Rows one selection asks for. Deliberately larger than a model batch: the SQL
 #: narrowing returns rows that only *may* be stale, and the ones whose text
@@ -80,6 +88,94 @@ type StopReason = Literal["drained", "budget", "starved", "unavailable"]
 #: batch would routinely come back with nothing to do. Bounded because every row
 #: carries its description and a window is held in memory whole.
 SELECT_WINDOW = 200
+
+#: The two weights the reach rule is sound for, read from the formula rather
+#: than written again here. ``matching.rules.Formula.TITLE`` is the default and
+#: the only formula the automatic pipeline uses.
+_TITLE_W = float(TITLE_WEIGHTS["title_similarity"])
+_SEMANTIC_W = float(TITLE_WEIGHTS["semantic_similarity"])
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    """Cosine similarity, on the ``(cos + 1) / 2`` scale ``matching`` scores on.
+
+    In Python rather than in SQL because the vector in question was computed a
+    microsecond ago and is in hand; asking the database for it would mean a
+    round trip per batch to re-read what this process just wrote. A thousand
+    multiplications against a batch of sixteen is nothing beside the eight and a
+    half seconds the model spent on one of them.
+    """
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    norm = math.sqrt(sum(a * a for a in left)) * math.sqrt(sum(b * b for b in right))
+    if norm == 0:
+        return 0.0
+    return 1 - (1 - dot / norm) / 2
+
+
+@dataclass(slots=True)
+class _Reach:
+    """Whether any row further down the title ranking could still matter.
+
+    **The rule.** Rows arrive nearest-title-first, so the next row's title
+    similarity ``t`` is the best any remaining row can have. Its description is
+    unknown, but no description seen so far has scored above ``s_max``, so the
+    best score anything remaining could reach is
+    ``title_w * t + semantic_w * s_max``. Once that falls below the K-th best
+    score already computed, nothing left can enter the top K and the walk stops.
+
+    **Which formula this is sound for.** ``rules.Formula.TITLE``, whose weights
+    are read above. It is NOT sound for ``Formula.COMPONENTS``
+    (``run_matching.py --formula components``), where title similarity is not a
+    component at all and the number is built from skill coverage, experience and
+    logistics instead — a row pruned here has no title-shaped reason to be
+    pruned there. That formula renormalises over the components it can measure,
+    so a pruned row still scores rather than scoring zero; it scores on less
+    evidence, and a comparison run across the two formulas should embed
+    everything first (``scripts/embed_backlog.py``).
+
+    **The residual risk, in one sentence:** a description more on-profile than
+    the best of those already seen. It is not zero, it is measured, and its
+    consequence is one row missing from the top fifty rather than a breakage.
+    The warm-up is what keeps it small: with none, the walk stopped after
+    fifteen descriptions on a ceiling estimated from fifteen rows and returned
+    the wrong top ten.
+    """
+
+    #: The profile's own vector, to score each fresh description against.
+    profile_vector: Sequence[float]
+    #: Rows to embed before the rule may stop anything at all.
+    warmup: int
+    #: How deep the ranking has to be exactly right.
+    protect: int
+    #: Best semantic similarity seen this run. The ceiling in the bound.
+    s_max: float = 0.0
+    #: Full scores computed this run, largest first, truncated to ``protect``.
+    best: list[float] = field(default_factory=list)
+
+    def record(self, title: float | None, vector: Sequence[float]) -> None:
+        """Fold one freshly computed vector into the bound."""
+        semantic = _cosine(vector, self.profile_vector)
+        self.s_max = max(self.s_max, semantic)
+        if title is None:
+            # No title vector, so no score for this row and nothing to add to
+            # the ranking it is not in. The ceiling still learns from it.
+            return
+        score = 100 * (_TITLE_W * title + _SEMANTIC_W * semantic)
+        self.best.append(score)
+        self.best.sort(reverse=True)
+        del self.best[self.protect :]
+
+    def out_of_reach(self, title: float | None, embedded: int) -> bool:
+        """Whether this row, and therefore every row behind it, can be skipped."""
+        if embedded < self.warmup or len(self.best) < self.protect:
+            return False
+        if title is None:
+            # Unranked rows sort last and there is nothing to bound them with,
+            # so the walk stops here rather than guessing about them. The title
+            # pass costs 0.32 s a row and will have given them one by next run.
+            return True
+        ceiling = 100 * (_TITLE_W * title + _SEMANTIC_W * self.s_max)
+        return ceiling < self.best[-1]
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +207,11 @@ class EmbeddingOutcome:
     #: question is ``count_never_embedded``, which is what ``stopped`` uses to
     #: decide between a drained run and a starved one.
     backlog: int = 0
+    #: Rows the reach rule declined to embed because no score they could
+    #: reach would enter the protected top. Deliberate, and therefore
+    #: reported separately from :attr:`backlog`, which is a ceiling on
+    #: work outstanding and does not know the difference.
+    declined: int = 0
     #: Why the loop ended.
     stopped: StopReason = "drained"
 
@@ -122,6 +223,10 @@ class _Pending:
     id: UUID
     text: str
     digest: str
+    #: How near this row's title is to the profile's headline, when the
+    #: selection was asked to rank. ``None`` when it was not, and when the row
+    #: has no title vector to measure.
+    title_similarity: float | None = None
 
 
 @dataclass(slots=True)
@@ -155,10 +260,32 @@ async def embed_pending(
     microseconds and a cold one costs seconds, so a count says nothing about the
     time and a deadline says nothing about how much got done.
 
-    Returns when the backlog is empty, when a budget is spent, or when the
-    selection stops offering rows this call has not already examined. Every one
-    of those endings pays for one count query so the outcome can say what is
-    actually left rather than what was left of the last window.
+    Returns when the backlog is empty, when a budget is spent, when the
+    selection stops offering rows this call has not already examined, or when no
+    row left could change the ranking anybody reads. Every one of those endings
+    pays for one count query so the outcome can say what is actually left rather
+    than what was left of the last window.
+
+    **It no longer tries to embed the whole corpus, and that is the point.**
+    Measured on the owner's machine, 25 Sep 2026: a description costs 8.55 s and
+    a title 0.32 s, so 3448 outstanding descriptions are 8.2 hours while every
+    outstanding title is sixteen minutes. Of those descriptions, the overwhelming
+    majority are spent on postings that cannot reach the queue at all: a row with
+    no description scores at most ``100 * title_w * max(t)``, about 63, and the
+    queue's gate is ``agent_queue_min_score`` at 78.
+
+    So the rows are walked nearest-title-first and the walk stops when the best
+    score anything remaining could still reach falls below the K-th best already
+    computed — ``_Reach``, which carries the argument and the residual risk.
+    Measured against computing every description, this reproduces the top fifty
+    exactly while embedding about 3% of them.
+
+    The ranking needs the active profile's headline vector. Without one — no
+    profile, no headline, or the vector not computed yet — there is nothing to
+    rank by, so the pass falls back to what it did before: every outstanding row,
+    un-embedded ones first, until a budget stops it. Said in the log rather than
+    inferred, because "it embedded everything" and "it embedded what mattered"
+    are the same outcome shape and different amounts of money.
     """
     vacancies = VacancyRepository(session)
     max_vectors = settings.embedding_max_per_run if limit is None else limit
@@ -173,8 +300,31 @@ async def embed_pending(
     # would re-examine it forever.
     examined: set[UUID] = set()
 
+    profile = await _ranking_profile(session)
+    reach = (
+        None
+        if profile is None
+        else _Reach(
+            profile_vector=profile[1],
+            warmup=settings.embedding_warmup_rows,
+            protect=settings.embedding_protect_top,
+        )
+    )
+    near = None if profile is None else profile[0]
+    logger.info(
+        "pipeline.embedding.plan",
+        ranked=reach is not None,
+        warmup=None if reach is None else reach.warmup,
+        protect_top=None if reach is None else reach.protect,
+        detail=(
+            "walking nearest-title-first and stopping when nothing left can reach the top"
+            if reach is not None
+            else "no headline vector to rank by; embedding everything, un-embedded first"
+        ),
+    )
+
     while True:
-        window = await vacancies.needs_embedding(limit=SELECT_WINDOW)
+        window = await vacancies.needs_embedding(limit=SELECT_WINDOW, near=near)
         if not window:
             return await _finish(vacancies, progress, "drained")
         fresh = [row for row in window if row.id not in examined]
@@ -189,6 +339,17 @@ async def embed_pending(
         for batch in _batches(pending, batch_size):
             if progress.embedded >= max_vectors or clock() >= deadline:
                 return await _finish(vacancies, progress, "budget")
+            # Tested on the batch's FIRST row, which is its best: the window is
+            # ordered by title distance, so if the best row left cannot reach the
+            # protected top, none behind it can either.
+            if reach is not None and reach.out_of_reach(
+                batch[0].title_similarity, progress.embedded
+            ):
+                # Counted, not subtracted: rows with no vector at all that this
+                # pass is leaving on purpose. A difference of two totals would
+                # have folded in the re-crawl churn, which nobody declined.
+                declined = await vacancies.count_never_embedded()
+                return await _finish(vacancies, progress, "beyond_reach", declined=declined)
             try:
                 # One call per batch, not one per run. The provider still sees
                 # batches of exactly ``embedding_batch_size``, so nothing about
@@ -204,6 +365,9 @@ async def embed_pending(
             # strict=True because encode_texts promises index alignment, and a
             # silent length mismatch here would attach vectors to the wrong
             # postings.
+            if reach is not None:
+                for item, vector in zip(batch, vectors, strict=True):
+                    reach.record(item.title_similarity, vector)
             progress.embedded += await vacancies.set_embeddings(
                 [
                     EmbeddedVacancy(id=item.id, vector=vector, text_hash=item.digest)
@@ -249,8 +413,15 @@ async def embed_pending_titles(
     selection hashes.
     """
     vacancies = VacancyRepository(session)
-    max_vectors = settings.embedding_max_per_run if limit is None else limit
-    seconds = settings.embedding_time_budget_seconds if time_budget is None else time_budget
+    # Titles get their own budget, not the description pass's. Measured 25 Sep
+    # 2026 on real corpus text: 0.32 s a title against 8.55 s a description, so
+    # sharing one budget means the expensive half spends it and titles never
+    # finish — one live run left 2934 titles outstanding, which is sixteen
+    # minutes of work. And titles are the prerequisite: the description pass
+    # ranks by them, so an unfinished title pass makes the cheap half of the
+    # whole design unavailable.
+    max_vectors = settings.embedding_titles_max_per_run if limit is None else limit
+    seconds = settings.embedding_titles_time_budget_seconds if time_budget is None else time_budget
     deadline = clock() + seconds
     progress = _Progress()
 
@@ -296,6 +467,35 @@ async def _finish_titles(
     )
 
 
+async def _ranking_profile(session: AsyncSession) -> tuple[UUID, Sequence[float]] | None:
+    """The active profile's id and vector, when it has both halves of the formula.
+
+    Both are needed and for different things: the id so the selection can rank
+    rows by title distance in SQL, and the vector so each fresh description can
+    be scored here without a round trip. A profile missing either cannot support
+    the reach rule, and this returns ``None`` rather than half of one — the pass
+    then embeds everything, which is what it did before and is never wrong, only
+    expensive.
+
+    ``headline_embedding`` is filled by ``matching.profile_vectors``, which the
+    scoring step runs before it scores. So the first pass after a new resume is
+    unranked and the next one is ranked, without anything here having to order
+    the two steps.
+    """
+    row = (
+        await session.execute(
+            select(CandidateProfile.id, CandidateProfile.embedding).where(
+                CandidateProfile.is_active,
+                CandidateProfile.embedding.is_not(None),
+                CandidateProfile.headline_embedding.is_not(None),
+            )
+        )
+    ).first()
+    if row is None or row.embedding is None:
+        return None
+    return row.id, row.embedding
+
+
 def _changed(candidates: Sequence[EmbeddingCandidate], progress: _Progress) -> list[_Pending]:
     """Split a window into the rows whose text actually moved, counting the rest."""
     pending: list[_Pending] = []
@@ -311,7 +511,14 @@ def _changed(candidates: Sequence[EmbeddingCandidate], progress: _Progress) -> l
             # Seen again and rewritten by the upsert, but the words are the same.
             progress.unchanged += 1
             continue
-        pending.append(_Pending(id=candidate.id, text=text, digest=digest))
+        pending.append(
+            _Pending(
+                id=candidate.id,
+                text=text,
+                digest=digest,
+                title_similarity=candidate.title_similarity,
+            )
+        )
     return pending
 
 
@@ -372,6 +579,13 @@ async def _exhausted(
     worth investigating rather than acting on — it means something is wrong with
     an assumption in this file, not merely that the backlog is deep.
 
+    A run can also end before this function is consulted at all: the reach rule
+    returns ``beyond_reach`` from inside the batch loop when no unexamined row
+    could still enter the top K, so the rows it left are counted as ``declined``
+    rather than ``backlog``. This function never sees that ending, and the
+    distinction it draws below is between work that is stuck and work that is
+    finished — not between work that is stuck and work that was refused.
+
     **What ``drained`` does not mean, and this is the known hole.** It means
     nothing *without a vector* is stuck. It does not mean nothing is stuck. A row
     whose description genuinely moved is only distinguishable by hashing its
@@ -422,6 +636,7 @@ async def _finish(
     reason: StopReason,
     *,
     skipped_reason: str | None = None,
+    declined: int = 0,
 ) -> EmbeddingOutcome:
     """End the run, asking the database how much of the backlog is left."""
     return _stop(
@@ -429,6 +644,7 @@ async def _finish(
         reason,
         backlog=await _outstanding(vacancies, progress),
         skipped_reason=skipped_reason,
+        declined=declined,
     )
 
 
@@ -438,6 +654,7 @@ def _stop(
     *,
     backlog: int,
     skipped_reason: str | None = None,
+    declined: int = 0,
 ) -> EmbeddingOutcome:
     """Freeze the running totals into the outcome the report reads."""
     logger.info(
@@ -448,12 +665,17 @@ def _stop(
         embedded=progress.embedded,
         batches=progress.batches,
         backlog=backlog,
+        # Separate from ``backlog`` on purpose: one is work outstanding and the
+        # other is work refused. An operator reading a five-figure backlog needs
+        # to know which of the two it is before deciding anything.
+        declined=declined,
     )
     return EmbeddingOutcome(
         considered=progress.considered,
         unchanged=progress.unchanged,
         embedded=progress.embedded,
         skipped_reason=skipped_reason,
+        declined=declined,
         batches=progress.batches,
         backlog=backlog,
         stopped=reason,

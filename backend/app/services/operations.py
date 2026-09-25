@@ -332,6 +332,20 @@ async def _embed(progress: Progress) -> list[str]:
     selection does not return. Passes repeat only while the budget is what
     stopped them and a pass still writes something.
     """
+    # Titles first: the description pass ranks rows by title distance to the
+    # profile's headline and stops once nothing left could enter the top, so it
+    # has nothing to rank by until these exist. They are also the cheap half —
+    # 0.32 s a title against 8.55 s a description.
+    titles_written = 0
+    last_titles: EmbeddingOutcome | None = None
+    for _ in range(MAX_EMBED_PASSES):
+        async with session_factory() as session:
+            last_titles = await embed_pending_titles(session)
+        titles_written += last_titles.embedded
+        progress.note = f"названия: посчитано {titles_written}"
+        if last_titles.stopped != "budget" or last_titles.embedded == 0:
+            break
+
     written = 0
     last: EmbeddingOutcome | None = None
     for _ in range(MAX_EMBED_PASSES):
@@ -347,16 +361,6 @@ async def _embed(progress: Progress) -> list[str]:
         progress.total = written + last.backlog if last.stopped == "budget" else written
         progress.note = f"описания: посчитано {written}"
         if last.stopped != "budget" or last.embedded == 0:
-            break
-
-    titles_written = 0
-    last_titles: EmbeddingOutcome | None = None
-    for _ in range(MAX_EMBED_PASSES):
-        async with session_factory() as session:
-            last_titles = await embed_pending_titles(session)
-        titles_written += last_titles.embedded
-        progress.note = f"названия: посчитано {titles_written}"
-        if last_titles.stopped != "budget" or last_titles.embedded == 0:
             break
 
     return [

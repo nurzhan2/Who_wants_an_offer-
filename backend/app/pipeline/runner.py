@@ -321,9 +321,15 @@ async def run_pipeline(
     report.sources.extend(outcomes)
 
     async with sessions() as session:
-        report.embedding = await embed_pending(session)
-        await session.commit()
+        # Titles first, and the order is load-bearing rather than tidy: the
+        # description pass ranks rows by title distance to the profile's headline
+        # and stops when nothing left could enter the top, so with no title
+        # vectors it has nothing to rank by and falls back to embedding
+        # everything. Titles are also the cheap half, sixteen minutes against
+        # eight hours, so they are what makes the expensive half selective.
         report.title_embedding = await embed_pending_titles(session)
+        await session.commit()
+        report.embedding = await embed_pending(session)
         await session.commit()
 
     report.duration_seconds = asyncio.get_running_loop().time() - started
