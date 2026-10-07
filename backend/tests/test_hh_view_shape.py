@@ -52,3 +52,45 @@ def test_a_vacancy_full_without_a_posting_is_not_guessed_at() -> None:
 def test_an_old_spelling_present_is_not_overwritten_by_the_new_one() -> None:
     inner = dict(INNER, publicationDate="2020-01-01T00:00:00+00:00")
     assert _vacancy_view(nested(inner))["publicationDate"] == "2020-01-01T00:00:00+00:00"
+
+
+# The status block lost ``active`` in the same move, and ``HHStatus.active``
+# defaults to False. The tests above passed while every posting still failed
+# ``is_live`` — validating is not the same as being read correctly. These pin
+# the meaning, on the two status blocks measured live on 7 Oct 2026.
+
+LIVE_STATUS = {
+    "archived": False,
+    "disabled": False,
+    "hiddenInArchive": False,
+    "premoderationStatus": "APPROVED",
+    "approved": True,
+    "moderatePriorityScore": 2,
+}
+ARCHIVED_STATUS = dict(LIVE_STATUS, archived=True, moderatePriorityScore=0)
+
+
+def live(status: dict[str, object]) -> bool:
+    view = HHVacancyView.model_validate(_vacancy_view(nested(dict(INNER, status=status))))
+    assert view.status is not None
+    return view.status.is_live
+
+
+def test_an_approved_posting_in_the_new_shape_is_live() -> None:
+    assert live(LIVE_STATUS) is True
+
+
+def test_an_archived_posting_in_the_new_shape_is_not_live() -> None:
+    assert live(ARCHIVED_STATUS) is False
+
+
+def test_a_posting_not_yet_approved_is_not_live() -> None:
+    assert live(dict(LIVE_STATUS, approved=False, premoderationStatus="PENDING")) is False
+
+
+def test_a_posting_hidden_in_the_archive_is_not_live() -> None:
+    assert live(dict(LIVE_STATUS, hiddenInArchive=True)) is False
+
+
+def test_a_status_that_still_carries_active_is_read_as_it_says() -> None:
+    assert live(dict(LIVE_STATUS, active=False)) is False

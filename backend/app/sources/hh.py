@@ -3336,6 +3336,19 @@ def _vacancy_view(state: dict[str, Any]) -> Any:
     for old, new in _RENAMED_IN_FULL:
         if old not in view and new in view:
             view[old] = view[new]
+    # The status block lost ``active`` in the same move. Measured on both pages
+    # above, it now reads ``archived, disabled, hiddenInArchive,
+    # premoderationStatus, approved, moderatePriorityScore``. ``HHStatus.active``
+    # defaults to False, so without this every posting failed ``is_live`` and was
+    # dropped at debug level: the crawl fetched every page and stored none, with
+    # nothing above debug to say so. Published now means approved and not hidden;
+    # archived and disabled still refuse on their own, exactly as before.
+    status = view.get("status")
+    if isinstance(status, dict) and "active" not in status:
+        view["status"] = {
+            **status,
+            "active": status.get("approved") is True and status.get("hiddenInArchive") is not True,
+        }
     return view
 
 
