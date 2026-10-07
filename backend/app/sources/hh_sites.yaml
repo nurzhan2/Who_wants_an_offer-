@@ -106,10 +106,11 @@ crawl:
 night:
   # Eight hours. About 5200 vacancies at the measured 655 pages an hour —
   # roughly 40% of what Almaty has left, so the city takes two or three nights.
-  minutes: 480
-  # Headroom over what eight hours can reach, so time is the thing that stops
-  # the run and the page count never silently becomes the ceiling.
-  pages: 7500
+  # Raised 7 Oct 2026 to a full day: the owner wants the corpus in the tens of
+  # thousands, the rate cannot rise, so length is the only lever left.
+  minutes: 1440
+  # Headroom over what a day can reach (~15 700 pages), so time stops the run.
+  pages: 17000
   # Wait out one check for robots and come back at half the pace, once per run.
   # Without it a check at the second hour costs the remaining six.
   pause_minutes: 45
@@ -117,4 +118,10 @@ night:
   #   cities:
   #     - {host: almaty.hh.kz, weight: 3}
   #     - {host: astana.hh.kz, weight: 1}
-  cities: []
+  # All four, 7 Oct 2026: Almaty alone holds ~14 000 and the target is several
+  # times that. Weights follow each city's share of the corpus, roughly.
+  cities:
+    - {host: almaty.hh.kz, weight: 4}
+    - {host: astana.hh.kz, weight: 3}
+    - {host: shymkent.hh.kz, weight: 1}
+    - {host: karaganda.hh.kz, weight: 1}
