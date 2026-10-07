@@ -158,6 +158,17 @@ def read_status(state: dict[str, Any]) -> VacancyStatus:
     view = state.get("vacancyView")
     if not isinstance(view, dict):
         return VacancyStatus(archived=False, closed_for_applicants=False)
+    # Measured 7 Oct 2026: hh moved the posting two levels down, to
+    # ``vacancyView.vacancyFull.vacancy``, keeping ``status`` and
+    # ``closedForApplicants`` under their names. Read there first. Without
+    # this every archived vacancy reads as open, because an absent flag is
+    # deliberately "not archived" (see above) — a silent failure, not a stop.
+    # The backend connector unwraps the same way in its own code; this package
+    # does not import from it.
+    full = view.get("vacancyFull")
+    inner = full.get("vacancy") if isinstance(full, dict) else None
+    if isinstance(inner, dict):
+        view = inner
     status = view.get("status")
     nested = status.get("archived") if isinstance(status, dict) else None
     archived = nested if isinstance(nested, bool) else view.get("archived")

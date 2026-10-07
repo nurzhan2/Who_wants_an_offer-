@@ -179,7 +179,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Final
 from urllib.parse import urlsplit
 
 import yaml  # type: ignore[import-untyped]
@@ -2441,7 +2441,7 @@ class HHSource(BaseSource):
                 source_slug=self.slug,
             ) from exc
 
-        raw_view = state.get("vacancyView")
+        raw_view = _vacancy_view(state)
         if not raw_view:
             logger.info("sources.hh.empty_view", url=entry.url, error_code=state.get("errorCode"))
             return None
@@ -3299,6 +3299,44 @@ def _remote_from(formats: Sequence[str]) -> RemoteType:
     if RemoteType.HYBRID in ranked:
         return RemoteType.HYBRID
     return RemoteType.NO
+
+
+#: Where hh's page now keeps the posting, under ``vacancyView``. Measured on
+#: 7 Oct 2026 (vacancy 137625078): the fields this connector reads moved two
+#: levels down, ``vacancyView -> vacancyFull -> vacancy``, under their old names,
+#: with two renamed and ``translations`` left one level up. Before that date they
+#: sat directly in ``vacancyView``, and every fixture in this repository has that
+#: shape — so both are read, the old one unchanged.
+_RENAMED_IN_FULL: Final[tuple[tuple[str, str], ...]] = (
+    ("publicationDate", "publicationTimeIso"),
+    ("validThroughTime", "validToTimeIso"),
+)
+
+
+def _vacancy_view(state: dict[str, Any]) -> Any:
+    """``state["vacancyView"]`` in the shape :class:`HHVacancyView` validates.
+
+    Returns the value untouched when it is not the nested form — empty, absent,
+    or the flat shape hh served before 7 Oct 2026 — so the empty-page and
+    unfamiliar-shape paths in ``_state`` keep doing exactly what they did. Only
+    a ``vacancyFull.vacancy`` that is itself a mapping is unwrapped: anything
+    less is a shape nobody measured, and the model should refuse it loudly
+    rather than this function guess at it.
+    """
+    raw = state.get("vacancyView")
+    if not isinstance(raw, dict):
+        return raw
+    full = raw.get("vacancyFull")
+    inner = full.get("vacancy") if isinstance(full, dict) else None
+    if not isinstance(inner, dict):
+        return raw
+    view = dict(inner)
+    if "translations" not in view and "translations" in raw:
+        view["translations"] = raw["translations"]
+    for old, new in _RENAMED_IN_FULL:
+        if old not in view and new in view:
+            view[old] = view[new]
+    return view
 
 
 def _labels(
