@@ -309,6 +309,12 @@ MAX_COMPANY = 200
 #: contains a few of these.
 GONE_STATUSES: frozenset[int] = frozenset({404, 410})
 
+#: A posting closed to visitors answers 403 while its neighbours answer 200
+#: (measured 8 Oct 2026). Skipped one at a time; this many in a row is no longer
+#: one posting but the address, and the walk stops. See ``HHSource._fetch``.
+FORBIDDEN_STATUS: Final[int] = 403
+FORBIDDEN_IN_A_ROW_STOPS: Final[int] = 5
+
 #: Unreadable pages one run tolerates before it gives up and says so. One
 #: page can be odd — a truncated response, a posting mid-edit — and wedging
 #: the crawl on it forever would be worse than skipping it, because the walk
@@ -1550,6 +1556,8 @@ class HHSource(BaseSource):
         self._index: dict[str, str] = {}
         #: The ``crawl:`` block, read from the same file as the sites.
         self._crawl: CrawlSettings | None = None
+        #: 403s since the last page that answered; see ``FORBIDDEN_IN_A_ROW_STOPS``.
+        self._forbidden_in_a_row = 0
         #: This run's summary as it accumulates. ``None`` until a walk starts,
         #: because a connector that has not run has nothing to say about a run.
         self._run: _RunLog | None = None
@@ -2402,7 +2410,24 @@ class HHSource(BaseSource):
             if status_code in GONE_STATUSES:
                 logger.debug("sources.hh.vacancy_gone", url=entry.url, status=status_code)
                 return None
+            if status_code == FORBIDDEN_STATUS:
+                # Measured 8 Oct 2026: vacancy 137721276 answered 403 on every
+                # attempt while its neighbour 137625078 answered 200 from the
+                # same address a second later — one posting closed to strangers,
+                # not this crawler shut out. Raising stopped the whole run after
+                # 28 minutes and 161 postings. A posting like that is skipped.
+                # A ban looks different: every page 403. So a run of them still
+                # stops the walk, and stops it loudly.
+                self._forbidden_in_a_row += 1
+                if self._forbidden_in_a_row < FORBIDDEN_IN_A_ROW_STOPS:
+                    logger.warning(
+                        "sources.hh.vacancy_forbidden",
+                        url=entry.url,
+                        in_a_row=self._forbidden_in_a_row,
+                    )
+                    return None
             raise
+        self._forbidden_in_a_row = 0
 
         parsed = self._state(entry, body)
         if parsed is None:
