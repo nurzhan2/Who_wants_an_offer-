@@ -155,20 +155,20 @@ async def titles(args: argparse.Namespace) -> EmbeddingOutcome:
     """One pass over title vectors, in a session of its own.
 
     Titles are embedded apart from descriptions since ``0015_title_embedding``
-    and are matching's main signal. They run after the descriptions, and cost a
-    fraction of them: a title is a few words, a description thousands.
+    and are matching's main signal. They run before the descriptions, as at the
+    runner's, the autopilot's and the operations' call sites: the description
+    pass walks nearest-title-first, so a posting with no title vector yet is
+    ranked last and may never be reached. A title costs a fraction of a
+    description — a few words against thousands.
     """
     async with session_factory() as session:
         return await embed_pending_titles(session, limit=args.max, time_budget=args.seconds)
 
 
 async def main() -> int:
-    """Drain, or try to, then do the same for titles."""
+    """Titles first, then drain the descriptions, or try to."""
     args = parse_args()
     configure_logging()
-    code = await drain(args)
-    if code != 0:
-        return code
     outcome = await titles(args)
     print()
     print(RULE)
@@ -179,7 +179,9 @@ async def main() -> int:
     print(f"  остановлено      {STOPPED.get(outcome.stopped, outcome.stopped)}")
     if outcome.skipped_reason:
         print(f"  причина          {outcome.skipped_reason}")
-    return 1 if outcome.stopped == "unavailable" else 0
+    if outcome.stopped == "unavailable":
+        return 1
+    return await drain(args)
 
 
 if __name__ == "__main__":
